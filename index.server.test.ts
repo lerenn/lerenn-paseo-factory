@@ -128,7 +128,7 @@ describe("inbox_answer", () => {
   });
 });
 
-async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 5000): Promise<T> {
+async function until<T = any>(read: () => Promise<T>, ok: (v: any) => boolean, ms = 5000): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await read();
@@ -217,7 +217,7 @@ describe("extensions", () => {
       expect(first).toEqual({ runId: expect.any(String) });
       const again = (await (await post()).json()) as { runId: string };
       expect(again.runId).toBe(first.runId);
-      const { runs } = await until(() => rpc["blueprints.list"]({ includeFinished: true }, ctx), (r) => r.runs[0]?.status === "done");
+      const { runs } = (await until(() => rpc["blueprints.list"]({ includeFinished: true }, ctx), (r) => r.runs[0]?.status === "done")) as any;
       expect(runs[0]).toMatchObject({ id: first.runId, status: "done", requestedBy: "events" });
       expect(seen).toEqual([{ name: "Louis" }]);
       const listed = (await (await fetch(`${endpoint.url}/blueprints`, { headers: { authorization: `Bearer ${token}` } })).json()) as any;
@@ -307,7 +307,7 @@ describe("remote extensions (another plugin's process)", () => {
       expect(runs[0]).toMatchObject({ id: runId, status: "running" });
       const done = await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok", summary: "merged" }) });
       expect(done.status).toBe(200);
-      runs = (await until(() => f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx), (r) => r.runs[0]?.status === "done")).runs;
+      runs = ((await until(() => f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx), (r) => r.runs[0]?.status === "done")) as any).runs;
       expect(runs[0]).toMatchObject({ status: "done" });
       expect((await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok" }) })).status).toBe(404);
     } finally {

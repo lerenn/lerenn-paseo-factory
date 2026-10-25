@@ -51,18 +51,27 @@ export interface RemoteHandle {
   remote: true;
 }
 
+function timeoutSignal(ms: number): { signal: never; done(): void } {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  return { signal: c.signal as never, done: () => clearTimeout(t) };
+}
+
 async function post(h: { callback: { url: string; token: string }; failures: number }, path: string, body: unknown): Promise<any> {
   let res: Response;
+  const timeout = timeoutSignal(CALL_TIMEOUT_MS);
   try {
     res = await fetch(new URL(path, h.callback.url).toString(), {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${h.callback.token}` },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS) as never,
+      signal: timeout.signal,
     });
   } catch (error) {
     h.failures += 1;
     throw new Error(`extension unreachable: ${(error as Error).message}`);
+  } finally {
+    timeout.done();
   }
   h.failures = 0;
   const text = await res.text();
@@ -135,12 +144,15 @@ export function buildRemote(raw: RemoteRegistration, pending: PendingOutcomes): 
 
 /** A liveness probe: any HTTP answer on GET <callback>/health counts as alive. */
 export async function probe(h: { callback: { url: string; token: string }; failures: number }): Promise<boolean> {
+  const timeout = timeoutSignal(5000);
   try {
-    await fetch(new URL("/health", h.callback.url).toString(), { headers: { authorization: `Bearer ${h.callback.token}` }, signal: AbortSignal.timeout(5000) as never });
+    await fetch(new URL("/health", h.callback.url).toString(), { headers: { authorization: `Bearer ${h.callback.token}` }, signal: timeout.signal });
     h.failures = 0;
     return true;
   } catch {
     h.failures += 1;
     return false;
+  } finally {
+    timeout.done();
   }
 }
