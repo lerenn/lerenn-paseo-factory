@@ -354,3 +354,45 @@ describe("spend", () => {
     expect(report.byDay).toHaveLength(1);
   });
 });
+
+describe("activity, run diffs and transcripts", () => {
+  it("reports extension events through the endpoint into the feed, newest first", async () => {
+    const b = boot();
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
+    const post = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/event`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    expect((await post({ id: "release-trains", title: "x" }, "bad")).status).toBe(401);
+    expect((await post({ id: "release-trains" })).status).toBe(400);
+    expect((await post({ id: "release-trains", type: "deploy", title: "prd deploy of backend v1.2.3" })).status).toBe(200);
+    const feed = await b.rpc["factory.activity"]({ limit: 50 }, b.ctx);
+    expect(feed.items[0]).toMatchObject({ type: "deploy", title: "prd deploy of backend v1.2.3", link: { tab: "ext:release-trains" } });
+  });
+
+  it("summarises a run's PRs from GitHub, per PR, with errors kept per PR", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bp-"));
+    writeFileSync(path.join(dir, "one.toml"), `name = "one"\nversion = 1\n[[stage]]\nid = "x"\nkind = "greet"\n[stage.on]\nok = "done"\n`);
+    process.env.FACTORY_BLUEPRINTS_DIR = dir;
+    try {
+      const b = boot();
+      (globalThis as any)[Symbol.for("paseo.factory")].overrides.prDiff = async (url: string) => {
+        if (url.endsWith("/2")) throw new Error("gone");
+        return { files: 3, additions: 40, deletions: 5 };
+      };
+      (globalThis as any)[Symbol.for("paseo.factory")].registerExtension({ id: "g", version: "1", tools: [], stageKinds: [{ kind: "greet", run: async () => ({ verdict: "ok", data: { pr_urls: ["https://github.com/a/b/pull/1", "https://github.com/a/b/pull/2"] } }) }] });
+      await b.rpc["blueprints.list"]({ includeFinished: true }, b.ctx);
+      const { runs } = await until(async () => {
+        const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+        const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
+        await fetch(`${endpoint.url}/blueprints/start`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ blueprint: "one", vars: {}, requestedBy: "t", idempotencyKey: "k" }) });
+        return b.rpc["blueprints.list"]({ includeFinished: true }, b.ctx);
+      }, (r) => r.runs[0]?.status === "done");
+      const diff = await b.rpc["blueprints.diff"]({ runId: runs[0].id }, b.ctx);
+      expect(diff.prs).toEqual([
+        { url: "https://github.com/a/b/pull/1", filesUrl: "https://github.com/a/b/pull/1/files", files: 3, additions: 40, deletions: 5, error: null },
+        { url: "https://github.com/a/b/pull/2", filesUrl: "https://github.com/a/b/pull/2/files", files: null, additions: null, deletions: null, error: "gone" },
+      ]);
+    } finally {
+      delete process.env.FACTORY_BLUEPRINTS_DIR;
+    }
+  });
+});

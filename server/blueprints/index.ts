@@ -3,14 +3,14 @@ import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
 import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
-import { ghFacts } from "./github";
+import { ghDiff, ghFacts } from "./github";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { RunStore } from "./store";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
-import { abortRunRpc, listRunsRpc, retryRunRpc, spendRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc } from "../../shared/blueprints/rpc";
 import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
 
 /** What the Blueprints tab shows about a loaded blueprint. */
@@ -177,6 +177,7 @@ export function startBlueprints(host: FactoryHost) {
     settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish }),
   };
   const engine = new Engine(store, ports);
+  host.engines.blueprints = { engine, store };
 
   const removeTools = host.registerTools("blueprints", blueprintTools({ engine, catalog: async () => (await refresh()).blueprints }));
   host.setInstructions("blueprints", INSTRUCTIONS);
@@ -275,6 +276,24 @@ export function startBlueprints(host: FactoryHost) {
       errors: c.errors.map((e) => ({ file: path.basename(e.file), message: e.message })),
       settings: current,
     };
+  });
+  server.handle(runDiffRpc, async ({ runId }, ctx) => {
+    host.capture(ctx);
+    const run = store.get(runId);
+    const urls = new Set<string>();
+    for (const st of Object.values(run?.stages ?? {})) if (Array.isArray(st.data.pr_urls)) for (const u of st.data.pr_urls) if (typeof u === "string") urls.add(u);
+    const diff = host.overrides.prDiff ?? ghDiff;
+    const prs = await Promise.all(
+      [...urls].map(async (url) => {
+        try {
+          const d = await diff(url);
+          return { url, filesUrl: `${url}/files`, files: d.files, additions: d.additions, deletions: d.deletions, error: null };
+        } catch (error) {
+          return { url, filesUrl: `${url}/files`, files: null, additions: null, deletions: null, error: (error as Error).message };
+        }
+      }),
+    );
+    return { prs };
   });
   server.handle(spendRpc, ({ days }, ctx) => {
     host.capture(ctx);

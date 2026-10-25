@@ -65,6 +65,8 @@ export class FactoryHost {
   private readonly extensions = new Map<string, Extension>();
   private readonly remotes = new Map<string, { handle: RemoteHandle; remove: () => void }>();
   private readonly pending = new PendingOutcomes();
+  /** Events extensions report (merges, deploys, ...): a ring shown in the Activity tab. */
+  readonly extensionEvents: import("./activity").ExtensionEvent[] = [];
   private readonly labelCache = new Map<string, { at: number; labels: Record<string, string> }>();
   private http: Server | null = null;
   private current: FactorySettings | null = null;
@@ -139,7 +141,10 @@ export class FactoryHost {
   }
 
   /** The other modules' engines, for the Blueprints module and extensions. */
-  engines: { inbox?: any; leases?: any; warden?: any } = {};
+  engines: { inbox?: any; leases?: any; warden?: any; blueprints?: any } = {};
+
+  /** Test seams: replace outside calls (GitHub). */
+  overrides: { prDiff?: (url: string) => Promise<{ files: number; additions: number; deletions: number }> } = {};
 
   /** Call a tool of the Factory or of an extension as the Factory itself. */
   toolRunner(name: string): ((args: Record<string, unknown>) => Promise<unknown>) | null {
@@ -362,7 +367,7 @@ export class FactoryHost {
   private registerGlobal(): void {
     const g = globalThis as Record<symbol, unknown>;
     const key = Symbol.for("paseo.factory");
-    g[key] = { registerExtension: (reg: ExtensionRegistration) => this.registerExtension(reg), services: () => this.services, checkRemotes: () => this.checkRemotes() };
+    g[key] = { registerExtension: (reg: ExtensionRegistration) => this.registerExtension(reg), services: () => this.services, checkRemotes: () => this.checkRemotes(), overrides: this.overrides };
     registerWithHost(g, this);
   }
 
@@ -422,7 +427,7 @@ export class FactoryHost {
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return { status: 403, body: { error: "forbidden host" } };
     const pathname = (req.url ?? "").split("?")[0];
 
-    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister") {
+    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event") {
       const given = Buffer.from(this.bearer(req) ?? "");
       const want = Buffer.from(this.endpointToken);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
@@ -442,6 +447,12 @@ export class FactoryHost {
           return { status: 400, body: { error: (error as Error).message } };
         }
         return { status: 200, body: { ok: true, id: parsed.data.id } };
+      }
+      if (pathname === "/extensions/event") {
+        if (typeof input?.id !== "string" || typeof input?.title !== "string") return { status: 400, body: { error: "id and title are required" } };
+        this.extensionEvents.push({ at: Date.now(), extension: input.id, type: String(input.type ?? "extension"), title: input.title.slice(0, 300), detail: typeof input.detail === "string" ? input.detail.slice(0, 1000) : null, link: input.link ?? null });
+        if (this.extensionEvents.length > 500) this.extensionEvents.splice(0, this.extensionEvents.length - 500);
+        return { status: 200, body: { ok: true } };
       }
       if (pathname === "/extensions/unregister") {
         const known = typeof input?.id === "string" && this.remotes.get(input.id);

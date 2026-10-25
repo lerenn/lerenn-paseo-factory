@@ -78,3 +78,16 @@ export async function ghFacts(url: string): Promise<PrFacts> {
     review: j.reviewDecision ?? "",
   };
 }
+
+export interface DiffSummary {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+/** Files changed and lines added or removed, from GitHub. */
+export async function ghDiff(url: string): Promise<DiffSummary> {
+  if (!PR_URL.test(url)) throw new Error(`not a GitHub pull request URL: ${url}`);
+  const j = JSON.parse(await run("gh", ["pr", "view", url, "--json", "changedFiles,additions,deletions"]));
+  return { files: j.changedFiles ?? 0, additions: j.additions ?? 0, deletions: j.deletions ?? 0 };
+}

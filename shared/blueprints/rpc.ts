@@ -81,3 +81,12 @@ export const spendRpc = defineRpc({
     byDay: z.array(z.object({ key: z.string(), ...totals })),
   }),
 });
+
+/** PRs of a run with their diff summary, read from GitHub. */
+export const runDiffRpc = defineRpc({
+  name: "blueprints.diff",
+  input: z.object({ runId: z.string() }),
+  output: z.object({
+    prs: z.array(z.object({ url: z.string(), filesUrl: z.string(), files: z.number().nullable(), additions: z.number().nullable(), deletions: z.number().nullable(), error: z.string().nullable() })),
+  }),
+});
