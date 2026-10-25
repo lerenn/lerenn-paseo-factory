@@ -2,7 +2,7 @@ import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { listRunsRpc } from "../shared/blueprints/rpc";
+import { listRunsRpc, spendRpc } from "../shared/blueprints/rpc";
 import { listItemsRpc } from "../shared/inbox/rpc";
 import { listLeasesRpc } from "../shared/leases/rpc";
 import { overviewRpc } from "../shared/rpc";
@@ -21,6 +21,7 @@ const ago = (now: number, at: number) => {
   const m = Math.max(0, Math.round((now - at) / 60_000));
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
 };
+const usd = (v: number) => `$${v.toFixed(2)}`;
 const inMin = (now: number, at: number) => `${Math.max(0, Math.round((at - now) / 60_000))}m`;
 
 export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "theme" | "layout"> & { go(tab: string): void }) {
@@ -32,6 +33,7 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
   const callWarden = useRpc(listTasksRpc);
   const callRoles = useRpc(listRolesRpc);
   const callAgents = useRpc(listRoleAgentsRpc);
+  const callSpend = useRpc(spendRpc);
   const factory = useQuery(soft("factory", () => callFactory({})));
   const runs = useQuery(soft("runs", () => callRuns({ includeFinished: true })));
   const inbox = useQuery(soft("inbox", () => callInbox({})));
@@ -39,6 +41,7 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
   const warden = useQuery(soft("warden", () => callWarden({})));
   const roles = useQuery(soft("roles", () => callRoles({})));
   const agents = useQuery(soft("agents", () => callAgents({})));
+  const spend = useQuery(soft("spend", () => callSpend({ days: 30 })));
   const on = (id: "blueprints" | "inbox" | "leases" | "warden" | "roles") => factory.data?.settings?.modules[id] ?? true;
   const now = runs.data?.now ?? inbox.data?.now ?? Date.now();
 
@@ -153,6 +156,19 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
                 {git.map((g) => line(`${g.label}: ${g.error ? `failed (${g.error})` : g.lastSync ? `synced ${ago(now, Date.parse(g.lastSync))}` : "not synced yet"}`, g.id, g.error ? c.statusDanger : undefined))}
               </>,
               git.some((g) => g.error) ? "warn" : "ok",
+            )
+          : null}
+        {on("blueprints") && spend.data
+          ? card(
+              "Spend (30 days)",
+              "blueprints",
+              usd(spend.data.total.costUsd),
+              <>
+                {spend.data.total.turns === 0 ? line("No factory agent usage recorded yet.") : null}
+                {spend.data.byDay.slice(0, 3).map((d) => line(`${d.key}: ${usd(d.costUsd)} · ${d.turns} turns`, `d${d.key}`))}
+                {spend.data.byRole.slice(0, 3).map((r) => line(`role ${r.key}: ${usd(r.costUsd)}`, `r${r.key}`))}
+                {spend.data.byRun.slice(0, 3).map((r) => line(`${r.blueprint ?? ""} ${r.key}: ${usd(r.costUsd)}`, `u${r.key}`))}
+              </>,
             )
           : null}
         {exts.length > 0

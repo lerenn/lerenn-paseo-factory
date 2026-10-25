@@ -5,11 +5,12 @@ import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
 import { ghFacts } from "./github";
 import { loadCatalog, type Catalog } from "./loader";
+import { aggregate, SpendStore } from "./spend";
 import { RunStore } from "./store";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
-import { abortRunRpc, listRunsRpc, retryRunRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, spendRpc, startRunRpc } from "../../shared/blueprints/rpc";
 import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
 
 /** What the Blueprints tab shows about a loaded blueprint. */
@@ -84,6 +85,7 @@ export function startBlueprints(host: FactoryHost) {
   }
   void refresh(true);
 
+  const spend = new SpendStore(process.env.BLUEPRINTS_SPEND ?? host.statePath("blueprints").replace(/blueprints\.json$/, "spend.json"));
   const store = new RunStore(process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints"));
 
   const inbox = () => {
@@ -206,9 +208,36 @@ export function startBlueprints(host: FactoryHost) {
     },
   };
 
+  /** Usage of a turn of an agent the Factory spawned (Paseo reports lastUsage per turn). */
+  async function recordSpend(agentId: string, turnId: string | null): Promise<void> {
+    try {
+      const labels = await host.labelsOf(agentId);
+      if (labels["paseo.factory"] !== "1") return;
+      const found = await agentRef(agentId).refresh();
+      const usage = found?.agent.lastUsage;
+      if (!usage) return;
+      spend.add({
+        agentId,
+        turnId: turnId ?? `t${Date.now()}`,
+        at: Date.now(),
+        role: labels["paseo.factory.role"] ?? null,
+        run: labels["paseo.factory.run"] ?? null,
+        blueprint: labels["paseo.factory.blueprint"] ?? null,
+        stage: labels["paseo.factory.stage"] ?? null,
+        inputTokens: usage.inputTokens ?? 0,
+        cachedInputTokens: usage.cachedInputTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+        costUsd: usage.totalCostUsd ?? 0,
+      });
+    } catch (error) {
+      console.error("blueprints: spend record failed", error);
+    }
+  }
+
   // ---- events ----
   const removers = [
-    host.on("blueprints", "agent.turn_ended", ({ agent, outcome }) => {
+    host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
+      void recordSpend(agent.id, turnId);
       void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];
@@ -246,6 +275,10 @@ export function startBlueprints(host: FactoryHost) {
       errors: c.errors.map((e) => ({ file: path.basename(e.file), message: e.message })),
       settings: current,
     };
+  });
+  server.handle(spendRpc, ({ days }, ctx) => {
+    host.capture(ctx);
+    return aggregate(spend.all(), Date.now() - days * 24 * 3600 * 1000);
   });
   server.handle(startRunRpc, async ({ blueprint, vars, at }, ctx) => {
     host.capture(ctx);

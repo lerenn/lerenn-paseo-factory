@@ -69,3 +69,15 @@ export const retryRunRpc = defineRpc({
   input: z.object({ runId: z.string(), stage: z.string().optional(), extraAttempts: z.number().int().min(0).max(20).default(1) }),
   output: z.object({ ok: z.boolean(), message: z.string().nullable() }),
 });
+
+const totals = { turns: z.number(), inputTokens: z.number(), cachedInputTokens: z.number(), outputTokens: z.number(), costUsd: z.number() };
+export const spendRpc = defineRpc({
+  name: "blueprints.spend",
+  input: z.object({ days: z.number().int().min(1).max(365).default(30) }),
+  output: z.object({
+    total: z.object(totals),
+    byRun: z.array(z.object({ key: z.string(), blueprint: z.string().nullable(), ...totals })),
+    byRole: z.array(z.object({ key: z.string(), ...totals })),
+    byDay: z.array(z.object({ key: z.string(), ...totals })),
+  }),
+});

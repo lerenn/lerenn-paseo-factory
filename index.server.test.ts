@@ -332,3 +332,25 @@ describe("remote extensions (another plugin's process)", () => {
     expect((await f.rpc["factory.overview"]({}, f.ctx)).extensions).toHaveLength(1);
   });
 });
+
+describe("spend", () => {
+  it("records the usage of a factory agent's turn once, and aggregates it per run, role and day", async () => {
+    const b = bootPlugin({}, {
+      agents: {
+        list: async () => ({ entries: [{ agent: { id: "w1", labels: { "paseo.factory": "1", "paseo.factory.run": "bp-1", "paseo.factory.blueprint": "ticket", "paseo.factory.role": "implementer", "paseo.factory.stage": "implement" } } }, { agent: { id: "other", labels: {} } }] }),
+        ref: () => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle", lastUsage: { inputTokens: 1000, outputTokens: 200, cachedInputTokens: 50, totalCostUsd: 0.42 } } }), timeline: { subscribe: () => () => {} } }),
+      },
+    });
+    cleanups.push(b.cleanup as () => void);
+    await b.rpc["factory.overview"]({}, b.ctx);
+    const turn = (id: string, turnId: string) => b.fire("agent.turn_ended", { agent: { id, workspaceId: null, parentAgentId: null, title: null }, turnId, outcome: { kind: "completed" }, timeline: [] });
+    await turn("w1", "t1");
+    await turn("w1", "t1"); // the same turn again
+    await turn("other", "t9"); // not a factory agent
+    const report = await until(() => b.rpc["blueprints.spend"]({ days: 30 }, b.ctx), (r) => r.total.turns >= 1);
+    expect(report.total).toMatchObject({ turns: 1, inputTokens: 1000, outputTokens: 200, costUsd: 0.42 });
+    expect(report.byRun[0]).toMatchObject({ key: "bp-1", blueprint: "ticket" });
+    expect(report.byRole[0].key).toBe("implementer");
+    expect(report.byDay).toHaveLength(1);
+  });
+});
