@@ -73,11 +73,13 @@ export class Engine {
 
   ask(input: AskInput): { item: Item; deduped: boolean } {
     const kind = input.kind ?? "question";
-    const options = input.options?.length ? input.options : kind === "approval" ? APPROVAL_OPTIONS : [];
+    const given = input.options?.length ? input.options : kind === "approval" ? APPROVAL_OPTIONS : [];
+    // The recommended choice goes first (stable otherwise).
+    const options = [...given.filter((o) => o.recommended), ...given.filter((o) => !o.recommended)];
     const ids = new Set(options.map((o) => o.id));
     if (ids.size !== options.length) throw new UsageError("Option ids must be unique.");
-    const allowFreeText = input.allowFreeText ?? options.length === 0;
-    if (options.length === 0 && !allowFreeText) throw new UsageError("A question without options must allow free text.");
+    // Every item ends with an open "Other" answer, whatever the options.
+    const allowFreeText = true;
 
     const expiry = input.expiresInMinutes ?? (this.settings()?.defaultExpiryMinutes || undefined);
     if (input.defaultAnswer !== undefined && !expiry) throw new UsageError("default_answer needs expires_in_minutes.");

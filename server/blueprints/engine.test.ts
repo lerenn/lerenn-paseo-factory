@@ -572,3 +572,87 @@ default = "backend"
     void parent;
   });
 });
+
+describe("Inbox escalations are multiple choice and act", () => {
+  async function stuck() {
+    const ctx = setup();
+    const run = await ctx.start();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    // PM judges once and the second exhaustion fails the run with an Inbox item
+    await ctx.engine.retry(run.id, { extraAttempts: 1 });
+    await ctx.settle();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    const item = [...ctx.items.entries()].find(([, i]) => /stuck at stage think/.test(i.question))!;
+    return { ctx, run, itemId: item[0] };
+  }
+
+  it("offers resume +1, resume +3, abort and leave; resume +3 continues the failed run", async () => {
+    const { ctx, run, itemId } = await stuck();
+    expect(ctx.engine.require(run.id).status).toBe("failed");
+    expect(ctx.engine.require(run.id).escalations?.[itemId]).toMatchObject({ stage: "think", kind: "stuck" });
+    await ctx.answer(itemId, "resume3");
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "running" });
+    expect(ctx.engine.require(run.id).stages.think.extra).toBe(4);
+  });
+
+  it("abort aborts, Other passes the text to the worker as a note and resumes", async () => {
+    const a = await stuck();
+    await a.ctx.answer(a.itemId, "abort");
+    expect(a.ctx.engine.require(a.run.id).status).toBe("aborted");
+    const b = await stuck();
+    await b.ctx.answer(b.itemId, null, "look at the other repo");
+    expect(b.ctx.engine.require(b.run.id).status).toBe("running");
+    expect(b.ctx.engine.require(b.run.id).stages.think.notes.join(" ")).toMatch(/look at the other repo/);
+  });
+
+  it("a setup failure offers Resume (after fixing) and Abort", async () => {
+    const ctx = setup();
+    let broken = true;
+    const spawn = ctx.ports.spawn;
+    ctx.ports.spawn = async (o) => {
+      if (broken) throw new Error("bad provider");
+      return spawn(o);
+    };
+    const run = await ctx.start();
+    const [itemId] = [...ctx.items.keys()];
+    broken = false;
+    await ctx.answer(itemId, "resume");
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "running" });
+    expect(ctx.spawned).toHaveLength(1);
+  });
+});
+
+describe("gate hold", () => {
+  const src = `
+version = 1
+name = "flow"
+[[stage]]
+id = "ask"
+kind = "gate"
+question = "Merge?"
+options = [{ id = "merged", label = "Merged / queued", recommended = true }, { id = "hold", label = "Hold" }]
+hold_minutes = 60
+[stage.on]
+merged = "done"
+`;
+  it("asks the same question again after the hold time", async () => {
+    const ctx = setup(src);
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.answer("item-1", "hold");
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "waiting" });
+    expect(ctx.items.size).toBe(1);
+    await ctx.engine.tick();
+    expect(ctx.items.size).toBe(1); // not yet
+    ctx.advance(61 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.items.size).toBe(2);
+    await ctx.answer("item-2", "merged");
+    expect(ctx.engine.require(run.id).status).toBe("done");
+  });
+});

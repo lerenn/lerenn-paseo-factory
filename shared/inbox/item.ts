@@ -3,7 +3,13 @@ import { z } from "zod";
 export const itemStatusSchema = z.enum(["pending", "answered", "expired", "withdrawn", "archived"]);
 export type ItemStatus = z.infer<typeof itemStatusSchema>;
 
-export const optionSchema = z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(200) });
+export const optionSchema = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(200),
+  description: z.string().max(500).optional(),
+  /** Shown first, like the recommended choice of a multiple-choice question. */
+  recommended: z.boolean().optional(),
+});
 export type InboxOption = z.infer<typeof optionSchema>;
 
 export const answerSchema = z.object({

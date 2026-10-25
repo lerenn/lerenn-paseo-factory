@@ -24,6 +24,8 @@ export interface StageState {
   startedAt: number | null;
   endedAt: number | null;
   lastNudgeAt: number | null;
+  /** A gate answered "hold" is asked again at this time. */
+  reopenAt?: number | null;
 }
 
 export interface HistoryEvent {
@@ -55,6 +57,8 @@ export interface Run {
   parent: { runId: string; stageId: string } | null;
   pm: { judged: Record<string, { at: number; decision: string }>; pending: { stage: string; reason: string } | null };
   history: HistoryEvent[];
+  /** Inbox items asking a person about a stuck or paused run: item id -> the stage and what was asked. */
+  escalations?: Record<string, { stage: string; kind: "stuck" | "setup" }>;
 }
 
 interface State {

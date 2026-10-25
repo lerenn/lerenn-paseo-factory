@@ -13,7 +13,7 @@ const varSchema = z.strictObject({
   pattern: z.string().optional(),
 });
 
-const optionSchema = z.strictObject({ id: z.string().min(1).max(64), label: z.string().min(1).max(200) });
+const optionSchema = z.strictObject({ id: z.string().min(1).max(64), label: z.string().min(1).max(200), description: z.string().max(500).optional(), recommended: z.boolean().optional() });
 
 /** `on`: verdict -> next stage. `exhausted` takes "pm" (one judgement call), a stage id or "failed". */
 const onSchema = z.record(z.string(), target);
@@ -66,6 +66,8 @@ export const gateStageSchema = z.strictObject({
   /** The answer text is added to the notes of this stage's worker prompt. */
   note_to: stageId.optional(),
   expires_in_minutes: z.number().min(1).optional(),
+  /** An answer with the option id "hold" asks the same question again after this many minutes. */
+  hold_minutes: z.number().min(1).optional(),
 });
 
 export const callStageSchema = z.strictObject({

@@ -25,6 +25,8 @@ export interface ToolDef {
   run(input: any, ctx: ToolContext): Promise<unknown> | unknown;
 }
 
+const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "option";
+
 function summary(item: Item) {
   return {
     item_id: item.id,
@@ -46,29 +48,45 @@ export const TOOLS: ToolDef[] = [
   {
     name: "inbox_ask",
     description:
-      "Ask the human a question or request an approval, then end your turn. The answer arrives later as a message starting with \"Agents Inbox:\". Asking the same question while it is pending returns the same item.",
+      "Ask the human a multiple-choice question or request an approval, then end your turn. Give 2 to 4 options (label, optional description, optional recommended flag: the recommended one is shown first); " +
+      "an open \"Other\" free-text answer is always added as the last choice, so do not add one yourself. Use kind \"approval\" with no options for a plain Approve / Deny. " +
+      "The answer arrives later as a message starting with \"Agents Inbox:\". Asking the same question while it is pending returns the same item.",
     input: z.object({
       question: z.string().min(1).max(4000).describe("What you need decided, written for someone who has not read your conversation."),
-      kind: z.enum(["question", "approval"]).optional().describe('"approval" offers approve / deny. Default "question".'),
+      kind: z.enum(["question", "approval"]).optional().describe('"approval" offers Approve / Deny. Default "question".'),
       options: z
-        .array(z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(200) }))
-        .max(12)
+        .array(
+          z.object({
+            id: z.string().min(1).max(64).optional().describe("Stable id returned in the answer; defaults to a slug of the label."),
+            label: z.string().min(1).max(200),
+            description: z.string().max(500).optional(),
+            recommended: z.boolean().optional(),
+          }),
+        )
+        .max(4)
         .optional()
-        .describe("Answers to pick from. Omit for a free-text answer."),
-      allow_free_text: z.boolean().optional().describe("Also accept free text when options are given. Default: only without options."),
+        .describe("2 to 4 choices. Required for kind \"question\"."),
       context: z.string().max(20_000).optional().describe("Details the human needs: diff summary, links, what happens on each choice."),
       blocking: z.boolean().optional().describe("Default true: you stop and wait. false: you may carry on and be told later."),
       expires_in_minutes: z.number().min(1).max(60 * 24 * 30).optional(),
-      default_answer: z.string().max(10_000).optional().describe("Option id (or text for free-text items) used if it expires. Needs expires_in_minutes."),
+      default_answer: z.string().max(10_000).optional().describe("Option id (or text) used if it expires. Needs expires_in_minutes."),
       dedupe_key: z.string().max(200).optional().describe("Stable key to make retries idempotent. Default: derived from the question and options."),
     }),
     run(input, ctx) {
+      const kind = input.kind ?? "question";
+      const given = input.options ?? [];
+      if (kind === "question" && (given.length < 2 || given.length > 4)) {
+        throw new UsageError(
+          `inbox_ask needs 2 to 4 options (got ${given.length}), like a multiple-choice question: options: [{label, description?, recommended?}, ...]. ` +
+            `An open "Other" answer is added for you. For a plain yes/no use kind "approval" without options.`,
+        );
+      }
+      const options = given.map((o: { id?: string; label: string; description?: string; recommended?: boolean }) => ({ id: o.id ?? slug(o.label), label: o.label, ...(o.description ? { description: o.description } : {}), ...(o.recommended ? { recommended: true } : {}) }));
       const { item, deduped } = ctx.engine.ask({
         agentId: ctx.callerId,
         question: input.question,
-        kind: input.kind,
-        options: input.options,
-        allowFreeText: input.allow_free_text,
+        kind,
+        options,
         context: input.context,
         blocking: input.blocking,
         expiresInMinutes: input.expires_in_minutes,

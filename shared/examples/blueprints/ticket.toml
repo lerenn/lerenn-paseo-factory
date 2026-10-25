@@ -75,9 +75,12 @@ skip_if = "{{dependency_bump}} == true"
 question = "Approve the acceptance criteria for {{ticket}}?"
 context = "{{stage.investigate.summary}}"
 criteria = "{{stage.investigate.data.criteria}}"
+options = [{ id = "approve", label = "Approve", recommended = true, description = "The criteria are what QA will check." }, { id = "deny", label = "Deny", description = "Send it back to the investigator." }]
+note_to = "investigate"
 [stage.on]
 approve = "implement"
 deny = "ask-input"
+default = "investigate"   # "Other…": your text goes to the investigator as a note
 skipped = "implement"
 
 [[stage]]
@@ -190,11 +193,13 @@ kind = "gate"
 question = "Merge the PR set of {{ticket}}?"
 context = "{{stage.babysit.summary}}"
 pr = "{{stage.implement.data.pr_urls}}"
-options = [{ id = "merged", label = "I merged it" }, { id = "changes", label = "Changes needed" }]
+options = [{ id = "merged", label = "Merged / queued", recommended = true, description = "Checked on GitHub; the run goes on to the release request." }, { id = "hold", label = "Hold", description = "Ask again in an hour." }]
 free_text = true
+hold_minutes = 60
+note_to = "fix"
 [stage.on]
 merged = "release"
-changes = "fix"
+default = "fix"           # "Other…": your text goes to the implementer as a note
 head_moved = "babysit"
 
 [[stage]]

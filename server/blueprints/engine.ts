@@ -38,7 +38,7 @@ export interface Ports {
     title: string;
     question: string;
     context: string;
-    options: { id: string; label: string }[];
+    options: { id: string; label: string; description?: string; recommended?: boolean }[];
     freeText: boolean;
     dedupeKey: string;
     expiresInMinutes?: number;
@@ -257,6 +257,7 @@ export class Engine {
     this.log(run, status, run.stage, error);
     this.store.save();
     this.aborts.get(run.id)?.abort();
+    for (const itemId of Object.keys(run.escalations ?? {})) this.ports.withdraw(itemId, `run ${status}`);
     for (const st of Object.values(run.stages)) {
       if (st.wardenTask) {
         this.ports.wardenDone(st.wardenTask, `run ${status}`);
@@ -373,21 +374,35 @@ export class Engine {
     run.waitingFor = `a person: ${reason}`;
     this.log(run, "paused", id, reason);
     this.store.save();
-    this.escalate(run, id, reason);
+    this.escalate(run, id, reason, "setup");
   }
 
-  private escalate(run: Run, id: string, why: string): void {
+  private escalate(run: Run, id: string, why: string, kind: "stuck" | "setup" = "stuck"): void {
+    const options =
+      kind === "setup"
+        ? [
+            { id: "resume", label: "Resume (after fixing)", description: "Continue the run at this stage once the cause is fixed.", recommended: true },
+            { id: "abort", label: "Abort", description: "Stop the run for good." },
+          ]
+        : [
+            { id: "resume1", label: "Resume with +1 attempt", description: "One more try at this stage.", recommended: true },
+            { id: "resume3", label: "Resume with +3 attempts", description: "Three more tries at this stage." },
+            { id: "abort", label: "Abort the run", description: "Stop the run for good." },
+            { id: "leave", label: "Leave it failed", description: "Do nothing; resume it later from the Blueprints tab." },
+          ];
     try {
-      this.ports.ask({
+      const { itemId } = this.ports.ask({
         runId: run.id,
         title: this.askerTitle(run),
-        question: `Run ${run.id} (${run.blueprint}) is stuck at stage ${id}: ${clip(why, 400)}`,
-        context: `Blueprint ${run.blueprint} sha ${run.sha}, vars ${JSON.stringify(run.vars)}. Resume it with blueprint_resume(run="${run.id}", stage="${id}", extra_attempts=N) or leave it failed.`,
-        options: [],
+        question: `Run ${run.id} (${run.blueprint}) is ${kind === "setup" ? "paused" : "stuck"} at stage ${id}: ${clip(why, 400)}`,
+        context: `Blueprint ${run.blueprint} sha ${run.sha}, vars ${JSON.stringify(run.vars)}. "Other…": your text is passed to the worker as a note and the stage resumes with +1 attempt.`,
+        options,
         freeText: true,
         dedupeKey: `${run.id}:escalation:${id}:${run.history.length}`,
         kind: "question",
       });
+      (run.escalations ??= {})[itemId] = { stage: id, kind };
+      this.store.save();
     } catch (error) {
       console.error("blueprints: escalation failed", error);
     }
@@ -458,7 +473,11 @@ export class Engine {
   /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
   async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
     const run = this.require(runId);
-    return this.exclusive(run.id, async () => {
+    return this.exclusive(run.id, () => this.doResume(run, input));
+  }
+
+  private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
+    {
       if (run.status === "done" || run.status === "aborted") throw new UsageError(`Run ${run.id} is ${run.status}; start a new one.`);
       const stage = input.stage ?? run.pm.pending?.stage ?? run.stage;
       if (!stage) throw new UsageError("Name the stage to resume at.");
@@ -477,7 +496,7 @@ export class Engine {
       this.store.save();
       await this.enter(run, stage);
       return run;
-    });
+    }
   }
 
   async abort(runId: string, reason: string): Promise<Run> {
@@ -723,9 +742,35 @@ export class Engine {
 
   /** The Inbox item of a gate changed state. */
   gateResolved(itemId: string): Promise<void> {
+    const escalated = this.store.all().find((r) => r.escalations?.[itemId]);
+    if (escalated) return this.exclusive(escalated.id, () => this.handleEscalation(escalated, itemId)).catch((e) => this.crash(escalated, e));
     const run = this.store.active().find((r) => Object.values(r.stages).some((s) => s.gate?.itemId === itemId && s.status === "waiting"));
     if (!run) return Promise.resolve();
     return this.exclusive(run.id, () => this.handleGate(run, itemId)).catch((e) => this.crash(run, e));
+  }
+
+  /** A person answered the Inbox item of a stuck or paused run: do what they chose. */
+  private async handleEscalation(run: Run, itemId: string): Promise<void> {
+    const gate = this.ports.gate(itemId);
+    const info = run.escalations?.[itemId];
+    if (!gate || !info || gate.status !== "answered") return;
+    delete run.escalations![itemId];
+    this.log(run, "escalation_answered", info.stage, `${gate.optionId ?? "other"} by ${gate.by ?? "?"}`);
+    if (run.status === "done" || run.status === "aborted") return;
+    switch (gate.optionId) {
+      case "abort":
+        return this.finish(run, "aborted", "aborted from the Inbox");
+      case "leave":
+        return this.store.save();
+      case "resume":
+      case "resume1":
+      case "resume3":
+        await this.doResume(run, { stage: info.stage, extraAttempts: gate.optionId === "resume3" ? 3 : gate.optionId === "resume1" ? 1 : 0 });
+        return;
+      default:
+        // "Other…": the text goes to the worker as a note and the stage gets one more try.
+        await this.doResume(run, { stage: info.stage, extraAttempts: 1, note: gate.text ? `Instruction from the human: ${gate.text}` : undefined });
+    }
   }
 
   private async handleGate(run: Run, itemId: string): Promise<void> {
@@ -757,6 +802,15 @@ export class Engine {
         run.vars[`${def.store_as}_confirmed`] = "true"; // a person typed it
       }
       if (def.note_to && gate.text) (run.stages[def.note_to] ??= freshStage()).notes.push(`Answer from the human to "${clip(this.r(run, def.question), 200)}": ${gate.text}`);
+      if (answer === "hold" && def.hold_minutes) {
+        st.status = "waiting";
+        st.reopenAt = this.ports.now() + def.hold_minutes * 60_000;
+        st.gate = null;
+        run.waitingFor = `gate ${id} on hold for ${def.hold_minutes} min`;
+        this.log(run, "gate_hold", id, `${def.hold_minutes} min`);
+        this.store.save();
+        return;
+      }
       if (def.pr && Object.keys(st.gate!.heads).length) {
         const verdict = await this.prGateCheck(run, id, def, answer);
         if (verdict === "refused") return;
@@ -970,7 +1024,16 @@ export class Engine {
       const st = run.stages[id];
       if (!st) continue;
       try {
-        if (st.status === "waiting" && st.gate?.itemId && Object.keys(st.gate.heads).length) await this.pollPrGate(run, id);
+        if (st.status === "waiting" && !st.gate && st.reopenAt && now >= st.reopenAt) {
+          await this.exclusive(run.id, async () => {
+            if (run.stage !== id || st.status !== "waiting" || st.gate || !st.reopenAt) return;
+            st.reopenAt = null;
+            st.status = "entering";
+            run.status = "running";
+            run.waitingFor = null;
+            await this.openGate(run, id, this.stageDef(run, id) as GateStage);
+          });
+        } else if (st.status === "waiting" && st.gate?.itemId && Object.keys(st.gate.heads).length) await this.pollPrGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
           const grace = this.ports.settings().idleGraceSeconds * 1000;
           if (now - (st.lastNudgeAt ?? st.startedAt ?? now) < grace) continue;

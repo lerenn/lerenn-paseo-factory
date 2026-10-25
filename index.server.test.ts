@@ -396,3 +396,25 @@ describe("activity, run diffs and transcripts", () => {
     }
   });
 });
+
+describe("inbox_ask as a multiple-choice question", () => {
+  it("needs 2 to 4 options (or kind approval), derives ids, orders the recommended first, and adds Other", async () => {
+    const b = boot();
+    const out = await b.create(request());
+    await b.open({ agentId: "asker", env: out.env });
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const call = async (args: object) => (await mcp(endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "inbox_ask", arguments: args } })).body.result;
+    const none = await call({ question: "Free text please?" });
+    expect(none.isError).toBe(true);
+    expect(none.content[0].text).toMatch(/2 to 4 options/);
+    expect((await call({ question: "One?", options: [{ label: "Only" }] })).isError).toBe(true);
+    expect((await call({ question: "Five?", options: [1, 2, 3, 4, 5].map((n) => ({ label: `o${n}` })) })).isError).toBe(true);
+    const ok = await call({ question: "Which?", options: [{ label: "Roll back" }, { label: "Wait an hour", description: "CI is red", recommended: true }] });
+    expect(ok.isError).toBeUndefined();
+    const { items } = await b.rpc["inbox.list"]({}, b.ctx);
+    expect(items[0].options.map((o: any) => o.id)).toEqual(["wait-an-hour", "roll-back"]);
+    expect(items[0]).toMatchObject({ allowFreeText: true });
+    const approval = await call({ question: "Deploy?", kind: "approval" });
+    expect(approval.isError).toBeUndefined();
+  });
+});

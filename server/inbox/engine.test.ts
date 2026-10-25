@@ -36,7 +36,8 @@ describe("ask", () => {
   it("validates defaults", () => {
     const { engine } = setup();
     expect(() => engine.ask({ agentId: "a", question: "q", defaultAnswer: "x" })).toThrow(UsageError);
-    expect(() => engine.ask({ agentId: "a", question: "q", options: [{ id: "y", label: "Y" }], expiresInMinutes: 5, defaultAnswer: "n" })).toThrow(UsageError);
+    // "Other" is always open, so a free-text default is fine
+    expect(() => engine.ask({ agentId: "a", question: "q2", options: [{ id: "y", label: "Y" }], expiresInMinutes: 5, defaultAnswer: "n" })).not.toThrow();
     expect(() => engine.ask({ agentId: "a", question: "q", options: [{ id: "y", label: "Y" }, { id: "y", label: "Z" }] })).toThrow(UsageError);
   });
 });
@@ -56,10 +57,20 @@ describe("answer", () => {
     const { engine } = setup();
     const { item } = engine.ask({ agentId: "a", question: "Pick", options: [{ id: "x", label: "X" }] });
     expect(engine.answer(item.id, { optionId: "nope" }).ok).toBe(false);
-    expect(engine.answer(item.id, { text: "hmm" }).ok).toBe(false);
     expect(engine.answer(item.id, {}).ok).toBe(false);
+    expect(engine.answer(item.id, { text: "hmm, other" }).item?.answer).toMatchObject({ optionId: null, text: "hmm, other" });
     const free = engine.ask({ agentId: "a", question: "Why?" }).item;
     expect(engine.answer(free.id, { text: " because " }).item?.answer?.text).toBe("because");
+  });
+});
+
+describe("multiple choice", () => {
+  it("shows the recommended option first and always allows an Other answer", () => {
+    const { engine } = setup();
+    const { item } = engine.ask({ agentId: "a", question: "Which?", options: [{ id: "a", label: "A" }, { id: "b", label: "B", recommended: true, description: "safer" }] });
+    expect(item.options.map((o) => o.id)).toEqual(["b", "a"]);
+    expect(item.options[0].description).toBe("safer");
+    expect(item.allowFreeText).toBe(true);
   });
 });
 

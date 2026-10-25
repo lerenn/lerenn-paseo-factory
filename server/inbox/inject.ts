@@ -9,5 +9,5 @@ export function scopeApplies(scope: "all" | "opt-in", env: Record<string, string
 
 export const NOTE =
   "Agents Inbox: when you need a human decision, an approval, or information only the user has, call inbox_ask " +
-  "(blocking by default), then end your turn. The answer arrives as a message starting with \"Agents Inbox:\". " +
+  "as a multiple-choice question with 2 to 4 options (an open Other answer is added for you; mark the one you recommend), blocking by default, then end your turn. The answer arrives as a message starting with \"Agents Inbox:\". " +
   "Do not guess or proceed on risky steps while a blocking question is pending.";

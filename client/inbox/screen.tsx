@@ -112,9 +112,16 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
                         accessibilityLabel={o.label}
                         disabled={answer.isPending}
                         onPress={() => answer.mutate({ itemId: item.id, optionId: o.id, text: text || undefined })}
-                        style={[s.button, o.id === "approve" ? { borderColor: theme.colors.statusSuccess } : o.id === "deny" ? { borderColor: theme.colors.statusDanger } : null]}
+                        style={[
+                          s.button,
+                          o.recommended ? { borderColor: theme.colors.accent, borderWidth: 2 } : o.id === "approve" ? { borderColor: theme.colors.statusSuccess } : o.id === "deny" ? { borderColor: theme.colors.statusDanger } : null,
+                        ]}
                       >
-                        <Text style={s.text}>{o.label}</Text>
+                        <Text style={s.text}>
+                          {o.label}
+                          {o.recommended ? " (recommended)" : ""}
+                        </Text>
+                        {o.description ? <Text style={s.muted}>{o.description}</Text> : null}
                       </Pressable>
                     ))}
                   </View>
@@ -122,7 +129,7 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
                 <TextInput
                   value={text}
                   onChangeText={(v: string) => setDraft({ ...draft, [item.id]: v })}
-                  placeholder={item.allowFreeText ? (item.options.length ? "Or write an answer (also sent as a comment with a choice)" : "Write an answer") : "Optional comment"}
+                  placeholder={item.options.length ? "Other… (write an answer; with a choice above it is sent as a comment)" : "Other… (write an answer)"}
                   placeholderTextColor={theme.colors.foregroundMuted}
                   multiline
                   style={s.input}
@@ -131,12 +138,12 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
                   <View style={s.choices}>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel="Send answer"
+                      accessibilityLabel="Send as Other"
                       disabled={answer.isPending || !text.trim()}
                       onPress={() => answer.mutate({ itemId: item.id, text })}
                       style={[s.button, { backgroundColor: theme.colors.accent }, !text.trim() ? { opacity: 0.5 } : null]}
                     >
-                      <Text style={{ color: theme.colors.accentForeground, fontSize: 14 }}>Send</Text>
+                      <Text style={{ color: theme.colors.accentForeground, fontSize: 14 }}>{item.options.length ? "Send as Other" : "Send"}</Text>
                     </Pressable>
                   </View>
                 ) : null}
