@@ -63,6 +63,8 @@ export const gateStageSchema = z.strictObject({
   pr: z.string().optional(),
   /** Free-text answer is stored in this variable (checked against the variable's pattern). */
   store_as: z.string().optional(),
+  /** The answer text is added to the notes of this stage's worker prompt. */
+  note_to: stageId.optional(),
   expires_in_minutes: z.number().min(1).optional(),
 });
 
@@ -153,6 +155,13 @@ export const blueprintSchema = z
         const ok = verdict === "exhausted" ? next === "pm" || known(next) : known(next);
         if (!ok) ctx.addIssue({ code: "custom", path: ["stage", i, "on", verdict], message: `unknown target "${next}"` });
       }
+      if (s.kind === "gate") {
+        const g = s as GateStage;
+        if (g.note_to && !ids.has(g.note_to)) ctx.addIssue({ code: "custom", path: ["stage", i, "note_to"], message: `unknown stage ${g.note_to}` });
+        if (g.store_as && !(g.store_as in b.vars)) ctx.addIssue({ code: "custom", path: ["stage", i, "store_as"], message: `unknown variable ${g.store_as}` });
+        if (g.pr && !("head_moved" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a gate tied to PRs needs an on.head_moved edge" });
+      }
+      if (s.skip_if && !("skipped" in s.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a stage with skip_if needs an on.skipped edge" });
       if (s.kind === "agent" || s.kind === undefined) {
         const a = s as AgentStage;
         const reuse = /^reuse:(.+)$/.exec(a.agent)?.[1];

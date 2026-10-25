@@ -387,7 +387,7 @@ export class Engine {
   }
 
   /** The PM's single judgement: grant bounded extra attempts, or re-scope to another stage. */
-  retry(runId: string, input: { stage?: string; extraAttempts?: number; to?: string; note?: string }): Promise<Run> {
+  async retry(runId: string, input: { stage?: string; extraAttempts?: number; to?: string; note?: string }): Promise<Run> {
     const run = this.require(runId);
     return this.exclusive(run.id, async () => {
       const pending = run.pm.pending;
@@ -423,7 +423,7 @@ export class Engine {
   }
 
   /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
-  resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
+  async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
     const run = this.require(runId);
     return this.exclusive(run.id, async () => {
       if (run.status === "done" || run.status === "aborted") throw new UsageError(`Run ${run.id} is ${run.status}; start a new one.`);
@@ -447,7 +447,7 @@ export class Engine {
     });
   }
 
-  abort(runId: string, reason: string): Promise<Run> {
+  async abort(runId: string, reason: string): Promise<Run> {
     const run = this.require(runId);
     return this.exclusive(run.id, async () => {
       if (run.status === "done" || run.status === "failed" || run.status === "aborted") throw new UsageError(`Run ${run.id} is already ${run.status}.`);
@@ -514,7 +514,8 @@ export class Engine {
     const facts = await this.prFactsBlock(run, def);
     const prompt = this.composePrompt(run, id, def, st, why, facts);
     const reuse = /^reuse:(.+)$/.exec(def.agent)?.[1];
-    let target: string | null = st.agentId;
+    // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
+    let target: string | null = why === "start" ? null : st.agentId;
     if (reuse) target = run.stages[reuse]?.agentId ?? null;
     if (target && (await this.ports.agentState(target)) === "gone") target = null;
 
@@ -584,7 +585,7 @@ export class Engine {
   }
 
   /** A worker's verdict. The caller must be the stage's current worker. */
-  verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {
+  async verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {
     const candidates = this.store.active().filter((r) => (!input.run || r.id === input.run) && r.stage && (!input.stage || r.stage === input.stage) && r.stages[r.stage]?.agentId === callerId);
     if (candidates.length === 0) throw new UsageError("You are not the worker of a running stage" + (input.run ? ` of run ${input.run}` : "") + ".");
     const run = candidates[0];
@@ -687,11 +688,15 @@ export class Engine {
   gateResolved(itemId: string): Promise<void> {
     const run = this.store.active().find((r) => Object.values(r.stages).some((s) => s.gate?.itemId === itemId && s.status === "waiting"));
     if (!run) return Promise.resolve();
-    return this.exclusive(run.id, async () => {
+    return this.exclusive(run.id, () => this.handleGate(run, itemId)).catch((e) => this.crash(run, e));
+  }
+
+  private async handleGate(run: Run, itemId: string): Promise<void> {
+    {
       const id = Object.keys(run.stages).find((k) => run.stages[k].gate?.itemId === itemId && run.stages[k].status === "waiting");
       if (!id) return;
       const st = run.stages[id];
-      const def = this.stageDef(run, id) as GateState_ & GateStage;
+      const def = this.stageDef(run, id) as GateStage;
       const gate = this.ports.gate(itemId);
       if (!gate || gate.status === "pending") return;
       if (gate.status === "withdrawn" || gate.status === "archived") return; // withdrawn by us, or the asker went away
@@ -712,8 +717,9 @@ export class Engine {
           return this.openGate(run, id, def); // ask again: dedupe key differs through runs
         }
         run.vars[def.store_as] = gate.text.trim();
-        if (run.def.confirm.includes(def.store_as)) run.vars[`${def.store_as}_confirmed`] = "true";
+        run.vars[`${def.store_as}_confirmed`] = "true"; // a person typed it
       }
+      if (def.note_to && gate.text) (run.stages[def.note_to] ??= freshStage()).notes.push(`Answer from the human to "${clip(this.r(run, def.question), 200)}": ${gate.text}`);
       if (def.pr && Object.keys(st.gate!.heads).length) {
         const verdict = await this.prGateCheck(run, id, def, answer);
         if (verdict === "refused") return;
@@ -731,7 +737,7 @@ export class Engine {
       const next = def.on[answer] ?? def.on.default;
       if (!next) return this.finish(run, "failed", `gate ${id}: no edge for answer "${answer}"`);
       return this.go(run, id, next, `answer ${answer}`);
-    }).catch((e) => this.crash(run, e));
+    }
   }
 
   /** "merged" must be true on GitHub. Anything else on a PR gate is checked for a head that moved meanwhile. */
@@ -761,9 +767,24 @@ export class Engine {
 
   // ---- calls, child runs, extension kinds ----
 
+  /** A lone `{{stage.x.data.k}}` keeps the type of the stored value (a list stays a list). */
+  private rawData(run: Run, template: string): unknown {
+    const m = /^\{\{\s*stage\.([a-z][a-z0-9_-]*)\.data\.([^}\s]+)\s*\}\}$/.exec(template);
+    return m ? run.stages[m[1]]?.data[m[2]] : undefined;
+  }
+
   private deepRender(run: Run, value: unknown): unknown {
-    if (typeof value === "string") return this.r(run, value);
-    if (Array.isArray(value)) return value.map((v) => this.deepRender(run, v));
+    if (typeof value === "string") {
+      const raw = this.rawData(run, value);
+      return raw !== undefined && typeof raw !== "string" ? raw : this.r(run, value);
+    }
+    if (Array.isArray(value)) {
+      return value.flatMap((v) => {
+        const out = this.deepRender(run, v);
+        if (typeof v === "string" && /^\{\{[^}]*\}\}$/.test(v.trim()) && out === "") return [];
+        return typeof v === "string" && Array.isArray(out) ? out : [out];
+      });
+    }
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, this.deepRender(run, v)]));
     return value;
   }
@@ -879,13 +900,14 @@ export class Engine {
           else await this.enter(run, id);
         } else if (st.status === "waiting" && st.gate?.itemId) {
           const gate = this.ports.gate(st.gate.itemId);
-          if (gate && gate.status !== "pending") await this.gateResolved(st.gate.itemId);
+          if (gate && gate.status !== "pending") await this.handleGate(run, st.gate.itemId);
         } else if (st.status === "waiting" && st.childRunId) {
           const child = this.store.get(st.childRunId);
           if (child && (child.status === "done" || child.status === "failed" || child.status === "aborted")) await this.childFinished(run, child);
         } else if (st.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent") {
           const state = st.agentId ? await this.ports.agentState(st.agentId) : "gone";
-          if (state !== "running") await this.agentFailed(run, id, state === "gone" ? "worker gone after restart" : "worker idle after restart");
+          if (state === "gone") await this.agentFailed(run, id, "worker gone after restart");
+          else if (state === "idle") await this.dispatch(run, id, "nudge");
         } else if (st.status === "running") {
           await this.enter(run, id); // an extension stage or call: run again (idempotent by contract)
         }
@@ -912,7 +934,8 @@ export class Engine {
             if (run.stage !== id || st.status !== "running" || st.lastNudgeAt !== null && now - st.lastNudgeAt < grace) return;
             st.lastNudgeAt = now;
             this.log(run, "stalled", id, state);
-            await this.agentFailed(run, id, state === "gone" ? "worker gone" : "worker idle without a verdict");
+            if (state === "gone") await this.agentFailed(run, id, "worker gone");
+            else await this.dispatch(run, id, "nudge");
           });
         }
       } catch (error) {
@@ -1004,7 +1027,5 @@ export class Engine {
     };
   }
 }
-
-type GateState_ = { on: Record<string, string> };
 
 export { TERMINALS };
