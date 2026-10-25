@@ -10,6 +10,7 @@ import { LeasesScreen } from "./leases";
 import { RolesScreen } from "./roles";
 import { WardenScreen } from "./warden";
 import { extensionCallRpc, overviewRpc } from "../shared/rpc";
+import { GitSourcesSection } from "./git-sources";
 import { subscribeTabs, tabFor } from "./registry";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
@@ -46,6 +47,7 @@ function SettingsTab({ theme, layout }: PluginScreenProps) {
       ) : (
         <Text style={{ color: c.foregroundMuted }}>{settings.status === "loading" ? "Loading…" : `Settings: ${"error" in settings ? settings.error : ""}`}</Text>
       )}
+      <GitSourcesSection theme={theme} layout={layout} />
     </ScrollView>
   );
 }

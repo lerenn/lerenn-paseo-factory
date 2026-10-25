@@ -14,7 +14,6 @@ import {
   listRolesRpc,
   saveGitRoleRpc,
   setTokenRpc,
-  syncSourcesRpc,
   type GitStatus,
   type Proposal,
   type RoleEntry,
@@ -42,14 +41,12 @@ type Editing = { text: string; original: string | null; sourceId: string };
 export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
   const queryClient = useQueryClient();
   const listRoles = useRpc(listRolesRpc);
-  const syncSources = useRpc(syncSourcesRpc);
   const saveGitRole = useRpc(saveGitRoleRpc);
   const deleteGitRole = useRpc(deleteGitRoleRpc);
   const listProposals = useRpc(listProposalsRpc);
   const createPr = useRpc(createPullRequestRpc);
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
-  const [sourcesOpen, setSourcesOpen] = useState(false);
 
   const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
 
@@ -83,10 +80,6 @@ export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
     mutationFn: (id: string) => createPr({ id }),
     onSettled: refreshAll,
   });
-  const sync = useMutation({
-    mutationFn: () => syncSources({}),
-    onSuccess: refreshAll,
-  });
 
   const newRole = () => sources[0] && setEditing({ text: TEMPLATE, original: null, sourceId: sources[0].id });
 
@@ -106,8 +99,7 @@ export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
       {roles.data && sources.length === 0 ? (
         <View style={styles.panel}>
           <Text style={styles.heading}>No roles yet</Text>
-          <Text style={styles.muted}>Add a git source to load roles.</Text>
-          <Button styles={styles} primary label="Add a git source" onPress={() => setSourcesOpen(true)} />
+          <Text style={styles.muted}>Add a git source in the Factory Settings tab to load roles.</Text>
         </View>
       ) : null}
       {roles.data && sources.length > 0 && roles.data.roles.length === 0 ? (
@@ -197,16 +189,6 @@ export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
         onCreatePr={(id) => openPr.mutate(id)}
         hasToken={(sourceId) => sources.find((g) => g.id === sourceId)?.hasToken ?? false}
         labelFor={(sourceId, fallback) => sources.find((g) => g.id === sourceId)?.label ?? fallback}
-      />
-
-      <GitSourcesPanel
-        styles={styles}
-        open={sourcesOpen}
-        onToggle={() => setSourcesOpen((v) => !v)}
-        statuses={sources}
-        syncing={sync.isPending}
-        onSync={() => sync.mutate()}
-        onSaved={refreshAll}
       />
     </ScrollView>
   );
@@ -298,10 +280,12 @@ function gitStatusText(status?: GitStatus): string {
 
 type Draft = { id: number; url: string; ref: string; path: string; interval: string; writeMode: GitSource["writeMode"] };
 
-function GitSourcesPanel(props: {
+export function GitSourcesPanel(props: {
   styles: Styles;
   open: boolean;
   onToggle(): void;
+  /** In the Factory Settings tab: no collapse toggle. */
+  alwaysOpen?: boolean;
   statuses: GitStatus[];
   syncing: boolean;
   onSync(): void;
@@ -363,14 +347,14 @@ function GitSourcesPanel(props: {
           onPress={props.onToggle}
           style={styles.row}
         >
-          <Text style={styles.heading}>{props.open ? "▾" : "▸"} Git sources</Text>
+          <Text style={styles.heading}>{props.alwaysOpen ? "Git sources" : `${props.open ? "▾" : "▸"} Git sources`}</Text>
         </Pressable>
         <Button styles={styles} label={props.syncing ? "Syncing…" : "Sync now"} onPress={props.onSync} />
       </View>
       {props.open ? (
         <View style={{ gap: 10 }}>
       <Text style={styles.muted}>
-        Roles are loaded from a folder of each repository; a role in an earlier source wins. Repositories are cloned
+        One sync feeds every module: the folder holds roles/ and blueprints/ (and leases/, warden/, inbox/). A role or blueprint in an earlier source wins. Repositories are cloned
         and pushed with the daemon's own git credentials (for example its SSH key). Edits you save here become a
         pull request or a push, depending on each source's mode.
       </Text>
@@ -383,7 +367,7 @@ function GitSourcesPanel(props: {
           <View key={d.id} style={styles.startBox}>
             <SettingsInput label="Repository URL" initialValue={d.url} onChangeText={(url) => edit(d.id, { url })} placeholder="git@github.com:owner/repo.git" />
             <SettingsInput label="Branch or tag (optional)" initialValue={d.ref} onChangeText={(ref) => edit(d.id, { ref })} placeholder="default branch" />
-            <SettingsInput label="Folder (optional)" initialValue={d.path} onChangeText={(path) => edit(d.id, { path })} placeholder="roles" />
+            <SettingsInput label="Factory folder (optional)" initialValue={d.path} onChangeText={(path) => edit(d.id, { path })} placeholder="services/paseo/plugins/factory" />
             <SettingsInput
               label="Sync interval (minutes)"
               initialValue={d.interval}
@@ -597,7 +581,7 @@ function Button({ styles, label, onPress, primary }: { styles: Styles; label: st
   );
 }
 
-function makeStyles(theme: PluginScreenProps["theme"], compact: boolean) {
+export function makeStyles(theme: PluginScreenProps["theme"], compact: boolean) {
   const pad = compact ? 16 : 24;
   return {
     screen: { flex: 1, backgroundColor: theme.colors.surface0 },
