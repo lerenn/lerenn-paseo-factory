@@ -174,6 +174,10 @@ export function startBlueprints(host: FactoryHost) {
       return null;
     },
     blueprint: (name) => catalog.blueprints.get(name),
+    preflight(def, at) {
+      const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);
+      return needsCwd && !cfg().defaultCwd ? "Blueprints setting defaultCwd is not set: workers need a working directory. Set it in Factory > Blueprints > Settings." : null;
+    },
     settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish }),
   };
   const engine = new Engine(store, ports);

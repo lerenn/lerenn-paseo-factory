@@ -53,6 +53,8 @@ export interface Ports {
   tool(name: string): ((args: Record<string, unknown>) => Promise<unknown> | unknown) | null;
   stageKind(kind: string): ((ctx: Omit<StageKindContext, "paseo" | "services" | "signal">) => Promise<StageOutcome>) | null;
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
+  /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
+  preflight?(def: Blueprint, at: string): string | null;
   settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean };
 }
 
@@ -132,6 +134,8 @@ export class Engine {
     const vars = this.checkVars(def, input.vars);
     const first = input.at ?? def.start ?? def.stage[0].id;
     if (!def.stage.some((s) => s.id === first)) throw new UsageError(`Blueprint ${def.name} has no stage "${first}".`);
+    const problem = this.ports.preflight?.(def, first);
+    if (problem) throw new UsageError(problem);
     const now = this.ports.now();
     const run: Run = {
       id: this.store.newId(),
@@ -353,16 +357,26 @@ export class Engine {
     return `Factory · ${run.blueprint} · ${run.vars.ticket || run.vars.incident_id || run.id}`;
   }
 
+  /** Stop the run where it is with a reason, ask the human through the Inbox, and wait for `blueprint_resume`. */
+  private pause(run: Run, id: string, reason: string): void {
+    run.status = "paused";
+    run.error = reason;
+    run.waitingFor = `a person: ${reason}`;
+    this.log(run, "paused", id, reason);
+    this.store.save();
+    this.escalate(run, id, reason);
+  }
+
   private escalate(run: Run, id: string, why: string): void {
     try {
       this.ports.ask({
         runId: run.id,
         title: this.askerTitle(run),
-        question: `Run ${run.id} (${run.blueprint}) is stuck at stage ${id}: ${clip(why, 300)}`,
+        question: `Run ${run.id} (${run.blueprint}) is stuck at stage ${id}: ${clip(why, 400)}`,
         context: `Blueprint ${run.blueprint} sha ${run.sha}, vars ${JSON.stringify(run.vars)}. Resume it with blueprint_resume(run="${run.id}", stage="${id}", extra_attempts=N) or leave it failed.`,
         options: [],
         freeText: true,
-        dedupeKey: `${run.id}:escalation:${id}`,
+        dedupeKey: `${run.id}:escalation:${id}:${run.history.length}`,
         kind: "question",
       });
     } catch (error) {
@@ -389,7 +403,10 @@ export class Engine {
       run.pmAgentId = agentId;
       this.store.save();
     } catch (error) {
-      this.escalate(run, run.pm.pending?.stage ?? "?", `no PM available: ${(error as Error).message}`);
+      // No PM to ask (no pm role, no working directory...): go straight to the human with the reason.
+      const stage = run.pm.pending?.stage ?? run.stage ?? "?";
+      run.pm.pending = null;
+      this.pause(run, stage, `exhausted (${run.stages[stage]?.summary ?? "no summary"}) and no PM could be started: ${(error as Error).message}`);
     }
   }
 
@@ -552,10 +569,13 @@ export class Engine {
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
       }
     } catch (error) {
-      this.log(run, "dispatch_failed", id, (error as Error).message);
-      st.status = "running";
-      this.store.save();
-      return this.agentFailed(run, id, `could not reach a worker: ${(error as Error).message}`);
+      // A worker that cannot even be started is a setup problem (working directory, role, provider), not a failed
+      // attempt: retrying burns the caps in milliseconds. Pause the run with the reason and tell a person.
+      const message = (error as Error).message;
+      this.log(run, "dispatch_failed", id, message);
+      st.attempts = Math.max(0, st.attempts - 1);
+      st.summary = `could not start a worker: ${message}`;
+      return this.pause(run, id, st.summary);
     }
     st.status = "running";
     if (st.wardenTask) this.ports.wardenDone(st.wardenTask, "redispatched");

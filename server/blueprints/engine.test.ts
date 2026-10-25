@@ -190,6 +190,56 @@ describe("starting", () => {
   });
 });
 
+describe("setup failures", () => {
+  it("a worker that cannot be started pauses the run with the reason instead of burning attempts", async () => {
+    const ctx = setup();
+    let broken = true;
+    const spawn = ctx.ports.spawn;
+    ctx.ports.spawn = async (o) => {
+      if (broken) throw new Error("No working directory: set defaultCwd");
+      return spawn(o);
+    };
+    const run = await ctx.start();
+    const live = ctx.engine.require(run.id);
+    expect(live.status).toBe("paused");
+    expect(live.error).toMatch(/could not start a worker: No working directory/);
+    expect(live.stages.think.attempts).toBe(0);
+    expect(live.pm.pending).toBeNull();
+    expect([...ctx.items.values()].some((i) => /No working directory/.test(i.question))).toBe(true);
+    // fixed: resume goes on from the same stage
+    broken = false;
+    await ctx.engine.resume(run.id, { stage: "think" });
+    await ctx.settle();
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "running", stage: "think" });
+    expect(ctx.spawned).toHaveLength(1);
+  });
+
+  it("with no PM to ask, an exhausted stage goes straight to the Inbox with the reason", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    const spawn = ctx.ports.spawn;
+    ctx.ports.spawn = async (o) => {
+      if (o.role === "pm") throw new Error("no such role pm");
+      return spawn(o);
+    };
+    ctx.states.set("pm-agent", "gone");
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    const live = ctx.engine.require(run.id);
+    expect(live.status).toBe("paused");
+    expect(live.error).toMatch(/no PM could be started: no such role pm/);
+    expect([...ctx.items.values()].some((i) => /no PM could be started/.test(i.question))).toBe(true);
+  });
+
+  it("refuses to start when the blueprint cannot start any worker", () => {
+    const ctx = setup();
+    ctx.ports.preflight = () => "defaultCwd is not set";
+    expect(() => ctx.engine.start({ blueprint: "flow", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/defaultCwd is not set/);
+  });
+});
+
 describe("verdicts", () => {
   it("only the stage's worker may give one, and only a listed one", async () => {
     const { start, engine } = setup();
