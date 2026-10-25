@@ -13,7 +13,7 @@ function run(cmd: string, args: string[]): Promise<string> {
 }
 
 /** Reduce the check runs and statuses of a PR to one word. */
-export function rollup(checks: { conclusion?: string | null; status?: string | null; state?: string | null }[]): PrFacts["ci"] {
+export function rollup(checks: Check[]): PrFacts["ci"] {
   if (checks.length === 0) return "none";
   let pending = false;
   for (const c of checks) {
@@ -25,12 +25,41 @@ export function rollup(checks: { conclusion?: string | null; status?: string | n
   return pending ? "pending" : "green";
 }
 
-/** Facts about a PR from GitHub itself (through `gh`, which the pod routes to the GitHub proxy). */
+type Check = { conclusion?: string | null; status?: string | null; state?: string | null };
+
+/**
+ * CI of a head without the Checks API (a fine-grained token cannot hold that permission and gets a 403): the commit statuses plus the
+ * latest Actions run of each workflow on that commit.
+ */
+async function ciWithoutChecksApi(owner: string, repo: string, head: string): Promise<PrFacts["ci"]> {
+  const [status, runs] = await Promise.all([
+    run("gh", ["api", `repos/${owner}/${repo}/commits/${head}/status`]),
+    run("gh", ["api", `repos/${owner}/${repo}/actions/runs?head_sha=${head}&per_page=100`]),
+  ]);
+  const checks: Check[] = (JSON.parse(status).statuses ?? []).map((x: { state: string }) => ({ state: x.state }));
+  const latest = new Map<number, { id: number; status: string; conclusion: string | null }>();
+  for (const r of JSON.parse(runs).workflow_runs ?? []) {
+    const seen = latest.get(r.workflow_id);
+    if (!seen || r.id > seen.id) latest.set(r.workflow_id, r);
+  }
+  for (const r of latest.values()) checks.push({ status: r.status, conclusion: r.conclusion });
+  return rollup(checks);
+}
+
+/** Facts about a PR from GitHub itself (through the daemon's own `gh` login; the agents' GitHub access is the GitHub MCP server). */
 export async function ghFacts(url: string): Promise<PrFacts> {
-  if (!PR_URL.test(url)) throw new Error(`not a GitHub pull request URL: ${url}`);
+  const match = PR_URL.exec(url);
+  if (!match) throw new Error(`not a GitHub pull request URL: ${url}`);
   let out: string;
+  let rolledUp = true;
   try {
-    out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,statusCheckRollup,reviewDecision,isDraft"]);
+    try {
+      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,statusCheckRollup,reviewDecision,isDraft"]);
+    } catch (error) {
+      if (!/403|Resource not accessible/i.test((error as Error).message)) throw error;
+      rolledUp = false;
+      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,reviewDecision,isDraft"]);
+    }
   } catch (error) {
     if (/Could not resolve|not found|404/i.test((error as Error).message)) {
       return { url, exists: false, state: "closed", head: "", ci: "none", mergeable: null, draft: false, review: "" };
@@ -43,7 +72,7 @@ export async function ghFacts(url: string): Promise<PrFacts> {
     exists: true,
     state: String(j.state).toLowerCase() === "merged" ? "merged" : String(j.state).toLowerCase() === "closed" ? "closed" : "open",
     head: j.headRefOid ?? "",
-    ci: rollup(j.statusCheckRollup ?? []),
+    ci: rolledUp ? rollup(j.statusCheckRollup ?? []) : await ciWithoutChecksApi(match[1], match[2], j.headRefOid ?? ""),
     mergeable: j.mergeable === "MERGEABLE" ? true : j.mergeable === "CONFLICTING" ? false : null,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
