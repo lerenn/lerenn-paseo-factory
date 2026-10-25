@@ -4,6 +4,10 @@ import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { cancelTaskRpc, listTasksRpc } from "../../shared/warden/rpc";
 import type { TaskStatus, TaskView } from "../../shared/warden/task";
+import { CollapsibleRow } from "../collapsible-row";
+import { ModuleSettings, WARDEN_FIELDS } from "../module-settings";
+import { SubTabs } from "../subtabs";
+import { wardenSettings } from "../../shared/warden/settings";
 
 function ago(now: number, at: number | null): string {
   if (at === null) return "never";
@@ -15,6 +19,21 @@ function nextPingLine(t: Pick<TaskView, "status" | "nextPing">, now: number): st
   if (!ACTIVE.includes(t.status) || !t.nextPing) return "no ping scheduled";
   const min = Math.max(0, Math.ceil((t.nextPing.at - now) / 60_000));
   return `next ping in ${min}m (${t.nextPing.reason})`;
+}
+
+/** ok / pinging / waiting, the words of the one-line row. */
+function pillWord(status: TaskStatus): string {
+  switch (status) {
+    case "ok":
+      return "ok";
+    case "pinged":
+    case "escalated":
+      return "pinging";
+    case "waiting-permission":
+      return "waiting";
+    default:
+      return status;
+  }
 }
 
 function turnLabel(t: Pick<TaskView, "turn" | "idleSince">, now: number): string {
@@ -144,50 +163,55 @@ export function WardenScreen({ theme, layout, navigation }: PluginScreenProps) {
   const openAgent = navigation?.openAgent;
 
   /** One card layout for every watch, whether an agent registered a task or the user asked to supervise. */
-  const renderCard = (c: CardData) => (
-    <View key={c.key} style={s.card}>
-      <View style={s.row}>
-        <Text style={[s.text, { flex: 1 }]}>{c.headline}</Text>
-        <StatusBadge status={c.status} styles={s} colors={theme.colors} />
-      </View>
-      <Text style={s.muted}>
-        {[c.projectName, c.workspaceName].filter(Boolean).join(" › ") || "Unknown workspace"}
-        {" · "}
-        {c.agentTitle ?? "Untitled conversation"}
-      </Text>
-      {openAgent ? (
-        <Pressable accessibilityRole="link" accessibilityLabel={`Open agent ${c.agentTitle ?? c.agentId}`} onPress={() => openAgent({ agentId: c.agentId })}>
-          <Text style={[s.muted, { color: theme.colors.accent, textDecorationLine: "underline" as const }]}>Agent {c.agentId}</Text>
-        </Pressable>
-      ) : (
-        <Text style={s.muted} selectable>
-          Agent {c.agentId}
+  const renderCard = (c: CardData) => {
+    const color = badgeColor(c.status, theme.colors);
+    return (
+      <CollapsibleRow
+        key={c.key}
+        theme={theme}
+        pill={{ text: pillWord(c.status), color }}
+        title={c.headline}
+        parts={[c.agentTitle ?? "Untitled conversation", c.active ? c.nextPing.replace(/ \(.*\)$/, "") : null]}
+      >
+        <Text style={s.muted}>
+          {[c.projectName, c.workspaceName].filter(Boolean).join(" › ") || "Unknown workspace"}
+          {" · "}
+          {c.agentTitle ?? "Untitled conversation"}
         </Text>
-      )}
-      <Text style={s.muted}>
-        {c.turn} · {c.rule} · last activity {ago(data!.now, c.lastActivityAt)}
-      </Text>
-      {c.subagents ? <Text style={s.muted}>{c.subagents}</Text> : null}
-      <Text style={s.muted}>{c.nextPing}</Text>
-      <Text style={s.muted}>
-        {c.pings} pings sent ({c.unanswered} unanswered) · registered by {c.registeredBy}
-        {c.until ? ` · until ${new Date(c.until).toLocaleString()}` : ""}
-      </Text>
-      {c.extra.map((line, i) => (
-        <Text key={i} style={s.muted}>
-          {line}
-        </Text>
-      ))}
-      {c.active ? (
-        <View style={s.row}>
-          <View />
-          <Pressable accessibilityRole="button" accessibilityLabel={c.stopLabel} onPress={c.onStop} style={s.button}>
-            <Text style={s.text}>Stop</Text>
+        {openAgent ? (
+          <Pressable accessibilityRole="link" accessibilityLabel={`Open agent ${c.agentTitle ?? c.agentId}`} onPress={() => openAgent({ agentId: c.agentId })}>
+            <Text style={[s.muted, { color: theme.colors.accent, textDecorationLine: "underline" as const }]}>Agent {c.agentId}</Text>
           </Pressable>
-        </View>
-      ) : null}
-    </View>
-  );
+        ) : (
+          <Text style={s.muted} selectable>
+            Agent {c.agentId}
+          </Text>
+        )}
+        <Text style={s.muted}>
+          {c.turn} · {c.rule} · last activity {ago(data!.now, c.lastActivityAt)}
+        </Text>
+        {c.subagents ? <Text style={s.muted}>{c.subagents}</Text> : null}
+        <Text style={s.muted}>{c.nextPing}</Text>
+        <Text style={s.muted}>
+          {c.pings} pings sent ({c.unanswered} unanswered) · registered by {c.registeredBy}
+          {c.until ? ` · until ${new Date(c.until).toLocaleString()}` : ""}
+        </Text>
+        {c.extra.map((line, i) => (
+          <Text key={i} style={s.muted}>
+            {line}
+          </Text>
+        ))}
+        {c.active ? (
+          <View style={s.row}>
+            <View />
+            <Pressable accessibilityRole="button" accessibilityLabel={c.stopLabel} onPress={c.onStop} style={s.button}>
+              <Text style={s.text}>Stop</Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </CollapsibleRow>
+    );
+  };
 
   const taskCard = (t: TaskView): CardData => ({
     key: t.id,
@@ -212,9 +236,8 @@ export function WardenScreen({ theme, layout, navigation }: PluginScreenProps) {
     onStop: () => stop.mutate(t.id),
   });
 
-  return (
+  const watched = (
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
-      <Text style={s.h}>Watched tasks</Text>
       {query.isError ? <Text style={s.muted}>Could not load: {String(query.error)}</Text> : null}
       {data?.endpoint.error ? <Text style={s.text}>{data.endpoint.error}</Text> : null}
       {data && tasks.length === 0 ? (
@@ -226,18 +249,19 @@ export function WardenScreen({ theme, layout, navigation }: PluginScreenProps) {
           {finished.map((t) => renderCard(taskCard(t)))}
         </Collapsible>
       ) : null}
-      <Collapsible title="Settings" summary={settings ? (settings.scope === "all" ? "all agents" : "opt-in") : undefined} styles={s}>
-      {data?.settingsError ? <Text style={s.text}>Invalid settings: {data.settingsError}</Text> : null}
-      {settings ? (
-        <View style={s.card}>
-          <Text style={s.muted}>Tools for: {settings.scope === "all" ? "all agents (PASEO_WARDEN=off opts out)" : "agents created with PASEO_WARDEN=on"}</Text>
-          <Text style={s.muted}>At most one prompt every {settings.globalGapSeconds} s across agents</Text>
-          <Text style={s.muted}>Hang backstop capped at {settings.maxIntervalMinutes} min; backoff x{settings.backoffFactor} up to {settings.maxBackoffIntervals} intervals; parent notified after {settings.notifyParentAfterPings} unanswered pings; give up after {settings.maxUnansweredPings}</Text>
-          <Text style={s.muted}>Announced-work detection: {settings.announcedWork.enabled ? `on (every ${settings.announcedWork.intervalMinutes} min)` : "off"}</Text>
-          <Text style={s.muted}>Edit these under Settings → Plugins → Agents Warden.</Text>
-        </View>
-      ) : null}
-      </Collapsible>
     </ScrollView>
+  );
+
+  return (
+    <View style={s.screen}>
+      <Text style={[s.h, { paddingHorizontal: layout.compact ? 12 : 20, paddingTop: 12 }]}>Warden</Text>
+      <SubTabs
+        theme={theme}
+        tabs={[
+          { key: "watched", label: "Watched", badge: tasks.filter((t) => ACTIVE.includes(t.status)).length, render: () => watched },
+          { key: "settings", label: "Settings", render: () => <ModuleSettings theme={theme} definition={wardenSettings} fields={WARDEN_FIELDS} title="Warden settings" /> },
+        ]}
+      />
+    </View>
   );
 }

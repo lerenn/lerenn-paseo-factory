@@ -4,8 +4,11 @@ import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { answerRpc, listItemsRpc, readRpc } from "../../shared/inbox/rpc";
 import type { ItemStatus, ItemView } from "../../shared/inbox/item";
+import { CollapsibleRow } from "../collapsible-row";
+import { INBOX_FIELDS, ModuleSettings } from "../module-settings";
+import { SubTabs } from "../subtabs";
+import { inboxSettings } from "../../shared/inbox/settings";
 
-type Tab = "pending" | "answered" | "audit";
 type Colors = PluginScreenProps["theme"]["colors"];
 
 function ago(now: number, at: number | null): string {
@@ -34,13 +37,10 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
   const answerCall = useRpc(answerRpc);
   const readCall = useRpc(readRpc);
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<Tab>("pending");
-  const [open, setOpen] = useState<string | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
-  const key = ["inbox", "items", tab === "audit"];
-  const query = useQuery({ queryKey: key, queryFn: () => list({ audit: tab === "audit" }), refetchInterval: 10_000 });
+  const query = useQuery({ queryKey: ["inbox", "items"], queryFn: () => list({ audit: true }), refetchInterval: 10_000 });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["inbox"] });
   const answer = useMutation({
     mutationFn: (v: { itemId: string; optionId?: string; text?: string }) => answerCall(v),
@@ -77,33 +77,24 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
   const pending = items.filter((i) => i.status === "pending");
   const done = items.filter((i) => i.status !== "pending").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
 
-  const toggle = (item: ItemView) => {
-    setOpen(open === item.id ? null : item.id);
-    setError(null);
-    if (open !== item.id && item.status === "pending" && item.readAt === null) read.mutate(item.id);
-  };
-
   const renderItem = (item: ItemView) => {
     const icon = statusIcon(item.status, theme.colors);
-    const expanded = open === item.id;
     const unread = item.status === "pending" && item.readAt === null;
     const where = [item.projectName, item.workspaceName].filter(Boolean).join(" › ");
     const text = draft[item.id] ?? "";
     return (
-      <View key={item.id} style={s.row}>
-        <Pressable accessibilityRole="button" accessibilityLabel={`${icon.label}: ${item.question}`} onPress={() => toggle(item)} style={s.head}>
-          <Text accessibilityLabel={icon.label} style={{ color: icon.color, fontSize: 16, width: 18, textAlign: "center" }}>{icon.glyph}</Text>
-          <View style={{ flex: 1 }}>
-            <Text numberOfLines={expanded ? undefined : 2} style={[s.text, unread ? { fontWeight: "700" } : null]}>
-              {item.kind === "approval" ? "Approval: " : ""}
-              {item.question}
-            </Text>
-            <Text style={s.muted} numberOfLines={1}>
-              {[item.agentTitle ?? "Untitled conversation", where, ago(now, item.createdAt)].filter(Boolean).join(" · ")}
-            </Text>
-          </View>
-        </Pressable>
-        {expanded ? (
+      <CollapsibleRow
+        key={item.id}
+        theme={theme}
+        pill={{ text: item.status === "pending" ? (item.kind === "approval" ? "approval" : "question") : icon.label.toLowerCase(), color: icon.color }}
+        title={`${item.kind === "approval" && item.status !== "pending" ? "Approval: " : ""}${item.question}`}
+        bold={unread}
+        parts={[item.agentTitle ?? "Untitled conversation", where || null, ago(now, item.createdAt)]}
+        onOpen={() => {
+          setError(null);
+          if (item.status === "pending" && item.readAt === null) read.mutate(item.id);
+        }}
+      >
           <View style={s.detail}>
             {item.context ? <Text style={s.text} selectable>{item.context}</Text> : null}
             <Text style={s.muted} selectable>
@@ -149,7 +140,7 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
                     </Pressable>
                   </View>
                 ) : null}
-                {error && open === item.id ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
+                {error ? <Text style={{ color: theme.colors.statusDanger, fontSize: 13 }}>{error}</Text> : null}
               </>
             ) : (
               <Text style={s.text} selectable>
@@ -160,54 +151,62 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
               </Text>
             )}
           </View>
-        ) : null}
-      </View>
+      </CollapsibleRow>
     );
   };
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "pending", label: `Pending${pending.length ? ` (${pending.length})` : ""}` },
-    { id: "answered", label: "History" },
-    { id: "audit", label: "Audit" },
-  ];
-
-  return (
+  const page = (children: React.ReactNode) => (
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
-      <Text style={s.h}>Agents Inbox</Text>
-      <View style={s.tabs}>
-        {tabs.map((t) => (
-          <Pressable key={t.id} accessibilityRole="button" accessibilityLabel={t.label} onPress={() => setTab(t.id)} style={[s.tab, tab === t.id ? { backgroundColor: theme.colors.surface2 } : null]}>
-            <Text style={s.text}>{t.label}</Text>
-          </Pressable>
-        ))}
-      </View>
       {query.isError ? <Text style={s.muted}>Could not load: {String(query.error)}</Text> : null}
       {data?.endpoint.error ? <Text style={s.text}>{data.endpoint.error}</Text> : null}
       {data?.settingsError ? <Text style={s.text}>Invalid settings: {data.settingsError}</Text> : null}
-      {tab === "pending" ? (
-        <>
-          {data && pending.length === 0 ? <Text style={s.muted}>Nothing waiting. Agents ask with inbox_ask.</Text> : null}
-          {pending.map(renderItem)}
-        </>
-      ) : null}
-      {tab === "answered" ? (
-        <>
-          {data && done.length === 0 ? <Text style={s.muted}>No answered questions yet.</Text> : null}
-          {done.map(renderItem)}
-        </>
-      ) : null}
-      {tab === "audit" ? (
-        <>
-          {data && data.events.length === 0 ? <Text style={s.muted}>No events yet.</Text> : null}
-          {[...(data?.events ?? [])].reverse().map((e, i) => (
-            <Text key={`${e.at}-${i}`} style={s.muted} selectable>
-              {new Date(e.at).toLocaleString()} · {e.type} · {e.itemId} · {e.actor}
-              {e.detail ? ` · ${e.detail}` : ""}
-            </Text>
-          ))}
-        </>
-      ) : null}
-      <Text style={s.muted}>Edit scope, timings and message templates under Settings → Plugins → Agents Inbox.</Text>
+      {children}
     </ScrollView>
+  );
+
+  return (
+    <View style={s.screen}>
+      <Text style={[s.h, { paddingHorizontal: layout.compact ? 10 : 20, paddingTop: 12 }]}>Inbox</Text>
+      <SubTabs
+        theme={theme}
+        tabs={[
+          {
+            key: "pending",
+            label: "Pending",
+            badge: pending.length,
+            render: () =>
+              page(
+                <>
+                  {data && pending.length === 0 ? <Text style={s.muted}>Nothing waiting. Agents ask with inbox_ask.</Text> : null}
+                  {pending.map(renderItem)}
+                </>,
+              ),
+          },
+          {
+            key: "history",
+            label: "History",
+            render: () =>
+              page(
+                <>
+                  {data && done.length === 0 ? <Text style={s.muted}>No answered questions yet.</Text> : null}
+                  {done.map(renderItem)}
+                  {data && data.events.length > 0 ? (
+                    <>
+                      <Text style={[s.text, { fontWeight: "700", marginTop: 8 }]}>Audit log</Text>
+                      {[...data.events].reverse().slice(0, 200).map((e, i) => (
+                        <Text key={`${e.at}-${i}`} style={s.muted} selectable>
+                          {new Date(e.at).toLocaleString()} · {e.type} · {e.itemId} · {e.actor}
+                          {e.detail ? ` · ${e.detail}` : ""}
+                        </Text>
+                      ))}
+                    </>
+                  ) : null}
+                </>,
+              ),
+          },
+          { key: "settings", label: "Settings", render: () => <ModuleSettings theme={theme} definition={inboxSettings} fields={INBOX_FIELDS} title="Inbox settings" /> },
+        ]}
+      />
+    </View>
   );
 }
