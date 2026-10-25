@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { roleSchema } from "../shared/role";
 
-const file = new URL("../role.schema.json", import.meta.url);
+const file = new URL("../../../role.schema.json", import.meta.url);
 const generated = JSON.stringify(z.toJSONSchema(roleSchema, { io: "input" }), null, 2) + "\n";
 
 describe("role.schema.json", () => {

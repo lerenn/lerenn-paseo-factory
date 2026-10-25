@@ -101,7 +101,9 @@ export class Engine {
         event = { since: permissionSince, reason: `waiting on a permission request for ${min(permissionSince)} min` };
       } else if (idle !== undefined && !this.running.has(child)) {
         const tasks = this.store.active(child);
-        if (this.store.agent(child)?.waitingOn || (this.reactEnded.has(child) && tasks.length === 0)) continue;
+        if (this.store.agent(child)?.waitingOn) continue;
+        // A turn the parent triggered with its own message is not news for the parent, unless the child opened a task during it.
+        if (this.reactEnded.has(child) && !tasks.some((t) => t.createdAt >= (this.actedAt.get(child) ?? 0))) continue;
         event = {
           since: idle,
           reason: tasks.length > 0 ? `stopped its turn ${min(idle)} min ago without finishing '${tasks[0].task}'` : `finished its turn ${min(idle)} min ago`,

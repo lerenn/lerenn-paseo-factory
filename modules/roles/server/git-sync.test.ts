@@ -15,14 +15,14 @@ const git = (cwd: string, ...args: string[]) =>
 async function makeOrigin(model = "v1") {
   const repo = await tmp();
   git(repo, "init", "-q", "-b", "main");
-  await mkdir(path.join(repo, "roles"));
-  await writeFile(path.join(repo, "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`);
+  await mkdir(path.join(repo, "factory", "roles"), { recursive: true });
+  await writeFile(path.join(repo, "factory", "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`);
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "init");
   return repo;
 }
 const commit = (repo: string, model: string) =>
-  writeFile(path.join(repo, "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`).then(() => {
+  writeFile(path.join(repo, "factory", "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`).then(() => {
     git(repo, "commit", "-qam", model);
   });
 
@@ -30,7 +30,7 @@ describe("GitSources", () => {
   it("clones, then fetches updates, into the cache dir", async () => {
     const origin = await makeOrigin();
     const sources = new GitSources(await tmp());
-    const source = { url: origin, ref: "main", path: "roles", intervalMinutes: 5 };
+    const source = { url: origin, ref: "main", path: "factory", intervalMinutes: 5 };
     const first = await sources.sync(source);
     expect(first).toMatchObject({ error: null, syncing: false });
     expect(first.lastSync).toMatch(/^\d{4}-/);
@@ -44,7 +44,7 @@ describe("GitSources", () => {
   it("keeps the last good copy and reports the error when a sync fails", async () => {
     const origin = await makeOrigin();
     const sources = new GitSources(await tmp());
-    const source = { url: origin, ref: "main", path: "roles", intervalMinutes: 5 };
+    const source = { url: origin, ref: "main", path: "factory", intervalMinutes: 5 };
     const ok = await sources.sync(source);
     git(origin, "branch", "-m", "main", "renamed");
     const failed = await sources.sync(source);
@@ -87,7 +87,7 @@ describe("GitSources", () => {
   it("feeds the role catalog", async () => {
     const origin = await makeOrigin();
     const sources = new GitSources(await tmp());
-    const source = { url: origin, ref: "main", path: "roles", intervalMinutes: 5 };
+    const source = { url: origin, ref: "main", path: "factory", intervalMinutes: 5 };
     await sources.sync(source);
     const roles = await listRoles([{ id: sources.key(source), label: sourceLabel(source), dir: sources.rolesDir(source) }]);
     expect(roles).toHaveLength(1);

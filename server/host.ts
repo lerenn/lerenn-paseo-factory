@@ -74,6 +74,11 @@ export class FactoryHost {
   configuredSources: () => Promise<unknown[]> = async () => [];
   readonly ready: Promise<void>;
   private started: Promise<void> = Promise.resolve();
+
+  /** Resolves once the endpoint is listening (or failed to). */
+  get listening(): Promise<void> {
+    return this.started;
+  }
   private unsubscribe: () => void;
 
   constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null } = {}) {

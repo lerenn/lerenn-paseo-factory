@@ -132,8 +132,7 @@ export function startBlueprints(host: FactoryHost) {
     note: MODULE_NOTE,
     tools(request) {
       if (request.env?.PASEO_FACTORY_RUN) return WORKER_TOOL_NAMES;
-      const pm = [cfg().pmRole, ...(request.env?.PASEO_FACTORY_BLUEPRINTS === "on" ? [request.env?.PASEO_AGENT_ROLE] : [])];
-      return request.env?.PASEO_AGENT_ROLE && pm.includes(request.env.PASEO_AGENT_ROLE) ? TOOL_NAMES : null;
+      return request.env?.PASEO_FACTORY_BLUEPRINTS === "on" || request.env?.PASEO_AGENT_ROLE === cfg().pmRole ? TOOL_NAMES : null;
     },
   });
 

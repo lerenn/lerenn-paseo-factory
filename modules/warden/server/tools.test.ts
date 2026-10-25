@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { settingsSchema } from "../shared/settings";
 import { Engine } from "./engine";
-import { McpServer } from "./mcp";
+import { caller, mcpFor } from "../../../server/testing";
+import { INSTRUCTIONS } from "./instructions";
 import { Store } from "./store";
-import { LEGACY_TOOLS, TOOLS } from "./tools";
+import { TOOLS } from "./tools";
 
 function setup() {
   const store = new Store(null);
@@ -11,9 +12,9 @@ function setup() {
   store.upsertAgent("boss", {});
   store.upsertAgent("worker", { parentId: "boss" });
   store.upsertAgent("stranger", {});
-  const mcp = new McpServer(TOOLS, LEGACY_TOOLS);
+  const mcp = mcpFor(engine, TOOLS, INSTRUCTIONS);
   const call = async (callerId: string, name: string, args: object) => {
-    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, { engine, callerId });
+    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, caller(callerId));
     const text = reply.result.content[0].text as string;
     return { error: !!reply.result.isError, text, json: reply.result.isError ? null : JSON.parse(text) };
   };
@@ -21,19 +22,9 @@ function setup() {
 }
 
 describe("mcp", () => {
-  it("still answers the deprecated warder_* names without listing them", async () => {
-    const { mcp, engine, call } = setup();
-    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { engine, callerId: "x" });
-    expect(reply.result.tools.map((t: any) => t.name).some((n: string) => n.startsWith("warder_"))).toBe(false);
-    const made = await call("boss", "warder_register", { task: "legacy", interval_minutes: 5 });
-    expect(made.json.task).toBe("legacy");
-    expect((await call("boss", "warder_list", {})).json).toHaveLength(1);
-    expect((await call("boss", "warder_done", { task_id: made.json.task_id, result: "ok" })).error).toBe(false);
-  });
-
   it("lists the warden tools with JSON schemas", async () => {
     const { mcp, engine } = setup();
-    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { engine, callerId: "x" });
+    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" }, caller("x"));
     const names = reply.result.tools.map((t: any) => t.name);
     expect(names).toEqual(["warden_register", "warden_register_subagent", "warden_update", "warden_done", "warden_list"]);
     expect(reply.result.tools[0].inputSchema.required).toEqual(["task"]);
@@ -41,7 +32,7 @@ describe("mcp", () => {
 
   it("sends usage instructions in the initialize result", async () => {
     const { mcp, engine } = setup();
-    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }, { engine, callerId: "x" });
+    const reply: any = await mcp.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }, caller("x"));
     expect(reply.result.instructions).toMatch(/warden_register/);
     expect(reply.result.instructions).toMatch(/warden_done/);
     expect(reply.result.instructions).toMatch(/"Warden:"/);
@@ -49,7 +40,7 @@ describe("mcp", () => {
 
   it("answers notifications with nothing", async () => {
     const { mcp, engine } = setup();
-    expect(await mcp.handle({ jsonrpc: "2.0", method: "notifications/initialized" }, { engine, callerId: "x" })).toBeNull();
+    expect(await mcp.handle({ jsonrpc: "2.0", method: "notifications/initialized" }, caller("x"))).toBeNull();
   });
 });
 

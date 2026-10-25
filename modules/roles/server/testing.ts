@@ -16,8 +16,8 @@ export async function makeOrigin(model = "v1") {
   const work = await tmp();
   git(work, "clone", "-q", bare, ".");
   git(work, "checkout", "-q", "-b", "main");
-  await mkdir(path.join(work, "roles"));
-  await writeFile(path.join(work, "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`);
+  await mkdir(path.join(work, "factory", "roles"), { recursive: true });
+  await writeFile(path.join(work, "factory", "roles", "ev.yaml"), `name: ev\nmodel: ${model}\n`);
   git(work, "add", "-A");
   git(work, "commit", "-q", "-m", "init");
   git(work, "push", "-q", "origin", "main");

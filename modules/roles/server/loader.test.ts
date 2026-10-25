@@ -41,7 +41,7 @@ describe("loadRole", () => {
 
 describe("example roles", () => {
   it("are valid role files and are never loaded by default", async () => {
-    const dir = path.join(__dirname, "..", "docs", "examples", "roles");
+    const dir = path.join(__dirname, "..", "..", "..", "docs", "examples", "roles");
     for (const name of ["babysitter", "implementer", "investigator", "qa", "reviewer"]) {
       expect((await loadRole(name, [dir]))?.name).toBe(name);
     }

@@ -83,7 +83,8 @@ const PENDING = Symbol.for("paseo.factory.pending");
  * (`Symbol.for("paseo.factory.pending")`) and the Factory drains it when it starts.
  */
 export function registerWithHost(g: Record<symbol, unknown>, host: FactoryHost): void {
-  const queue = (g[PENDING] as ExtensionRegistration[] | undefined) ?? [];
+  const found = g[PENDING];
+  const queue = Array.isArray(found) ? (found as ExtensionRegistration[]) : [];
   g[PENDING] = { push: (reg: ExtensionRegistration) => host.registerExtension(reg) };
   for (const reg of queue) {
     try {

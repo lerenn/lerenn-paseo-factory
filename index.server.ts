@@ -31,6 +31,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(overviewRpc, async (_input, ctx) => {
     host.capture(ctx);
     await host.ready;
+    await host.listening;
     return {
       settings: host.settings,
       endpoint: { url: host.url, error: host.startError },

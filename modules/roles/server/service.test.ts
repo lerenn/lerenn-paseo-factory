@@ -31,7 +31,7 @@ async function setup(over: Record<string, unknown> = {}) {
   const origin = await makeOrigin();
   const root = await tmp();
   const sources = new GitSources(path.join(root, "git"));
-  const source = gitSourceSchema.parse({ url: origin.bare, ref: "main", path: "roles", ...over });
+  const source = gitSourceSchema.parse({ url: origin.bare, ref: "main", path: "factory", ...over });
   await sources.sync(source);
   const forge = fakeForge();
   const tokens = new TokenStore(path.join(root, "tokens.json"));
@@ -55,7 +55,7 @@ describe("RolesService", () => {
       sourceLabel: `${source.url}@main`,
       compareUrl: `https://forge.test/compare/main...${p.branch}`,
     });
-    expect(p.body).toContain("- roles/ev.yaml (modified)");
+    expect(p.body).toContain("- factory/roles/ev.yaml (modified)");
     expect(p.commit).toMatch(/^[0-9a-f]{40}$/);
     expect((await service.proposals())[0].id).toBe(p.id);
   });

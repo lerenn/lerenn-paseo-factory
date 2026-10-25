@@ -2,7 +2,6 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import contribute from "../index.server";
 import { agentCreateHook, sessionOpenHook } from "./hook";
 import { RoleLimits } from "./limits";
 
@@ -81,21 +80,5 @@ describe("concurrency limit", () => {
   it("session open without a role does nothing", async () => {
     const limits = new RoleLimits(path.join(await mkdtemp(path.join(tmpdir(), "hook-")), "agents.json"));
     expect(await sessionOpenHook(limits)({ request: { agentId: "a", workspaceId: null, provider: "p", cwd: "/", reason: "create", purpose: "interactive", env: {} } })).toBeUndefined();
-  });
-});
-
-describe("plugin entry", () => {
-  it("registers the hook and cleans up", () => {
-    const names: string[] = [];
-    const cleanup = contribute({
-      handle() {},
-      registerSettings: () => ({ read: async () => ({ status: "ready", values: { sources: [] } }), subscribe: () => () => {} }),
-      before(name: string) {
-        names.push(name);
-        return () => {};
-      },
-    } as never);
-    expect(names).toEqual(["agent.create", "agent.session_open"]);
-    cleanup();
   });
 });
