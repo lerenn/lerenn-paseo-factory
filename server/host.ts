@@ -40,6 +40,12 @@ export interface BlueprintEndpoint {
   start(input: { blueprint: string; vars: Record<string, string>; requestedBy: string; idempotencyKey?: string }): { runId: string };
 }
 
+/** A problem the Supervisor should know about; `key` identifies it across polls. */
+export interface Issue {
+  key: string;
+  text: string;
+}
+
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -67,7 +73,12 @@ export class FactoryHost {
   private readonly pending = new PendingOutcomes();
   /** Events extensions report (merges, deploys, ...): a ring shown in the Activity tab. */
   readonly extensionEvents: import("./activity").ExtensionEvent[] = [];
-  private readonly labelCache = new Map<string, { at: number; labels: Record<string, string> }>();
+  private readonly labelCache = new Map<string, { at: number; labels: Record<string, string>; title: string | null }>();
+
+  /** What the Supervisor watches: each module reports the problems it sees (stuck runs, expired leases, sync errors...). */
+  readonly issueSources: (() => Issue[] | Promise<Issue[]>)[] = [];
+  /** Extensions dropped for being unreachable, with when (cleared when they register again). */
+  readonly droppedExtensions = new Map<string, number>();
   private http: Server | null = null;
   private current: FactorySettings | null = null;
   private paseoRef: Paseo | null = null;
@@ -98,6 +109,12 @@ export class FactoryHost {
     this.ready = settings.read().then(apply);
     this.unsubscribe = settings.subscribe(apply);
     this.registerGlobal();
+    this.issueSources.push(() => {
+      const out: Issue[] = [];
+      for (const e of this.extensions.values()) if (this.extensionHealth(e.id) === "degraded") out.push({ key: `ext:${e.id}:degraded`, text: `Extension ${e.id} has unreachable calls or probes (it is dropped after ${MAX_FAILURES} in a row).` });
+      for (const [id, at] of this.droppedExtensions) out.push({ key: `ext:${id}:dropped`, text: `Extension ${id} was dropped at ${new Date(at).toISOString()} because its callback stays unreachable. extension_restart(id) can bring it back, once per hour.` });
+      return out;
+    });
   }
 
   // ---- settings and modules ----
@@ -143,7 +160,7 @@ export class FactoryHost {
   }
 
   /** The other modules' engines, for the Blueprints module and extensions. */
-  engines: { inbox?: any; leases?: any; warden?: any; blueprints?: any } = {};
+  engines: { inbox?: any; leases?: any; warden?: any; blueprints?: any; supervisor?: any } = {};
 
   /** Test seams: replace outside calls (GitHub). */
   overrides: { prDiff?: (url: string) => Promise<{ files: number; additions: number; deletions: number }> } = {};
@@ -154,7 +171,7 @@ export class FactoryHost {
     if (!tool || name.startsWith("blueprint_")) return null;
     return async (args) => {
       const parsed = tool.input.parse(args);
-      return tool.run(parsed, { callerId: "factory", labels: async () => ({}), labelsOf: async () => ({}) });
+      return tool.run(parsed, { callerId: "factory", labels: async () => ({}), labelsOf: async () => ({}), nameOf: async (id) => id });
     };
   }
 
@@ -175,13 +192,19 @@ export class FactoryHost {
     try {
       const { entries } = await this.paseo.agents.list({ filter: { includeArchived: false } } as never);
       for (const { agent } of entries as { agent: { id: string; labels?: Record<string, string> } }[]) {
-        this.labelCache.set(agent.id, { at: Date.now(), labels: agent.labels ?? {} });
+        this.labelCache.set(agent.id, { at: Date.now(), labels: agent.labels ?? {}, title: (agent as { title?: string | null }).title ?? null });
         if (agent.id === agentId) labels = agent.labels ?? {};
       }
     } catch (error) {
       console.error("factory: label lookup failed", error);
     }
     return labels;
+  }
+
+  /** A readable name for an agent (its title, else its id). */
+  async nameOf(agentId: string): Promise<string> {
+    await this.labelsOf(agentId);
+    return this.labelCache.get(agentId)?.title || agentId;
   }
 
   // ---- tools, notes, hooks ----
@@ -326,6 +349,7 @@ export class FactoryHost {
     else if (this.extensions.has(raw.id)) throw new Error(`extension "${raw.id}" is already registered in-process`);
     const handle = buildRemote(raw, this.pending);
     const removeInner = this.registerExtension(handle.registration);
+    this.droppedExtensions.delete(raw.id);
     const entry = {
       handle,
       remove: () => {
@@ -349,10 +373,23 @@ export class FactoryHost {
       if (handle.failures >= MAX_FAILURES) {
         remove();
         dropped.push(id);
+        this.droppedExtensions.set(id, Date.now());
         console.error(`factory: extension "${id}" dropped, its callback is unreachable`);
       }
     }
     return dropped;
+  }
+
+  /** Ask a remote extension to restart itself (POST <callback>/restart); extensions opt in by serving it. */
+  async restartExtension(id: string): Promise<string> {
+    const remote = this.remotes.get(id);
+    if (!remote) throw new Error(`extension "${id}" is not registered (or runs in the Factory's own process)`);
+    const res = await fetch(new URL("/restart", remote.handle.callback.url).toString(), { method: "POST", headers: { authorization: `Bearer ${remote.handle.callback.token}` } }).catch((e: Error) => {
+      throw new Error(`extension unreachable: ${e.message}`);
+    });
+    if (res.status === 404) throw new Error(`extension "${id}" does not support restart`);
+    if (!res.ok) throw new Error(`extension answered ${res.status}`);
+    return "restart requested";
   }
 
   /** Run an extension's backend call: input and output are validated with the extension's schemas. */
@@ -513,7 +550,7 @@ export class FactoryHost {
     }
     if (!session.agentId) return { status: 503, body: { error: "agent session not bound yet; retry shortly" } };
     const callerId = session.agentId;
-    const ctx: CallContext = { callerId, labels: () => this.labelsOf(callerId), labelsOf: (id) => this.labelsOf(id) };
+    const ctx: CallContext = { callerId, labels: () => this.labelsOf(callerId), labelsOf: (id) => this.labelsOf(id), nameOf: (id) => this.nameOf(id) };
     const reply = await mcp.handle(payload, ctx);
     this.afterCall.forEach((f) => f());
     return reply ? { status: 200, body: reply } : { status: 202, body: null };
@@ -529,7 +566,7 @@ export class FactoryHost {
   }
 }
 
-const MODULES_SET = new Set(["roles", "blueprints", "leases", "warden", "inbox"]);
+const MODULES_SET = new Set(["roles", "blueprints", "leases", "warden", "inbox", "supervisor"]);
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {

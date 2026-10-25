@@ -12,6 +12,14 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 
 There is no data migration. Setting `importLegacyState` (off by default) copies the state file of the old stand-alone plugin (`agents-leases`, `agents-warden`, `agents-inbox`) once, for a module that has no Factory state yet.
 
+## Supervisor
+
+A sixth tab (between Overview and Activity) for the **Supervisor**: ONE persistent agent per Factory (role `supervisor`, label `paseo.factory.supervisor=1`, created without a kube template so it runs on the daemon; its id is kept in `supervisor.json`). A PM supervises one run; the Supervisor supervises the Factory: runs paused, failed or waiting for a PM that does not exist, spawn failures, lease contention and expiry, extension health, role and blueprint load errors, git sync errors, Warden escalations. The Factory sends it a debounced "Factory digest" (a problem is told once, again after `repeatMinutes` while open); it acts with `blueprint_abort/_retry/_resume`, asks Louis with `inbox_ask`, and changes roles or blueprints only through lab pull requests.
+
+- Open to every agent: `supervisor_ask(question)` relays your question (with your agent name) and returns the answer, or a request id to poll with `supervisor_ask_status`; `supervisor_status` shows its state and stable agent id (steer it directly with a normal agent message too).
+- Supervisor only: `supervisor_reply(request, answer)`, `extension_restart(id)`. A restart calls `POST <callback>/restart` on the extension (extensions opt in; 404 means unsupported) and is allowed once per hour per extension.
+- Settings: `autoStart`, `cwd` (or `FACTORY_DEFAULT_CWD`), `role`, `defaultProvider`, `digestSeconds`, `repeatMinutes`, `askTimeoutSeconds`. The tab shows its chat (each incoming message tagged with the caller), status, watched problems and a Start / Restart button. `PASEO_SUPERVISOR=off` skips the supervisor tools for an agent.
+
 ## Warden is for Factory agents only
 
 `warden_register`, `warden_register_subagent` and `/warden` refuse any agent without the label `paseo.factory=1` (the label the Factory puts on its workers and PM; extensions that spawn agents should add it, and set `PASEO_WARDEN=on` in their env so Warden is injected). The `warden_*` tools are hidden from other agents (`inbox_answer` likewise from agents without `paseo.assistant=1`). Warden's setting `scope` defaults to `factory`; every minute it also drops watches of archived or vanished agents and of non-Factory agents.

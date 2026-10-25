@@ -1,7 +1,7 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
-export const MODULES = ["roles", "blueprints", "leases", "warden", "inbox"] as const;
+export const MODULES = ["roles", "blueprints", "leases", "warden", "inbox", "supervisor"] as const;
 export type ModuleId = (typeof MODULES)[number];
 
 export const factorySettingsSchema = z.object({
@@ -13,8 +13,9 @@ export const factorySettingsSchema = z.object({
       leases: z.boolean().default(true),
       warden: z.boolean().default(true),
       inbox: z.boolean().default(true),
+      supervisor: z.boolean().default(true),
     })
-    .default({ roles: true, blueprints: true, leases: true, warden: true, inbox: true }),
+    .default({ roles: true, blueprints: true, leases: true, warden: true, inbox: true, supervisor: true }),
   /**
    * One-off, off by default: on the next start, a module with no Factory state yet copies the state
    * file of its old stand-alone plugin (agents-leases, agents-warden, agents-inbox).

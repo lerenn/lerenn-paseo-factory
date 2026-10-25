@@ -3,6 +3,7 @@ import { startBlueprints } from "./server/blueprints";
 import { startInbox } from "./server/inbox";
 import { startLeases } from "./server/leases";
 import { startRoles } from "./server/roles";
+import { startSupervisor } from "./server/supervisor";
 import { startWarden } from "./server/warden";
 import { FactoryHost } from "./server/host";
 import { buildServices } from "./server/services";
@@ -26,7 +27,7 @@ export default function contribute(server: PluginServerContext) {
   ];
 
   // Roles first: its create hook may set the scope variables the other modules read.
-  const stops = [startRoles(host), startLeases(host), startInbox(host), startWarden(host), startBlueprints(host)];
+  const stops = [startRoles(host), startLeases(host), startInbox(host), startWarden(host), startBlueprints(host), startSupervisor(host)];
   host.services = buildServices(host) as never;
   host.start();
 

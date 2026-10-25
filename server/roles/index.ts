@@ -81,6 +81,7 @@ export function startRoles(host: FactoryHost) {
   });
 
   host.gitSources = gitSources;
+  host.issueSources.push(async () => service.statuses(await configured()).filter((g) => g.error).map((g) => ({ key: `git:${g.id}`, text: `Git sync of ${g.label} fails (the previous copy is in use): ${g.error}` })));
   host.loadRole = async (name) => loadRole(name, (await configured()).map((s) => gitSources.rolesDir(s)));
   host.configuredSources = configured;
 

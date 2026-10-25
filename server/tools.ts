@@ -8,6 +8,8 @@ export interface CallContext {
   labels(): Promise<Record<string, string>>;
   /** Labels of any live agent (empty for an unknown or archived one). */
   labelsOf(agentId: string): Promise<Record<string, string>>;
+  /** A readable name for any agent (its title, else its id). */
+  nameOf(agentId: string): Promise<string>;
 }
 
 /** A tool as the `factory` MCP server serves it, whichever module or extension owns it. */
@@ -29,9 +31,9 @@ export class UsageError extends Error {}
 
 /** A module tool written against `{ engine, callerId }` as a host tool. */
 export function adapt<E>(
-  tool: { name: string; description: string; input: z.ZodObject; run(input: any, ctx: { engine: E; callerId: string; labels?: () => Promise<Record<string, string>>; labelsOf?: (id: string) => Promise<Record<string, string>> }): Promise<unknown> | unknown },
+  tool: { name: string; description: string; input: z.ZodObject; run(input: any, ctx: { engine: E; callerId: string; labels?: () => Promise<Record<string, string>>; labelsOf?: (id: string) => Promise<Record<string, string>>; nameOf?: (id: string) => Promise<string> }): Promise<unknown> | unknown },
   engine: E,
   extra: { requiresLabel?: HostTool["requiresLabel"] } = {},
 ): Omit<HostTool, "owner"> {
-  return { name: tool.name, description: tool.description, input: tool.input, ...extra, run: (input, call) => tool.run(input, { engine, callerId: call.callerId, labels: call.labels, labelsOf: call.labelsOf }) };
+  return { name: tool.name, description: tool.description, input: tool.input, ...extra, run: (input, call) => tool.run(input, { engine, callerId: call.callerId, labels: call.labels, labelsOf: call.labelsOf, nameOf: call.nameOf }) };
 }

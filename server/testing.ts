@@ -7,7 +7,7 @@ export function mcpFor<E>(engine: E, tools: Parameters<typeof adapt<E>>[0][], in
   return new McpServer({ tools: () => host, aliases: () => [], instructions: () => instructions });
 }
 
-export const caller = (callerId: string, labels: Record<string, string> = {}, labelsOf: (id: string) => Record<string, string> = () => labels) => ({ callerId, labels: async () => labels, labelsOf: async (id: string) => labelsOf(id) });
+export const caller = (callerId: string, labels: Record<string, string> = {}, labelsOf: (id: string) => Record<string, string> = () => labels) => ({ callerId, labels: async () => labels, labelsOf: async (id: string) => labelsOf(id), nameOf: async (id: string) => id });
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,7 @@ import { settingsSchema as wardenSettingsSchema } from "../shared/warden/setting
 import { settingsSchema as inboxSettingsSchema } from "../shared/inbox/settings";
 import { settingsSchema as leasesSettingsSchema } from "../shared/leases/settings";
 import { settingsSchema as blueprintsSettingsSchema } from "../shared/blueprints/settings";
+import { settingsSchema as supervisorSettingsSchema } from "../shared/supervisor/settings";
 import contribute from "../index.server";
 
 type Handler = (input: any, ctx: any) => any;
@@ -36,6 +37,7 @@ export function bootPlugin(settings: Record<string, object> = {}, paseoOverrides
     inbox: inboxSettingsSchema,
     leases: leasesSettingsSchema,
     blueprints: blueprintsSettingsSchema,
+    supervisor: supervisorSettingsSchema,
     roles: { parse: (v) => ({ sources: [], ...(v as object) }) },
   };
   const sent: { id: string; text: string }[] = [];

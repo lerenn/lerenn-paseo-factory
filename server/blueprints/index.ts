@@ -184,6 +184,20 @@ export function startBlueprints(host: FactoryHost) {
   };
   const engine = new Engine(store, ports);
   host.engines.blueprints = { engine, store };
+  host.issueSources.push(async () => {
+    const out: { key: string; text: string }[] = [];
+    const day = Date.now() - 24 * 3600_000;
+    for (const run of store.all()) {
+      const label = `${run.blueprint} ${run.vars.ticket || run.vars.incident_id || run.id}`;
+      const finishedBad = run.status === "failed" && (run.endedAt ?? 0) > day;
+      if (!(run.status === "paused" || finishedBad || (run.status === "waiting" && run.pm.pending))) continue;
+      const hasPm = await engine.hasLivePm(run);
+      if (hasPm && run.status !== "paused") continue; // a live PM is on it
+      out.push({ key: `run:${run.id}:${run.status}`, text: `Run ${run.id} (${label}) is ${run.status} at stage ${run.stage ?? "?"}${hasPm ? "" : " with no live PM"}: ${run.error ?? run.waitingFor ?? "no detail"}` });
+    }
+    for (const e of catalog.errors) out.push({ key: `bp-file:${e.file}`, text: `Blueprint file ${path.basename(e.file)} does not load: ${e.message}` });
+    return out;
+  });
 
   const removeTools = host.registerTools("blueprints", blueprintTools({ engine, catalog: async () => (await refresh()).blueprints }));
   host.setInstructions("blueprints", INSTRUCTIONS);

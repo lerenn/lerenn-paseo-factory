@@ -66,7 +66,7 @@ describe("the factory MCP server", () => {
 
   it("leaves agents alone when every module opts out", async () => {
     const { create } = boot();
-    expect(await create(request({ PASEO_WARDEN: "off", PASEO_INBOX: "off", PASEO_LEASES: "off" }))).toBeUndefined();
+    expect(await create(request({ PASEO_WARDEN: "off", PASEO_INBOX: "off", PASEO_LEASES: "off", PASEO_SUPERVISOR: "off" }))).toBeUndefined();
   });
 
   it("gives the PM role the blueprint tools and stage workers only the verdict tools", async () => {
@@ -466,5 +466,59 @@ describe("warden is for Factory agents only", () => {
     const listed = await b.rpc["warden.list"]({}, b.ctx);
     expect(listed.tasks.map((t: any) => t.agentId)).toContain("worker");
     expect((await b.rpc["warden.command"]({ agentId: "plain", args: "babysit" }, b.ctx)).message).toMatch(/Factory agents only/);
+  });
+});
+
+describe("the Supervisor", () => {
+  it("is reachable by every agent through supervisor_ask / supervisor_status, while reply and restart are its own", async () => {
+    process.env.FACTORY_DEFAULT_CWD = "/work";
+    try {
+      const sent: { id: string; text: string }[] = [];
+      const labels: Record<string, Record<string, string>> = { sup: { "paseo.factory": "1", "paseo.factory.supervisor": "1" }, coord: {} };
+      const b = bootPlugin({}, {
+        agents: {
+          create: async () => ({ id: "sup" }),
+          list: async () => ({ entries: Object.entries(labels).map(([id, l]) => ({ agent: { id, title: id === "coord" ? "Coordinator" : "Supervisor", labels: l, status: "idle" } })) }),
+          ref: (id: string) => ({ send: async (text: string) => void sent.push({ id, text }), refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {}, append: async () => ({}) } }),
+        },
+      });
+      cleanups.push(b.cleanup as () => void);
+      const login = async (id: string) => {
+        const out = await b.create(request());
+        await b.open({ agentId: id, env: out.env });
+        return out.env.PASEO_FACTORY_CAPABILITY as string;
+      };
+      const coord = await login("coord");
+      const sup = await login("sup");
+      const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+      const call = async (token: string, name: string, args: object = {}) => (await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })).body.result;
+      const names = async (token: string) => (await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((t: any) => t.name);
+      expect(await names(coord)).toEqual(expect.arrayContaining(["supervisor_ask", "supervisor_ask_status", "supervisor_status"]));
+      expect(await names(coord)).not.toContain("supervisor_reply");
+      expect(await names(coord)).not.toContain("extension_restart");
+      expect(await names(sup)).toEqual(expect.arrayContaining(["supervisor_reply", "extension_restart"]));
+      expect((await call(coord, "supervisor_reply", { request: "x", answer: "y" })).isError).toBe(true);
+
+      // the tab starts it; supervisor_status then exposes the stable agent id
+      expect(await b.rpc["supervisor.start"]({ restart: false }, b.ctx)).toEqual({ ok: true, message: null });
+      const status = JSON.parse((await call(coord, "supervisor_status")).content[0].text);
+      expect(status).toMatchObject({ agent_id: "sup" });
+
+      // ask -> the Supervisor gets the caller's NAME -> reply -> answer comes back to the asker
+      const asking = call(coord, "supervisor_ask", { question: "Is release-trains healthy?" });
+      const relayed = await until(async () => sent.find((m) => /Supervisor request/.test(m.text)), (m) => !!m);
+      expect(relayed!.text).toMatch(/from "Coordinator" \(coord\)/);
+      const id = /request (sq-\w+)/.exec(relayed!.text)![1];
+      expect((await call(sup, "supervisor_reply", { request: id, answer: "Yes." })).isError).toBeUndefined();
+      expect(JSON.parse((await asking).content[0].text)).toMatchObject({ status: "answered", answer: "Yes." });
+      const chat = await b.rpc["supervisor.status"]({}, b.ctx);
+      expect(chat.status.requests[0]).toMatchObject({ fromName: "Coordinator", answer: "Yes." });
+
+      // Louis writes from the tab
+      expect(await b.rpc["supervisor.send"]({ text: "status?" }, b.ctx)).toEqual({ ok: true, message: null });
+      expect(sent.at(-1)!.text).toBe("Message from Louis (Supervisor tab): status?");
+    } finally {
+      delete process.env.FACTORY_DEFAULT_CWD;
+    }
   });
 });

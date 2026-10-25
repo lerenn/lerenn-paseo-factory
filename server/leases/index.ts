@@ -45,6 +45,16 @@ export function startLeases(host: FactoryHost) {
   const store = new Store(process.env.LEASES_STATE ?? host.statePath("leases", "agents-leases"));
   const engine = new Engine(store, actions, () => current);
   host.engines.leases = engine;
+  host.issueSources.push(() => {
+    const out: { key: string; text: string }[] = [];
+    const now = Date.now();
+    for (const l of engine.views()) {
+      const waited = l.queue.filter((q) => now - q.enqueuedAt > 10 * 60_000);
+      if (waited.length > 0) out.push({ key: `lease:${l.name}:contended`, text: `Lease ${l.name} has ${waited.length} agent(s) queued for more than 10 min (holder: ${l.holder?.agentTitle ?? l.holder?.agentId ?? "none"}).` });
+    }
+    for (const e of store.events().filter((x) => x.type === "expired" && now - x.at < 60 * 60_000)) out.push({ key: `lease:${e.lease}:expired:${e.at}`, text: `Lease ${e.lease} expired without a release (holder ${e.actor}).` });
+    return out;
+  });
 
   // Wake agents right after a change instead of waiting for the next tick; a failure stays owed and the tick retries it.
   const flush = () => void engine.deliver().catch((error) => console.error("leases: deliver failed", error));

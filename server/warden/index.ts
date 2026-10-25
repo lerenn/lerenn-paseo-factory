@@ -65,6 +65,12 @@ export function startWarden(host: FactoryHost) {
   const store = new Store(process.env.WARDEN_STATE ?? process.env.WARDER_STATE ?? host.statePath("warden", "agents-warden"));
   const engine = new Engine(store, actions, () => current);
   host.engines.warden = engine;
+  host.issueSources.push(() =>
+    engine
+      .views()
+      .filter((t) => t.status === "escalated" || t.status === "gave-up")
+      .map((t) => ({ key: `warden:${t.id}:${t.status}`, text: `Warden ${t.status === "gave-up" ? "gave up on" : "escalated"} ${t.agentTitle ?? t.agentId} (task: ${t.task}); it did not answer ${t.unanswered} pings.` })),
+  );
   const removeTools = host.registerTools("warden", TOOLS.map((t) => adapt(t, engine, { requiresLabel: { key: FACTORY_LABEL, value: "1" } })));
   host.setInstructions("warden", INSTRUCTIONS);
   host.contribute({
