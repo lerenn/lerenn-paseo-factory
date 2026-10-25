@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { activityRpc, type ActivityEntry } from "../shared/rpc";
+import { filterActivity } from "./activity-filter";
 
 const TYPES: ActivityEntry["type"][] = ["run", "stage", "gate", "escalation", "lease", "merge", "deploy", "inbox", "extension"];
 
@@ -10,11 +11,6 @@ const ago = (now: number, at: number) => {
   const m = Math.max(0, Math.round((now - at) / 60_000));
   return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
 };
-
-/** Pure filter, exported for tests. Empty selections mean "all". */
-export function filterActivity(items: ActivityEntry[], f: { types: string[]; blueprint: string | null; role: string | null }): ActivityEntry[] {
-  return items.filter((i) => (f.types.length === 0 || f.types.includes(i.type)) && (!f.blueprint || i.blueprint === f.blueprint) && (!f.role || i.role === f.role));
-}
 
 /** The factory-wide feed, newest first. Read-only; a row's link opens the tab it belongs to. */
 export function ActivityScreen({ theme, layout, go }: Pick<PluginScreenProps, "theme" | "layout"> & { go(tab: string): void }) {
