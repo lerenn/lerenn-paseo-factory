@@ -57,6 +57,10 @@ PM tools (`blueprint_start` ...) are injected into agents whose `PASEO_AGENT_ROL
 
 The Overview tab (first, default) is a read-only dashboard: blueprint runs (failing or stalled highlighted), pending Inbox items, leases, Warden attention, live role agents, git sync status, extension health, recent activity and **Spend**. Spend aggregates Paseo's per-turn usage (`lastUsage`: tokens and `totalCostUsd`), recorded at each `agent.turn_ended` of agents the Factory spawned (label `paseo.factory=1`), per run, role and day (RPC `blueprints.spend`, stored in `spend.json`). Each run card has a **Timeline**: time per stage, working vs waiting, dispatches and retries, gate open/close times and escalations, built from the run's saved history.
 
+## Activity, diffs, transcripts
+
+The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalations, leases, Inbox items, merges and deploys) with filters by type, blueprint and role. Extensions add events with `POST /extensions/event` `{ id, type: "merge"|"deploy"|..., title, detail?, link? }` (bearer = endpoint token). Run cards show each PR's diff summary (files, +/−, read with `gh pr view`) and a link to the full diff, and an expandable read-only "latest messages" peek of the stage's agent (also in Roles › Agents).
+
 ## Start endpoint (Events plugin)
 
 The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) and serves on loopback only, with the token as a bearer:
