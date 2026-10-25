@@ -128,6 +128,15 @@ describe("inbox_answer", () => {
   });
 });
 
+async function until<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 5000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await read();
+    if (ok(v) || Date.now() > end) return v;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 describe("extension rpc", () => {
   const register = (reg: object) => ((globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void }).registerExtension(reg);
 
@@ -208,8 +217,7 @@ describe("extensions", () => {
       expect(first).toEqual({ runId: expect.any(String) });
       const again = (await (await post()).json()) as { runId: string };
       expect(again.runId).toBe(first.runId);
-      await new Promise((r) => setTimeout(r, 50));
-      const { runs } = await rpc["blueprints.list"]({ includeFinished: true }, ctx);
+      const { runs } = await until(() => rpc["blueprints.list"]({ includeFinished: true }, ctx), (r) => r.runs[0]?.status === "done");
       expect(runs[0]).toMatchObject({ id: first.runId, status: "done", requestedBy: "events" });
       expect(seen).toEqual([{ name: "Louis" }]);
       const listed = (await (await fetch(`${endpoint.url}/blueprints`, { headers: { authorization: `Bearer ${token}` } })).json()) as any;
@@ -294,13 +302,12 @@ describe("remote extensions (another plugin's process)", () => {
       await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx);
       const started = await fetch(`${f.endpoint.url}/blueprints/start`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ blueprint: "waiter", vars: {}, requestedBy: "t" }) });
       const { runId } = (await started.json()) as { runId: string };
-      await new Promise((r) => setTimeout(r, 80));
+      await until(async () => outcomeToken, (t) => !!t);
       let runs = (await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx)).runs;
       expect(runs[0]).toMatchObject({ id: runId, status: "running" });
       const done = await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok", summary: "merged" }) });
       expect(done.status).toBe(200);
-      await new Promise((r) => setTimeout(r, 80));
-      runs = (await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx)).runs;
+      runs = (await until(() => f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx), (r) => r.runs[0]?.status === "done")).runs;
       expect(runs[0]).toMatchObject({ status: "done" });
       expect((await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok" }) })).status).toBe(404);
     } finally {
