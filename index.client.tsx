@@ -1,6 +1,7 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
+import { installRegistry } from "./client/registry";
 import { FactoryScreen } from "./client/screen";
 import { hostBadgeComponent } from "./client/leases/host-badge";
 import { useRunsNeedingAttention } from "./client/blueprints";
@@ -49,6 +50,7 @@ interface AgentBadgeClient {
 }
 
 export default function contribute(client: PluginClientContext) {
+  installRegistry();
   const cleanups: (() => void | Promise<void>)[] = [];
   cleanups.push(client.addScreen({ id: "factory", title: "Paseo Factory", Component: FactoryScreen }));
   cleanups.push(client.addSidebarHeaderItem({ id: "factory", title: "Paseo Factory", Component: FactoryItem }));

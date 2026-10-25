@@ -80,6 +80,18 @@ const unregister = factory.registerExtension({
 
 `ctx` carries `runId`, `stageId`, `params` (the stage's own fields, templates rendered), `vars`, `paseo`, `signal` and `services` (`spawn`, `leases`, `warden`, `inbox`; `factory.services()` gives the same outside a stage). Stage kinds must be idempotent: a running stage runs again after a restart. If the extension loads before the Factory, push the registration onto `globalThis[Symbol.for("paseo.factory.pending")]` (an array); the Factory drains it.
 
+### Extension tab UI
+
+Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call) }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:
+
+```ts
+const queue = ((globalThis as any)[Symbol.for("paseo.factory.client")] ??= []);
+const add = (id, Tab) => (Array.isArray(queue) ? queue.push([id, Tab]) : queue.registerTab(id, Tab));
+add("release-trains", ({ theme, layout, extensionId, call }) => /* call("board", { ... }) */ null);
+```
+
+Until the Factory client has loaded, push `[id, Component]` onto that array; afterwards the global is the registry object and `registerTab(id, Component)` returns an unregister function. The component renders inside the extension's tab with `{ theme, layout, extensionId, call(name, input) }`; without one the tab shows the extension's metadata. It can use the host UI exports. Settings go through your own `rpc` entries (your server half reads and writes its own settings).
+
 ## Sidebar badge
 
 On hosts with `client.addAgentBadge`, agents with the `paseo.factory` label show `<blueprint> · <stage>`; the tooltip has the run and the role. Hosts without the API are unaffected.

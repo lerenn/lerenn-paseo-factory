@@ -127,6 +127,27 @@ describe("inbox_answer", () => {
   });
 });
 
+describe("extension rpc", () => {
+  const register = (reg: object) => ((globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void }).registerExtension(reg);
+
+  it("serves validated backend calls for an extension tab", async () => {
+    const { rpc, ctx } = boot();
+    const remove = register({
+      id: "board",
+      version: "1",
+      tab: "Board",
+      tools: [],
+      rpc: [{ name: "lanes", input: z.object({ n: z.number() }), output: z.object({ lanes: z.number() }), run: ({ n }: { n: number }) => ({ lanes: n * 2 }) }, { name: "bad", input: z.object({}), output: z.object({ a: z.string() }), run: () => ({ a: 1 }) }],
+    });
+    expect(await rpc["factory.extension.call"]({ id: "board", name: "lanes", input: { n: 2 } }, ctx)).toEqual({ ok: true, output: { lanes: 4 }, error: null });
+    expect((await rpc["factory.extension.call"]({ id: "board", name: "lanes", input: { n: "x" } }, ctx)).ok).toBe(false);
+    expect((await rpc["factory.extension.call"]({ id: "board", name: "bad" }, ctx)).ok).toBe(false);
+    expect((await rpc["factory.extension.call"]({ id: "board", name: "missing" }, ctx)).error).toMatch(/no rpc/);
+    expect(() => register({ id: "b2", version: "1", tools: [], rpc: [{ name: "Bad Name", input: z.object({}), output: z.object({}), run: () => ({}) }] })).toThrow(/lowercase/);
+    remove();
+  });
+});
+
 describe("extensions", () => {
   const register = (reg: object) => ((globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void }).registerExtension(reg);
 

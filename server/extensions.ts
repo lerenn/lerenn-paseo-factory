@@ -35,12 +35,23 @@ export interface ExtensionRegistration {
   tab?: string;
   tools: Omit<HostTool, "owner">[];
   stageKinds?: ExtensionStageKind[];
+  /** Backend calls for the extension's tab, reached through `factory.extension.call`. Cheap and side-effect-safe to poll. */
+  rpc?: ExtensionRpc[];
   /** Role definitions the extension ships (YAML text by name), offered next to the git ones. */
   roles?: { name: string; yaml: string }[];
   settingsSchema?: z.ZodType;
 }
 
-export interface Extension extends Omit<ExtensionRegistration, "tab" | "stageKinds" | "roles"> {
+export interface ExtensionRpc {
+  /** Lowercase letters, digits, '-' and '_' like tool names. */
+  name: string;
+  input: z.ZodType;
+  output: z.ZodType;
+  run(input: any, call: { callerId: string }): Promise<unknown> | unknown;
+}
+
+export interface Extension extends Omit<ExtensionRegistration, "tab" | "stageKinds" | "roles" | "rpc"> {
+  rpc: ExtensionRpc[];
   tab: string | null;
   stageKinds: ExtensionStageKind[];
   roles: { name: string; yaml: string }[];

@@ -291,7 +291,8 @@ export class FactoryHost {
   onExtension: ((e: Extension) => void)[] = [];
 
   registerExtension(reg: ExtensionRegistration): () => void {
-    const ext: Extension = { ...reg, tab: reg.tab ?? null, stageKinds: reg.stageKinds ?? [], roles: reg.roles ?? [] };
+    const ext: Extension = { ...reg, tab: reg.tab ?? null, stageKinds: reg.stageKinds ?? [], roles: reg.roles ?? [], rpc: reg.rpc ?? [] };
+    for (const r of ext.rpc) if (!/^[a-z][a-z0-9_-]*$/.test(r.name)) throw new Error(`rpc name "${r.name}" must be lowercase letters, digits, '-' and '_'`);
     if (!/^[a-z][a-z0-9-]*$/.test(ext.id)) throw new Error(`extension id "${ext.id}" must be lowercase letters, digits and '-'`);
     if (this.extensions.has(ext.id) || (MODULES_SET as Set<string>).has(ext.id)) throw new Error(`extension "${ext.id}" is already registered`);
     for (const t of ext.tools) if (this.tools.has(t.name)) throw new Error(`tool "${t.name}" already exists`);
@@ -302,6 +303,14 @@ export class FactoryHost {
       removeTools();
       this.extensions.delete(ext.id);
     };
+  }
+
+  /** Run an extension's backend call: input and output are validated with the extension's schemas. */
+  async callExtension(id: string, name: string, input: unknown, callerId = "user"): Promise<unknown> {
+    const rpc = this.extensions.get(id)?.rpc.find((r) => r.name === name);
+    if (!rpc) throw new Error(`extension "${id}" has no rpc "${name}"`);
+    const parsed = rpc.input.parse(input ?? {});
+    return rpc.output.parse(await rpc.run(parsed, { callerId }));
   }
 
   /** Services an extension gets in its stage kinds and tools. */

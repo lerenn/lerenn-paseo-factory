@@ -1,4 +1,5 @@
 import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { useCallback, useSyncExternalStore } from "react";
 import { SettingsCard, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -8,7 +9,8 @@ import { InboxScreen } from "./inbox";
 import { LeasesScreen } from "./leases";
 import { RolesScreen } from "./roles";
 import { WardenScreen } from "./warden";
-import { overviewRpc } from "../shared/rpc";
+import { extensionCallRpc, overviewRpc } from "../shared/rpc";
+import { subscribeTabs, tabFor } from "./registry";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
 const TITLES: Record<ModuleId, string> = { blueprints: "Blueprints", roles: "Roles", leases: "Leases", warden: "Warden", inbox: "Inbox" };
@@ -48,8 +50,19 @@ function SettingsTab({ theme, layout }: PluginScreenProps) {
   );
 }
 
-function ExtensionTab({ theme, ext }: PluginScreenProps & { ext: { id: string; version: string; tab: string | null; tools: string[]; stageKinds: string[] } }) {
+function ExtensionTab({ theme, layout, ext }: PluginScreenProps & { ext: { id: string; version: string; tab: string | null; tools: string[]; stageKinds: string[] } }) {
   const c = theme.colors;
+  const rpc = useRpc(extensionCallRpc);
+  const Component = useSyncExternalStore(subscribeTabs, () => tabFor(ext.id));
+  const call = useCallback(
+    async (name: string, input?: unknown) => {
+      const out = await rpc({ id: ext.id, name, input });
+      if (!out.ok) throw new Error(out.error ?? "extension call failed");
+      return out.output;
+    },
+    [rpc, ext.id],
+  );
+  if (Component) return <Component theme={theme} layout={layout} extensionId={ext.id} call={call} />;
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 16, gap: 6 }}>
       <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>{ext.tab ?? ext.id}</Text>
