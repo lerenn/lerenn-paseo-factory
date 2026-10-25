@@ -7,7 +7,7 @@ export function mcpFor<E>(engine: E, tools: Parameters<typeof adapt<E>>[0][], in
   return new McpServer({ tools: () => host, aliases: () => [], instructions: () => instructions });
 }
 
-export const caller = (callerId: string, labels: Record<string, string> = {}) => ({ callerId, labels: async () => labels });
+export const caller = (callerId: string, labels: Record<string, string> = {}, labelsOf: (id: string) => Record<string, string> = () => labels) => ({ callerId, labels: async () => labels, labelsOf: async (id: string) => labelsOf(id) });
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -6,6 +6,18 @@ export interface ToolContext {
   engine: Engine;
   /** The calling agent. */
   callerId: string;
+  labelsOf?: (agentId: string) => Promise<Record<string, string>>;
+}
+
+/** Warden watches Factory agents only: the ones the Factory (or an extension through it) spawned carry this label. */
+export { FACTORY_LABEL } from "./reconcile";
+import { FACTORY_LABEL } from "./reconcile";
+
+async function requireFactoryAgent(agentId: string, ctx: ToolContext, who: string): Promise<void> {
+  const labels = (await ctx.labelsOf?.(agentId)) ?? {};
+  if (labels[FACTORY_LABEL] !== "1") {
+    throw new UsageError(`Warden watches Factory agents only; ${who} is not one (it has no ${FACTORY_LABEL}=1 label).`);
+  }
 }
 
 export interface ToolDef {
@@ -73,7 +85,8 @@ export const TOOLS: ToolDef[] = [
       interval_minutes: interval,
       until,
     }),
-    run({ task, interval_minutes, until: u }, ctx) {
+    async run({ task, interval_minutes, until: u }, ctx) {
+      await requireFactoryAgent(ctx.callerId, ctx, "you");
       const t = ctx.engine.register({
         agentId: ctx.callerId,
         task,
@@ -96,7 +109,8 @@ export const TOOLS: ToolDef[] = [
       interval_minutes: interval,
       until,
     }),
-    run({ agent_id, task, interval_minutes, until: u }, ctx) {
+    async run({ agent_id, task, interval_minutes, until: u }, ctx) {
+      await requireFactoryAgent(agent_id, ctx, agent_id);
       const { store } = ctx.engine;
       if (!store.isAncestor(ctx.callerId, agent_id)) {
         throw new UsageError(`${agent_id} is not your subagent (or warden has not seen it yet).`);

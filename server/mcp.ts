@@ -48,13 +48,19 @@ export class McpServer {
       }
       case "ping":
         return reply({});
-      case "tools/list":
+      case "tools/list": {
+        const labels = await ctx.labels();
+        const visible = this.source.tools().filter((t) => !t.requiresLabel || labels[t.requiresLabel.key] === t.requiresLabel.value);
         return reply({
-          tools: this.source.tools().map((t) => ({ name: t.name, description: t.description, inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }) })),
+          tools: visible.map((t) => ({ name: t.name, description: t.description, inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }) })),
         });
+      }
       case "tools/call": {
         const tool = [...this.source.tools(), ...this.source.aliases()].find((t) => t.name === req.params?.name);
         if (!tool) return fail(-32602, `Unknown tool: ${req.params?.name}`);
+        if (tool.requiresLabel && (await ctx.labels())[tool.requiresLabel.key] !== tool.requiresLabel.value) {
+          return reply(textResult(`${tool.name} is not available to this agent.`, true));
+        }
         const parsed = tool.input.safeParse(req.params?.arguments ?? {});
         if (!parsed.success) return reply(textResult(`Invalid arguments: ${z.prettifyError(parsed.error)}`, true));
         try {

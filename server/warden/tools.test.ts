@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { settingsSchema } from "../../shared/warden/settings";
 import { Engine } from "./engine";
-import { caller, mcpFor } from "../testing";
+import { caller as plainCaller, mcpFor } from "../testing";
+
+/** Every agent in these tests is a Factory agent unless a test says otherwise. */
+const caller = (id: string) => plainCaller(id, { "paseo.factory": "1" });
 import { INSTRUCTIONS } from "./instructions";
 import { Store } from "./store";
 import { TOOLS } from "./tools";

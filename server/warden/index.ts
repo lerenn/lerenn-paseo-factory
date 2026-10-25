@@ -10,7 +10,8 @@ import { INTERVAL_ENV, parseInterval } from "./interval";
 import { envValue, NOTE, scopeApplies, SCOPE_ENV, TOOL_NAMES } from "./inject";
 import { INSTRUCTIONS } from "./instructions";
 import { Store } from "./store";
-import { TOOLS } from "./tools";
+import { FACTORY_LABEL, TOOLS } from "./tools";
+import { watchesToDrop, type LiveAgent } from "./reconcile";
 
 type Paseo = PluginHookContext["paseo"];
 type HookAgent = { id: string; workspaceId: string | null; parentAgentId: string | null; title: string | null };
@@ -64,7 +65,7 @@ export function startWarden(host: FactoryHost) {
   const store = new Store(process.env.WARDEN_STATE ?? process.env.WARDER_STATE ?? host.statePath("warden", "agents-warden"));
   const engine = new Engine(store, actions, () => current);
   host.engines.warden = engine;
-  const removeTools = host.registerTools("warden", TOOLS.map((t) => adapt(t, engine)));
+  const removeTools = host.registerTools("warden", TOOLS.map((t) => adapt(t, engine, { requiresLabel: { key: FACTORY_LABEL, value: "1" } })));
   host.setInstructions("warden", INSTRUCTIONS);
   host.contribute({
     module: "warden",
@@ -137,10 +138,26 @@ export function startWarden(host: FactoryHost) {
     }),
   ];
 
+  /** Warden watches live Factory agents only: drop watches of archived or gone agents and of non-Factory ones. */
+  async function reconcile(): Promise<void> {
+    if (!paseo || store.active().length === 0) return;
+    try {
+      const { entries } = await paseo.agents.list({ filter: { includeArchived: false } } as never);
+      const live = (entries as { agent: LiveAgent }[]).map((e) => e.agent);
+      for (const { task, why } of watchesToDrop(store.active(), live)) {
+        if (why === "archived") engine.finish(task, "archived", "The agent is archived or gone");
+        else engine.finish(task, "cancelled", "Warden watches Factory agents only");
+      }
+    } catch (error) {
+      console.error("warden: reconcile failed", error);
+    }
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   const loop = async () => {
     try {
+      await reconcile();
       await engine.tick();
     } catch (error) {
       console.error("warden: tick failed", error);
@@ -208,6 +225,9 @@ export function startWarden(host: FactoryHost) {
     capture(ctx);
     await ready;
     const command = parseCommand(args);
+    if (command.kind === "watch" && (await host.labelsOf(agentId))[FACTORY_LABEL] !== "1") {
+      return { message: "Warden watches Factory agents only; this agent was not started by the Factory." };
+    }
     if (command.kind === "watch") {
       store.upsertAgent(agentId, {});
       await seedChildren(ctx, agentId);

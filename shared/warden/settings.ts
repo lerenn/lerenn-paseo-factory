@@ -14,10 +14,11 @@ export const DEFAULT_PARENT_TEMPLATE =
 export const settingsSchema = z.object({
   enabled: z.boolean().default(true),
   /**
-   * Who gets the warden tools. "all": every new agent except those created with PASEO_WARDEN=off.
-   * "opt-in": only agents created with PASEO_WARDEN=on.
+   * Who gets the warden tools injected. "factory": the Factory's workers and PM, plus agents created with PASEO_WARDEN=on.
+   * "all": every new agent except those created with PASEO_WARDEN=off. "opt-in": only PASEO_WARDEN=on.
+   * Whatever the scope, Warden only registers agents labelled paseo.factory=1.
    */
-  scope: z.enum(["all", "opt-in"]).default("all"),
+  scope: z.enum(["factory", "all", "opt-in"]).default("factory"),
   /** How often tasks are evaluated. */
   tickSeconds: z.number().int().min(5).default(60),
   /** Never send more than one warden prompt (ping or parent notice) within this window, across all agents. */

@@ -45,7 +45,7 @@ export function startInbox(host: FactoryHost) {
   const store = new Store(process.env.INBOX_STATE ?? host.statePath("inbox", "agents-inbox"));
   const engine = new Engine(store, actions, () => current);
   host.engines.inbox = engine;
-  const removeTools = host.registerTools("inbox", TOOLS.map((t) => adapt(t, engine)));
+  const removeTools = host.registerTools("inbox", TOOLS.map((t) => adapt(t, engine, t.name === "inbox_answer" ? { requiresLabel: { key: "paseo.assistant", value: "1" } } : {})));
   host.setInstructions("inbox", INSTRUCTIONS);
   host.contribute({
     module: "inbox",

@@ -154,7 +154,7 @@ export class FactoryHost {
     if (!tool || name.startsWith("blueprint_")) return null;
     return async (args) => {
       const parsed = tool.input.parse(args);
-      return tool.run(parsed, { callerId: "factory", labels: async () => ({}) });
+      return tool.run(parsed, { callerId: "factory", labels: async () => ({}), labelsOf: async () => ({}) });
     };
   }
 
@@ -513,7 +513,7 @@ export class FactoryHost {
     }
     if (!session.agentId) return { status: 503, body: { error: "agent session not bound yet; retry shortly" } };
     const callerId = session.agentId;
-    const ctx: CallContext = { callerId, labels: () => this.labelsOf(callerId) };
+    const ctx: CallContext = { callerId, labels: () => this.labelsOf(callerId), labelsOf: (id) => this.labelsOf(id) };
     const reply = await mcp.handle(payload, ctx);
     this.afterCall.forEach((f) => f());
     return reply ? { status: 200, body: reply } : { status: 202, body: null };

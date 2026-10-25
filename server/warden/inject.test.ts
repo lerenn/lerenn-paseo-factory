@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { envValue, scopeApplies } from "./inject";
 
+describe("scope factory", () => {
+  it("injects for the Factory's workers and PM and for PASEO_WARDEN=on, never for others or off", () => {
+    expect(scopeApplies("factory", {})).toBe(false);
+    expect(scopeApplies("factory", undefined)).toBe(false);
+    expect(scopeApplies("factory", { PASEO_FACTORY_RUN: "bp-1" })).toBe(true);
+    expect(scopeApplies("factory", { PASEO_FACTORY_BLUEPRINTS: "on" })).toBe(true);
+    expect(scopeApplies("factory", { PASEO_WARDEN: "on" })).toBe(true);
+    expect(scopeApplies("factory", { PASEO_FACTORY_RUN: "bp-1", PASEO_WARDEN: "off" })).toBe(false);
+  });
+});
+
 describe("scopeApplies", () => {
   it("scope all: everyone but PASEO_WARDEN=off", () => {
     expect(scopeApplies("all", undefined)).toBe(true);

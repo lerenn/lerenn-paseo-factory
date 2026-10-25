@@ -8,9 +8,13 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 | Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume` |
 | Leases | Leases | One agent at a time on a named resource | `lease_acquire`, `_renew`, `_release`, `_list` |
 | Warden | Warden | Pings agents that go quiet; supervises subagents | `warden_register`, `_register_subagent`, `_update`, `_done`, `_list` |
-| Inbox | Inbox | Questions and approvals for the human | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
+| Inbox | Inbox | Multiple-choice questions and approvals for the human (2 to 4 options, an open "Other" always added) | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
 
 There is no data migration. Setting `importLegacyState` (off by default) copies the state file of the old stand-alone plugin (`agents-leases`, `agents-warden`, `agents-inbox`) once, for a module that has no Factory state yet.
+
+## Warden is for Factory agents only
+
+`warden_register`, `warden_register_subagent` and `/warden` refuse any agent without the label `paseo.factory=1` (the label the Factory puts on its workers and PM; extensions that spawn agents should add it, and set `PASEO_WARDEN=on` in their env so Warden is injected). The `warden_*` tools are hidden from other agents (`inbox_answer` likewise from agents without `paseo.assistant=1`). Warden's setting `scope` defaults to `factory`; every minute it also drops watches of archived or vanished agents and of non-Factory agents.
 
 ## Layout
 

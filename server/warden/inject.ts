@@ -6,9 +6,11 @@ export function envValue(env: Record<string, string | undefined> | undefined, na
   return env?.[name] ?? env?.[name.replace("WARDEN", "WARDER")];
 }
 
-export function scopeApplies(scope: "all" | "opt-in", env: Record<string, string> | undefined): boolean {
+export function scopeApplies(scope: "factory" | "all" | "opt-in", env: Record<string, string> | undefined): boolean {
   const value = envValue(env, SCOPE_ENV)?.toLowerCase();
   if (value === "off") return false;
+  // "factory": the Factory's own workers and PM, or an agent that opts in (extensions set PASEO_WARDEN=on on theirs).
+  if (scope === "factory") return value === "on" || !!env?.PASEO_FACTORY_RUN || env?.PASEO_FACTORY_BLUEPRINTS === "on";
   return scope === "all" || value === "on";
 }
 

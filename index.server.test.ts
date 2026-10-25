@@ -30,10 +30,10 @@ describe("the factory MCP server", () => {
     const out = await create(request());
     expect(Object.keys(out.config.mcpServers)).toEqual(["factory"]);
     const tools = out.config.toolPolicy.preapproved.map((t: any) => t.tool);
-    expect(tools).toEqual(expect.arrayContaining(["warden_register", "inbox_ask", "lease_acquire", "inbox_answer"]));
+    expect(tools).toEqual(expect.arrayContaining(["inbox_ask", "lease_acquire", "inbox_answer"]));
+    expect(tools).not.toContain("warden_register"); // Warden is for Factory agents only
     expect(tools).not.toContain("blueprint_start");
     expect(out.env.PASEO_FACTORY_CAPABILITY).toBeTruthy();
-    expect(out.config.systemPrompt).toMatch(/Warden:/);
     expect(out.config.systemPrompt).toMatch(/Agents Inbox:/);
     expect(out.config.systemPrompt).toMatch(/Agents Leases:/);
   });
@@ -46,7 +46,9 @@ describe("the factory MCP server", () => {
     const token = out.env.PASEO_FACTORY_CAPABILITY;
     const listed = await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const names = listed.body.result.tools.map((t: any) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["inbox_ask", "inbox_pending", "inbox_answer", "lease_acquire", "warden_register", "blueprint_list", "blueprint_verdict"]));
+    expect(names).toEqual(expect.arrayContaining(["inbox_ask", "inbox_pending", "lease_acquire", "blueprint_list", "blueprint_verdict"]));
+    expect(names).not.toContain("warden_register"); // hidden from agents without the factory label
+    expect(names).not.toContain("inbox_answer"); // hidden from agents without the assistant label
     const call = await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lease_acquire", arguments: { name: "pr:x#1", ttl: 60 } } });
     expect(JSON.parse(call.body.result.content[0].text)).toMatchObject({ status: "held" });
     expect((await mcp(endpoint.url, "bogus", { jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(401);
@@ -416,5 +418,53 @@ describe("inbox_ask as a multiple-choice question", () => {
     expect(items[0]).toMatchObject({ allowFreeText: true });
     const approval = await call({ question: "Deploy?", kind: "approval" });
     expect(approval.isError).toBeUndefined();
+  });
+});
+
+describe("warden is for Factory agents only", () => {
+  const labelled = (labels: Record<string, Record<string, string>>) => ({
+    agents: {
+      list: async () => ({ entries: Object.entries(labels).map(([id, l]) => ({ agent: { id, labels: l, status: "idle" } })) }),
+      ref: (id: string) => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {}, append: async () => ({}) } }),
+    },
+  });
+
+  it("injects Warden for Factory workers, shows the tools only to labelled agents and refuses the others", async () => {
+    const b = bootPlugin({}, labelled({ worker: { "paseo.factory": "1" }, plain: {} }));
+    cleanups.push(b.cleanup as () => void);
+    const worker = await b.create(request({ PASEO_FACTORY_RUN: "bp-1" }));
+    expect(worker.config.toolPolicy.preapproved.map((t: any) => t.tool)).toContain("warden_register");
+    expect(worker.config.systemPrompt).toMatch(/Warden:/);
+    const plainOut = await b.create(request());
+    expect(plainOut.config.toolPolicy.preapproved.map((t: any) => t.tool)).not.toContain("warden_register");
+    const login = async (id: string, out: any) => {
+      await b.open({ agentId: id, env: out.env });
+      return out.env.PASEO_FACTORY_CAPABILITY as string;
+    };
+    const workerToken = await login("worker", worker);
+    const plainToken = await login("plain", plainOut);
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const tools = async (token: string) => (await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools.map((t: any) => t.name);
+    expect(await tools(workerToken)).toContain("warden_register");
+    expect(await tools(plainToken)).not.toContain("warden_register");
+    const call = async (token: string, args: object) => (await mcp(endpoint.url, token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "warden_register", arguments: args } })).body.result;
+    expect((await call(workerToken, { task: "wait for CI" })).isError).toBeUndefined();
+    const refused = await call(plainToken, { task: "x" });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/Warden watches Factory agents only|not available/);
+  });
+
+  it("drops watches of archived agents and of non-Factory agents", async () => {
+    const b = bootPlugin({ warden: { tickSeconds: 5 } }, labelled({ worker: { "paseo.factory": "1" }, plain: {}, other: { "paseo.factory": "1" } }));
+    cleanups.push(b.cleanup as () => void);
+    await b.rpc["factory.overview"]({}, b.ctx);
+    const out = await b.create(request({ PASEO_FACTORY_RUN: "bp-1" }));
+    await b.open({ agentId: "worker", env: out.env });
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    await mcp(endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "warden_register", arguments: { task: "mine" } } });
+    // a user watch on a plain agent and one on an archived (absent) agent, as left by older versions
+    const listed = await b.rpc["warden.list"]({}, b.ctx);
+    expect(listed.tasks.map((t: any) => t.agentId)).toContain("worker");
+    expect((await b.rpc["warden.command"]({ agentId: "plain", args: "babysit" }, b.ctx)).message).toMatch(/Factory agents only/);
   });
 });
