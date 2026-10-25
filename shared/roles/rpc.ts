@@ -120,3 +120,24 @@ export const clearTokenRpc = defineRpc({
   input: z.object({ sourceId: z.string() }),
   output: z.object({}),
 });
+
+/** A live agent running with a role, and the blueprint run it works for, if any. */
+export const roleAgentSchema = z.object({
+  id: z.string(),
+  title: z.string().nullable(),
+  role: z.string(),
+  status: z.string(),
+  workspaceId: z.string().nullable(),
+  workspaceName: z.string().nullable(),
+  projectName: z.string().nullable(),
+  run: z.string().nullable(),
+  blueprint: z.string().nullable(),
+  stage: z.string().nullable(),
+});
+export type RoleAgent = z.infer<typeof roleAgentSchema>;
+
+export const listRoleAgentsRpc = defineRpc({
+  name: "roles.agents",
+  input: z.object({}),
+  output: z.object({ agents: z.array(roleAgentSchema) }),
+});

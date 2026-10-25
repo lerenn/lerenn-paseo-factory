@@ -1,6 +1,7 @@
 import type { FactoryHost } from "../host";
 import { GitSources } from "./git-sync";
 import { agentCreateHook, sessionOpenHook } from "./hook";
+import { roleAgents } from "./agents";
 import { RoleLimits } from "./limits";
 import { ProposalStore } from "./proposals";
 import { RolesService } from "./service";
@@ -10,6 +11,7 @@ import {
   createPullRequestRpc,
   deleteGitRoleRpc,
   listProposalsRpc,
+  listRoleAgentsRpc,
   listRolesRpc,
   saveGitRoleRpc,
   setTokenRpc,
@@ -48,6 +50,12 @@ export function startRoles(host: FactoryHost) {
     roles: await service.list(),
     git: service.statuses(await configured()),
   }));
+  server.handle(listRoleAgentsRpc, async (_input, ctx) => {
+    host.capture(ctx);
+    const { entries } = await ctx.paseo.agents.list({ filter: { includeArchived: false } } as never);
+    const { entries: workspaces } = await ctx.paseo.workspaces.list();
+    return { agents: roleAgents((entries as unknown as { agent: never }[]).map((e) => e.agent), limits.registered(), workspaces as never) };
+  });
   server.handle(syncSourcesRpc, async () => {
     const sources = await configured();
     await gitSources.syncAll(sources);

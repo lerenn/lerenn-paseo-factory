@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { ROLE_ENV } from "../../shared/roles/role";
+import { SubTabs } from "../subtabs";
 import { LaunchFields } from "./launch-fields";
 import { sourcesSummary } from "./sources-summary";
 import {
@@ -11,6 +12,7 @@ import {
   createPullRequestRpc,
   deleteGitRoleRpc,
   listProposalsRpc,
+  listRoleAgentsRpc,
   listRolesRpc,
   saveGitRoleRpc,
   setTokenRpc,
@@ -38,7 +40,7 @@ systemPrompt: |
 /** A role being written: the text, and the git source it will be proposed to. */
 type Editing = { text: string; original: string | null; sourceId: string };
 
-export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
+function TemplatesTab({ theme, layout, navigation }: PluginScreenProps) {
   const queryClient = useQueryClient();
   const listRoles = useRpc(listRolesRpc);
   const saveGitRole = useRpc(saveGitRoleRpc);
@@ -86,7 +88,7 @@ export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={styles.row}>
-        <Text style={styles.title}>Agent Roles</Text>
+        <Text style={styles.heading}>Templates</Text>
         {sources.length > 0 ? <Button styles={styles} label="New role" onPress={newRole} /> : null}
       </View>
       <Text style={styles.muted}>
@@ -116,19 +118,19 @@ export function RolesScreen({ theme, layout, navigation }: PluginScreenProps) {
           accessibilityRole="button"
           accessibilityLabel={`Role ${r.name}`}
           onPress={() => {
-            setSelected(r.name);
+            setSelected(selected === r.name ? null : r.name);
             setEditing(null);
           }}
           style={[styles.card, selected === r.name && styles.cardActive]}
         >
           <View style={styles.row}>
-            <Text style={styles.name}>{r.name}</Text>
-            <Text style={styles.badge}>{r.origin}</Text>
+            <Text style={styles.name}>{selected === r.name ? "▾" : "▸"} {r.name}</Text>
+            <Text style={[r.error ? styles.error : styles.muted, { flex: 1 }]} numberOfLines={1}>
+              {r.error ?? r.role?.description ?? ""}
+            </Text>
+            {r.role?.model ? <Text style={styles.muted} numberOfLines={1}>{r.role.model}</Text> : null}
+            <Text style={styles.badge} numberOfLines={1}>{r.origin}</Text>
           </View>
-          <Text style={r.error ? styles.error : styles.muted} numberOfLines={2}>
-            {r.error ?? r.role?.description ?? ""}
-          </Text>
-          {r.role && launchSummary(r.role) ? <Text style={styles.muted}>{launchSummary(r.role)}</Text> : null}
         </Pressable>
       ))}
 
@@ -234,6 +236,7 @@ function Detail(props: {
           <Field styles={styles} label="Environment" value={Object.keys({ ...role.env, ...pluginDefaults(role) }).join(", ") || "none"} />
           <Field styles={styles} label="Max concurrent agents" value={role.maxConcurrent ? String(role.maxConcurrent) : "no limit"} />
           <Field styles={styles} label="Provider options" value={role.providerOptions ? JSON.stringify(role.providerOptions) : "none"} />
+          <Field styles={styles} label="Leases" value={leaseRules(role) || "none"} />
           <Field styles={styles} label="Prompt" value={role.systemPrompt ?? "none"} />
         </>
       ) : null}
@@ -242,9 +245,17 @@ function Detail(props: {
         <Button styles={styles} label={props.busy ? "Deleting…" : "Delete"} onPress={props.onDelete} />
       </View>
       {props.error ? <Text style={styles.error}>{props.error}</Text> : null}
+      <Field styles={styles} label={`Source ${entry.origin}`} value={entry.text} />
       {role ? <StartAgent entry={entry} styles={styles} navigation={props.navigation} /> : null}
     </View>
   );
+}
+
+/** The lease rules a role carries: whether the Leases tools are on, and the prompt lines that mention a lease. */
+function leaseRules(role: NonNullable<RoleEntry["role"]>): string {
+  const on = role.env?.PASEO_LEASES === "on" || role.env?.PASEO_LEASES === "\"on\"";
+  const lines = (role.systemPrompt ?? "").split("\n").filter((l) => /lease/i.test(l)).map((l) => l.trim());
+  return [on ? "Leases tools on (PASEO_LEASES=on)" : "", ...lines].filter(Boolean).join("\n");
 }
 
 /** "claude · claude-haiku-5-5 · thinking low · plan", or "" when the role forces none of them. */
@@ -646,4 +657,92 @@ export function makeStyles(theme: PluginScreenProps["theme"], compact: boolean) 
     buttonText: { color: theme.colors.foreground, fontSize: 14 },
     buttonPrimaryText: { color: theme.colors.accentForeground, fontSize: 14 },
   };
+}
+
+
+function AgentsTab({ theme, layout, navigation }: PluginScreenProps) {
+  const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
+  const listAgents = useRpc(listRoleAgentsRpc);
+  const agents = useQuery({ queryKey: ["agents-roles", "agents"], queryFn: () => listAgents({}), refetchInterval: 5_000 });
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <Text style={styles.heading}>Agents running with a role</Text>
+      {agents.error ? <Text style={styles.error}>{String(agents.error)}</Text> : null}
+      {agents.data && agents.data.agents.length === 0 ? <Text style={styles.muted}>No live agent has a role right now.</Text> : null}
+      {agents.data?.agents.map((a) => (
+        <View key={a.id} style={styles.card}>
+          <Pressable accessibilityRole="button" onPress={() => setOpen((o) => ({ ...o, [a.id]: !o[a.id] }))} style={styles.row}>
+            <Text style={styles.name}>{open[a.id] ? "▾" : "▸"} {a.role}</Text>
+            <Text style={[styles.muted, { flex: 1 }]} numberOfLines={1}>{a.title ?? a.id}</Text>
+            {a.blueprint ? <Text style={styles.badge} numberOfLines={1}>{a.blueprint} · {a.stage}</Text> : null}
+            <Text style={styles.badge}>{a.status}</Text>
+          </Pressable>
+          {open[a.id] ? (
+            <View style={{ gap: 4 }}>
+              <Field styles={styles} label="Workspace" value={[a.projectName, a.workspaceName].filter(Boolean).join(" / ") || a.workspaceId || "unknown"} />
+              <Field styles={styles} label="Blueprint run" value={a.run ? `${a.run} (${a.blueprint} · ${a.stage})` : "none"} />
+              <Field styles={styles} label="Agent" value={a.id} />
+              {navigation?.openAgent ? <Button styles={styles} label="Open agent" onPress={() => navigation.openAgent({ agentId: a.id })} /> : null}
+            </View>
+          ) : null}
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function SettingsTab({ theme, layout }: PluginScreenProps) {
+  const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
+  const settings = useSettings(rolesSettings);
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <Text style={styles.heading}>Roles settings</Text>
+      <Text style={styles.muted}>Git sources, Sync now and tokens are in the Factory Settings tab: one sync feeds roles and blueprints.</Text>
+      {settings.status === "ready" ? (
+        settings.values.sources.length === 0 ? (
+          <Text style={styles.muted}>No git source yet.</Text>
+        ) : (
+          settings.values.sources.map((src, i) => (
+            <View key={`${src.url}-${i}`} style={styles.card}>
+              <SettingsSelect
+                label={`When you save a role change (${src.url}${src.ref ? `@${src.ref}` : ""})`}
+                hint="Pull request pushes a branch for review. Push commits straight to the branch and falls back to a pull request if the push is rejected."
+                value={src.writeMode}
+                options={[
+                  { label: "Propose a pull request", value: "pull-request" },
+                  { label: "Push to the branch", value: "push" },
+                ]}
+                onValueChange={(writeMode) =>
+                  void settings.save({ ...settings.values, sources: settings.values.sources.map((x, j) => (j === i ? { ...x, writeMode } : x)) }, settings.revision)
+                }
+              />
+            </View>
+          ))
+        )
+      ) : (
+        <Text style={styles.muted}>{settings.status === "loading" ? "Loading…" : `Settings: ${"error" in settings ? settings.error : ""}`}</Text>
+      )}
+      {settings.status === "ready" && settings.saveError ? <Text style={styles.error}>{settings.saveError}</Text> : null}
+    </ScrollView>
+  );
+}
+
+export function RolesScreen(props: PluginScreenProps) {
+  const styles = useMemo(() => makeStyles(props.theme, props.layout.compact), [props.theme, props.layout.compact]);
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={[styles.row, { paddingHorizontal: 16, paddingTop: 12 }]}>
+        <Text style={styles.title}>Agent Roles</Text>
+      </View>
+      <SubTabs
+        theme={props.theme}
+        tabs={[
+          { key: "agents", label: "Agents", render: () => <AgentsTab {...props} /> },
+          { key: "templates", label: "Templates", render: () => <TemplatesTab {...props} /> },
+          { key: "settings", label: "Settings", render: () => <SettingsTab {...props} /> },
+        ]}
+      />
+    </View>
+  );
 }

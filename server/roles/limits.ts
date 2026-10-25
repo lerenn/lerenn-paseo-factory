@@ -36,6 +36,11 @@ export class RoleLimits {
     writeFileSync(this.file, JSON.stringify(agents));
   }
 
+  /** Every agent the registry knows, by role. */
+  registered(): Record<string, string> {
+    return this.read();
+  }
+
   /** Record that `agentId` runs as `role` (idempotent). A new agent consumes one reservation. */
   register(agentId: string, role: string, created: boolean) {
     const agents = this.read();
