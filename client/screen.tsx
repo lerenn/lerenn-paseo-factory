@@ -11,12 +11,14 @@ import { RolesScreen } from "./roles";
 import { WardenScreen } from "./warden";
 import { extensionCallRpc, overviewRpc } from "../shared/rpc";
 import { GitSourcesSection } from "./git-sources";
+import { OverviewScreen } from "./overview";
 import { subscribeTabs, tabFor } from "./registry";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
 const TITLES: Record<ModuleId, string> = { blueprints: "Blueprints", roles: "Roles", leases: "Leases", warden: "Warden", inbox: "Inbox" };
 const SCREENS = { blueprints: BlueprintsScreen, roles: RolesScreen, leases: LeasesScreen, warden: WardenScreen, inbox: InboxScreen };
 const SETTINGS_TAB = "~settings";
+const OVERVIEW_TAB = "~overview";
 
 function SettingsTab({ theme, layout }: PluginScreenProps) {
   const settings = useSettings(factorySettings);
@@ -99,18 +101,19 @@ export function FactoryScreen(props: PluginScreenProps) {
   const query = useQuery({ queryKey: ["factory", "overview"], queryFn: () => overview({}), refetchInterval: 15_000 });
   const modules = query.data?.settings?.modules;
   const { builtin, extensionTabs } = useMemo(() => {
-    const builtin: { key: string; label: string }[] = MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id, label: TITLES[id] }));
+    const builtin: { key: string; label: string }[] = [{ key: OVERVIEW_TAB, label: "Overview" }, ...MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id as string, label: TITLES[id] }))];
     builtin.push({ key: SETTINGS_TAB, label: "Settings" });
     const extensionTabs = (query.data?.extensions ?? []).filter((e) => e.tab).map((e) => ({ key: `ext:${e.id}`, label: e.tab as string, health: e.health }));
     return { builtin, extensionTabs };
   }, [modules, query.data?.extensions]);
   const tabs = useMemo(() => [...builtin, ...extensionTabs], [builtin, extensionTabs]);
-  const [picked, setPicked] = useState<string>("blueprints");
+  const [picked, setPicked] = useState<string>(OVERVIEW_TAB);
   const tab = tabs.some((t) => t.key === picked) ? picked : tabs[0].key;
   const c = theme.colors;
 
   let body;
-  if (tab === SETTINGS_TAB) body = <SettingsTab {...props} />;
+  if (tab === OVERVIEW_TAB) body = <OverviewScreen theme={theme} layout={props.layout} go={(k) => setPicked(k === "settings" ? SETTINGS_TAB : k)} />;
+  else if (tab === SETTINGS_TAB) body = <SettingsTab {...props} />;
   else if (tab.startsWith("ext:")) {
     const ext = query.data?.extensions.find((e) => `ext:${e.id}` === tab);
     body = ext ? <ExtensionTab {...props} ext={ext} /> : null;
