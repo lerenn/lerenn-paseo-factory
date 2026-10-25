@@ -11,6 +11,7 @@ import { RolesScreen } from "./roles";
 import { WardenScreen } from "./warden";
 import { extensionCallRpc, overviewRpc } from "../shared/rpc";
 import { GitSourcesSection } from "./git-sources";
+import { ActivityScreen } from "./activity";
 import { OverviewScreen } from "./overview";
 import { subscribeTabs, tabFor } from "./registry";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
@@ -19,6 +20,7 @@ const TITLES: Record<ModuleId, string> = { blueprints: "Blueprints", roles: "Rol
 const SCREENS = { blueprints: BlueprintsScreen, roles: RolesScreen, leases: LeasesScreen, warden: WardenScreen, inbox: InboxScreen };
 const SETTINGS_TAB = "~settings";
 const OVERVIEW_TAB = "~overview";
+const ACTIVITY_TAB = "~activity";
 
 function SettingsTab({ theme, layout }: PluginScreenProps) {
   const settings = useSettings(factorySettings);
@@ -101,7 +103,7 @@ export function FactoryScreen(props: PluginScreenProps) {
   const query = useQuery({ queryKey: ["factory", "overview"], queryFn: () => overview({}), refetchInterval: 15_000 });
   const modules = query.data?.settings?.modules;
   const { builtin, extensionTabs } = useMemo(() => {
-    const builtin: { key: string; label: string }[] = [{ key: OVERVIEW_TAB, label: "Overview" }, ...MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id as string, label: TITLES[id] }))];
+    const builtin: { key: string; label: string }[] = [{ key: OVERVIEW_TAB, label: "Overview" }, { key: ACTIVITY_TAB, label: "Activity" }, ...MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id as string, label: TITLES[id] }))];
     builtin.push({ key: SETTINGS_TAB, label: "Settings" });
     const extensionTabs = (query.data?.extensions ?? []).filter((e) => e.tab).map((e) => ({ key: `ext:${e.id}`, label: e.tab as string, health: e.health }));
     return { builtin, extensionTabs };
@@ -113,6 +115,7 @@ export function FactoryScreen(props: PluginScreenProps) {
 
   let body;
   if (tab === OVERVIEW_TAB) body = <OverviewScreen theme={theme} layout={props.layout} go={(k) => setPicked(k === "settings" ? SETTINGS_TAB : k)} />;
+  else if (tab === ACTIVITY_TAB) body = <ActivityScreen theme={theme} layout={props.layout} go={(k) => setPicked(k === "settings" ? SETTINGS_TAB : k)} />;
   else if (tab === SETTINGS_TAB) body = <SettingsTab {...props} />;
   else if (tab.startsWith("ext:")) {
     const ext = query.data?.extensions.find((e) => `ext:${e.id}` === tab);

@@ -1,9 +1,10 @@
 import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
-import { SettingsCard, SettingsInput, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { ExternalLink, SettingsCard, SettingsInput, SettingsSwitch } from "@getpaseo/plugin/client/ui";
+import { TranscriptPeek } from "../transcript-peek";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { abortRunRpc, listRunsRpc, retryRunRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, startRunRpc } from "../../shared/blueprints/rpc";
 import type { RunView, StageView } from "../../shared/blueprints/run";
 import { buildTimeline, formatDuration } from "../../shared/blueprints/timeline";
 import { blueprintsSettings } from "../../shared/blueprints/settings";
@@ -41,7 +42,27 @@ export function needsAttention(run: RunView): boolean {
   return run.pmPending !== null || run.status === "failed" || run.status === "paused";
 }
 
-export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
+/** PRs of a run with their diff summary; fetched only once the card is open. */
+function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }) {
+  const call = useRpc(runDiffRpc);
+  const q = useQuery({ queryKey: ["blueprints", "diff", runId], queryFn: () => call({ runId }), staleTime: 30_000 });
+  const label = (url: string) => url.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/, "$1#$2");
+  if (!q.data || q.data.prs.length === 0) return null;
+  return (
+    <View style={{ gap: 2 }}>
+      <Text style={s.muted}>Pull requests</Text>
+      {q.data.prs.map((pr) => (
+        <View key={pr.url} style={s.line}>
+          <Text style={s.text} selectable>{label(pr.url)}</Text>
+          <Text style={s.muted}>{pr.error ? pr.error : `${pr.files} files, +${pr.additions} −${pr.deletions}`}</Text>
+          <ExternalLink href={pr.filesUrl}>View full diff</ExternalLink>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProps) {
   const list = useRpc(listRunsRpc);
   const startCall = useRpc(startRunRpc);
   const abortCall = useRpc(abortRunRpc);
@@ -158,6 +179,11 @@ export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
         {varEntries.length > 0 ? (
           <Text style={s.muted} selectable>{varEntries.map(([k, v]) => `${k}=${v.length > 60 ? `${v.slice(0, 59)}…` : v}`).join(" · ")}</Text>
         ) : null}
+        <RunPullRequests runId={run.id} s={s} />
+        {(() => {
+          const agentId = run.stages.find((st) => st.id === run.stage)?.agentId ?? null;
+          return agentId ? <TranscriptPeek agentId={agentId} theme={theme} navigation={navigation} /> : null;
+        })()}
         <Pressable onPress={() => setExpanded((e) => ({ ...e, [`tl:${run.id}`]: !e[`tl:${run.id}`] }))}>
           <Text style={s.muted}>{expanded[`tl:${run.id}`] ? "▾" : "▸"} Timeline</Text>
         </Pressable>

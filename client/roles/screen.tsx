@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { ROLE_ENV } from "../../shared/roles/role";
 import { SubTabs } from "../subtabs";
+import { TranscriptPeek } from "../transcript-peek";
 import { LaunchFields } from "./launch-fields";
 import { sourcesSummary } from "./sources-summary";
 import {
@@ -683,6 +684,7 @@ function AgentsTab({ theme, layout, navigation }: PluginScreenProps) {
               <Field styles={styles} label="Workspace" value={[a.projectName, a.workspaceName].filter(Boolean).join(" / ") || a.workspaceId || "unknown"} />
               <Field styles={styles} label="Blueprint run" value={a.run ? `${a.run} (${a.blueprint} · ${a.stage})` : "none"} />
               <Field styles={styles} label="Agent" value={a.id} />
+              <TranscriptPeek agentId={a.id} theme={theme} navigation={navigation} />
               {navigation?.openAgent ? <Button styles={styles} label="Open agent" onPress={() => navigation.openAgent({ agentId: a.id })} /> : null}
             </View>
           ) : null}
