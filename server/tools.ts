@@ -15,6 +15,8 @@ export interface HostTool {
   owner: string;
   description: string;
   input: z.ZodObject;
+  /** Advertised instead of `input`'s schema (tools served by another process validate their own input). */
+  jsonSchema?: Record<string, unknown>;
   run(input: any, ctx: CallContext): Promise<unknown> | unknown;
 }
 

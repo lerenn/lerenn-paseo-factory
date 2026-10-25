@@ -50,7 +50,7 @@ export class McpServer {
         return reply({});
       case "tools/list":
         return reply({
-          tools: this.source.tools().map((t) => ({ name: t.name, description: t.description, inputSchema: z.toJSONSchema(t.input, { io: "input" }) })),
+          tools: this.source.tools().map((t) => ({ name: t.name, description: t.description, inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }) })),
         });
       case "tools/call": {
         const tool = [...this.source.tools(), ...this.source.aliases()].find((t) => t.name === req.params?.name);

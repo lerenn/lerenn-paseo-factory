@@ -80,6 +80,20 @@ const unregister = factory.registerExtension({
 
 `ctx` carries `runId`, `stageId`, `params` (the stage's own fields, templates rendered), `vars`, `paseo`, `signal` and `services` (`spawn`, `leases`, `warden`, `inbox`; `factory.services()` gives the same outside a stage). Stage kinds must be idempotent: a running stage runs again after a restart. If the extension loads before the Factory, push the registration onto `globalThis[Symbol.for("paseo.factory.pending")]` (an array); the Factory drains it.
 
+### Extensions in another plugin's process
+
+Paseo runs each plugin's server in its own process, so `globalThis` registration only works for code inside the Factory's process. Other plugins register over the Factory's loopback endpoint (`~/.paseo/factory/endpoint.json`, bearer = its token) and serve a small loopback API of their own:
+
+`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
+
+The Factory forwards, with `Authorization: Bearer <callback.token>`:
+- `POST <callback>/tools/<name>` `{ input, callerId }` → `{ result }` (the tool is served under the `factory` MCP server with your `inputSchema`; validate the input yourself; an error status with `{ error }` becomes the tool error).
+- `POST <callback>/rpc/<name>` `{ input, callerId }` → `{ output }` (for the tab, through `factory.extension.call`).
+- `POST <callback>/stages/<kind>` `{ runId, stageId, blueprint, params, vars, outcomeToken }` → `{ outcome: { verdict, summary?, data? } }`, or `{ pending: true }` for a stage that waits: finish it later with `POST <factory>/stages/<outcomeToken>/outcome` `{ verdict, summary?, data? }` (bearer = the endpoint token; one use).
+- `GET <callback>/health`: any HTTP answer counts as alive. After 3 consecutive unreachable calls or probes (probed once a minute) the extension is dropped.
+
+Roles shipped by an extension and `ctx.services` are in-process only for now.
+
 ### Extension tab UI
 
 Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call) }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:

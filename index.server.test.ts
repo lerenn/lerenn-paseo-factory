@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -216,5 +217,111 @@ describe("extensions", () => {
     } finally {
       delete process.env.FACTORY_BLUEPRINTS_DIR;
     }
+  });
+});
+
+describe("remote extensions (another plugin's process)", () => {
+  async function extensionServer(handlers: Record<string, ((body: any) => any) | undefined>) {
+    const calls: { path: string; auth: string | undefined; body: any }[] = [];
+    const server = createServer((req, res) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        const body = data ? JSON.parse(data) : {};
+        calls.push({ path: req.url ?? "", auth: req.headers.authorization, body });
+        const handler: ((b: any) => any) | undefined = handlers[req.url ?? ""];
+        res.writeHead(handler ? 200 : 404, { "content-type": "application/json" });
+        res.end(JSON.stringify(handler ? handler(body) : { error: "nope" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const url = `http://127.0.0.1:${(server.address() as any).port}`;
+    cleanups.push(() => void server.close());
+    return { url, calls, close: () => new Promise<void>((r) => server.close(() => r())) };
+  }
+
+  async function factory() {
+    const b = boot();
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
+    const register = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/register`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    return { ...b, endpoint, token, register };
+  }
+
+  it("registers over the endpoint, forwards tools, rpc and stage kinds, and is idempotent", async () => {
+    const ext = await extensionServer({
+      "/tools/train_status": (b) => ({ result: { echoed: b.input, by: b.callerId } }),
+      "/rpc/board": (b) => ({ output: { lanes: b.input.n } }),
+      "/stages/train": (b) => ({ outcome: { verdict: "ok", summary: `train ${b.params.name}` } }),
+    });
+    const { register, rpc, ctx, create, open, endpoint, token } = await factory();
+    const body = {
+      id: "release-trains",
+      version: "1",
+      tab: "Release Trains",
+      callback: { url: ext.url, token: "ext-secret-token" },
+      tools: [{ name: "train_status", description: "Status", inputSchema: { type: "object", properties: { lane: { type: "string" } } } }],
+      rpc: [{ name: "board" }],
+      stageKinds: [{ kind: "train" }],
+    };
+    expect((await register(body, "wrong")).status).toBe(401);
+    expect((await register({ ...body, callback: { url: "http://example.com", token: "ext-secret-token" } })).status).toBe(400);
+    expect((await register(body)).status).toBe(200);
+    expect((await register(body)).status).toBe(200); // re-register after a restart of either side
+
+    const out = await create(request());
+    await open({ agentId: "a1", env: out.env });
+    const cap = out.env.PASEO_FACTORY_CAPABILITY;
+    const listed = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(listed.body.result.tools.find((t: any) => t.name === "train_status").inputSchema).toEqual(body.tools[0].inputSchema);
+    const called = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "train_status", arguments: { lane: "dev" } } });
+    expect(JSON.parse(called.body.result.content[0].text)).toEqual({ echoed: { lane: "dev" }, by: "a1" });
+    expect(ext.calls[0].auth).toBe("Bearer ext-secret-token");
+    expect(await rpc["factory.extension.call"]({ id: "release-trains", name: "board", input: { n: 3 } }, ctx)).toEqual({ ok: true, output: { lanes: 3 }, error: null });
+    expect((await rpc["factory.overview"]({}, ctx)).extensions.map((e: any) => e.id)).toEqual(["release-trains"]);
+    void token;
+  });
+
+  it("completes a waiting stage through POST /stages/<token>/outcome", async () => {
+    let outcomeToken = "";
+    const ext = await extensionServer({ "/stages/wait": (b) => ((outcomeToken = b.outcomeToken), { pending: true }) });
+    const dir = mkdtempSync(path.join(tmpdir(), "bp-"));
+    writeFileSync(path.join(dir, "waiter.toml"), `name = "waiter"\nversion = 1\n[[stage]]\nid = "w"\nkind = "wait"\n[stage.on]\nok = "done"\nerror = "failed"\n`);
+    process.env.FACTORY_BLUEPRINTS_DIR = dir;
+    try {
+      const f = await factory();
+      await f.register({ id: "waiter-ext", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, stageKinds: [{ kind: "wait" }] });
+      await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx);
+      const started = await fetch(`${f.endpoint.url}/blueprints/start`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ blueprint: "waiter", vars: {}, requestedBy: "t" }) });
+      const { runId } = (await started.json()) as { runId: string };
+      await new Promise((r) => setTimeout(r, 80));
+      let runs = (await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx)).runs;
+      expect(runs[0]).toMatchObject({ id: runId, status: "running" });
+      const done = await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok", summary: "merged" }) });
+      expect(done.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 80));
+      runs = (await f.rpc["blueprints.list"]({ includeFinished: true }, f.ctx)).runs;
+      expect(runs[0]).toMatchObject({ status: "done" });
+      expect((await fetch(`${f.endpoint.url}/stages/${outcomeToken}/outcome`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ verdict: "ok" }) })).status).toBe(404);
+    } finally {
+      delete process.env.FACTORY_BLUEPRINTS_DIR;
+    }
+  });
+
+  it("drops an extension whose callback stays unreachable, and it can register again", async () => {
+    const ext = await extensionServer({ "/health": () => ({ ok: true }), "/tools/ping": () => ({ result: "pong" }) });
+    const f = await factory();
+    const body = { id: "flaky", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, tools: [{ name: "ping_tool" }] };
+    await f.register(body);
+    expect((await f.rpc["factory.overview"]({}, f.ctx)).extensions).toHaveLength(1);
+    await ext.close();
+    const check = () => ((globalThis as any)[Symbol.for("paseo.factory")] as { checkRemotes(): Promise<string[]> }).checkRemotes();
+    expect(await check()).toEqual([]);
+    expect(await check()).toEqual([]);
+    expect(await check()).toEqual(["flaky"]);
+    expect((await f.rpc["factory.overview"]({}, f.ctx)).extensions).toEqual([]);
+    const again = await extensionServer({});
+    expect((await f.register({ ...body, callback: { url: again.url, token: "ext-secret-token" } })).status).toBe(200);
+    expect((await f.rpc["factory.overview"]({}, f.ctx)).extensions).toHaveLength(1);
   });
 });

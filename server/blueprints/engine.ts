@@ -865,6 +865,7 @@ export class Engine {
     this.store.save();
   }
 
+  /** An extension stage may take long (a wait): it runs outside the run's lock, which only its completion takes. */
   private async runExtension(run: Run, id: string, def: Stage): Promise<void> {
     const st = run.stages[id];
     const handler = this.ports.stageKind(def.kind ?? "");
@@ -875,21 +876,24 @@ export class Engine {
     st.status = "running";
     this.store.save();
     const { id: _id, kind: _k, on: _o, skip_if: _s, title: _t, ...params } = def as Record<string, unknown> & Stage;
-    let outcome: StageOutcome;
-    try {
-      outcome = await handler({ runId: run.id, stageId: id, blueprint: run.blueprint, params: this.deepRender(run, params) as Record<string, unknown>, vars: { ...run.vars } });
-    } catch (error) {
-      outcome = { verdict: "error", summary: (error as Error).message };
-    }
-    st.verdict = outcome.verdict;
-    st.summary = outcome.summary ?? null;
-    st.data = outcome.data ?? {};
-    st.status = "done";
-    st.endedAt = this.ports.now();
-    this.log(run, "extension", id, outcome.verdict);
-    const next = def.on[outcome.verdict] ?? def.on.default;
-    if (!next) return this.finish(run, "failed", `stage ${id}: no edge for verdict "${outcome.verdict}"`);
-    return this.go(run, id, next, `verdict ${outcome.verdict}`);
+    const entry = st.runs;
+    void handler({ runId: run.id, stageId: id, blueprint: run.blueprint, params: this.deepRender(run, params) as Record<string, unknown>, vars: { ...run.vars } })
+      .catch((error): StageOutcome => ({ verdict: "error", summary: (error as Error).message }))
+      .then((outcome) =>
+        this.exclusive(run.id, async () => {
+          if (run.stage !== id || st.status !== "running" || st.runs !== entry || run.status !== "running") return; // aborted, moved or re-entered meanwhile
+          st.verdict = outcome.verdict;
+          st.summary = outcome.summary ?? null;
+          st.data = outcome.data ?? {};
+          st.status = "done";
+          st.endedAt = this.ports.now();
+          this.log(run, "extension", id, outcome.verdict);
+          const next = def.on[outcome.verdict] ?? def.on.default;
+          if (!next) return this.finish(run, "failed", `stage ${id}: no edge for verdict "${outcome.verdict}"`);
+          return this.go(run, id, next, `verdict ${outcome.verdict}`);
+        }),
+      )
+      .catch((e) => this.crash(run, e));
   }
 
   // ---- background ----

@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { z } from "zod";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -11,6 +12,7 @@ import { SessionStore } from "./sessions";
 import type { CallContext, HostTool } from "./tools";
 import type { Extension, ExtensionRegistration } from "./extensions";
 import { registerWithHost } from "./extensions";
+import { buildRemote, MAX_FAILURES, PendingOutcomes, probe, remoteRegistrationSchema, type RemoteHandle } from "./remote";
 
 type CreateRequest = PluginBeforeRequests["agent.create"];
 export type Paseo = PluginHookContext["paseo"];
@@ -61,6 +63,8 @@ export class FactoryHost {
   private readonly contributions: Contribution[] = [];
   private readonly createHooks: BeforeCreate[] = [];
   private readonly extensions = new Map<string, Extension>();
+  private readonly remotes = new Map<string, { handle: RemoteHandle; remove: () => void }>();
+  private readonly pending = new PendingOutcomes();
   private readonly labelCache = new Map<string, { at: number; labels: Record<string, string> }>();
   private http: Server | null = null;
   private current: FactorySettings | null = null;
@@ -305,6 +309,40 @@ export class FactoryHost {
     };
   }
 
+  /**
+   * Register (or re-register, idempotently) an extension that lives in another plugin's process.
+   * It is dropped after MAX_FAILURES consecutive unreachable calls or health probes.
+   */
+  registerRemote(raw: import("./remote").RemoteRegistration): void {
+    const old = this.remotes.get(raw.id);
+    if (old) old.remove();
+    else if (this.extensions.has(raw.id)) throw new Error(`extension "${raw.id}" is already registered in-process`);
+    const handle = buildRemote(raw, this.pending);
+    const removeInner = this.registerExtension(handle.registration);
+    const entry = {
+      handle,
+      remove: () => {
+        removeInner();
+        if (this.remotes.get(raw.id) === entry) this.remotes.delete(raw.id);
+      },
+    };
+    this.remotes.set(raw.id, entry);
+  }
+
+  /** Probe the remote extensions; drop the ones that stay unreachable. */
+  async checkRemotes(): Promise<string[]> {
+    const dropped: string[] = [];
+    for (const [id, { handle, remove }] of [...this.remotes]) {
+      if (handle.failures < MAX_FAILURES) await probe(handle);
+      if (handle.failures >= MAX_FAILURES) {
+        remove();
+        dropped.push(id);
+        console.error(`factory: extension "${id}" dropped, its callback is unreachable`);
+      }
+    }
+    return dropped;
+  }
+
   /** Run an extension's backend call: input and output are validated with the extension's schemas. */
   async callExtension(id: string, name: string, input: unknown, callerId = "user"): Promise<unknown> {
     const rpc = this.extensions.get(id)?.rpc.find((r) => r.name === name);
@@ -319,7 +357,7 @@ export class FactoryHost {
   private registerGlobal(): void {
     const g = globalThis as Record<symbol, unknown>;
     const key = Symbol.for("paseo.factory");
-    g[key] = { registerExtension: (reg: ExtensionRegistration) => this.registerExtension(reg), services: () => this.services };
+    g[key] = { registerExtension: (reg: ExtensionRegistration) => this.registerExtension(reg), services: () => this.services, checkRemotes: () => this.checkRemotes() };
     registerWithHost(g, this);
   }
 
@@ -355,7 +393,11 @@ export class FactoryHost {
     });
   }
 
+  private healthTimer: any = null;
+
   private writeEndpoint(): void {
+    this.healthTimer ??= setInterval(() => void this.checkRemotes().catch(() => undefined), 60_000);
+    this.healthTimer.unref?.();
     try {
       const file = endpointFile();
       mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -374,6 +416,40 @@ export class FactoryHost {
     const host = req.headers.host ?? "";
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return { status: 403, body: { error: "forbidden host" } };
     const pathname = (req.url ?? "").split("?")[0];
+
+    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister") {
+      const given = Buffer.from(this.bearer(req) ?? "");
+      const want = Buffer.from(this.endpointToken);
+      if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
+      if (req.method !== "POST") return { status: 405, body: { error: "POST only" } };
+      let input: any;
+      try {
+        input = JSON.parse(await readBody(req));
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } };
+      }
+      if (pathname === "/extensions/register") {
+        const parsed = remoteRegistrationSchema.safeParse(input);
+        if (!parsed.success) return { status: 400, body: { error: z.prettifyError(parsed.error) } };
+        try {
+          this.registerRemote(parsed.data);
+        } catch (error) {
+          return { status: 400, body: { error: (error as Error).message } };
+        }
+        return { status: 200, body: { ok: true, id: parsed.data.id } };
+      }
+      if (pathname === "/extensions/unregister") {
+        const known = typeof input?.id === "string" && this.remotes.get(input.id);
+        if (known) known.remove();
+        return { status: 200, body: { ok: !!known } };
+      }
+      const token = pathname.split("/")[2];
+      const outcome = input?.outcome ?? input;
+      if (typeof outcome?.verdict !== "string") return { status: 400, body: { error: "outcome.verdict is required" } };
+      return this.pending.complete(token, { verdict: outcome.verdict, summary: outcome.summary, data: outcome.data })
+        ? { status: 200, body: { ok: true } }
+        : { status: 404, body: { error: "no stage waits for this token" } };
+    }
 
     if (pathname === "/blueprints" || pathname === "/blueprints/start") {
       const given = Buffer.from(this.bearer(req) ?? "");
@@ -430,6 +506,7 @@ export class FactoryHost {
 
   stop(): Promise<void> {
     this.unsubscribe();
+    if (this.healthTimer) clearInterval(this.healthTimer);
     return new Promise((resolve) => (this.http ? this.http.close(() => resolve()) : resolve()));
   }
 }
