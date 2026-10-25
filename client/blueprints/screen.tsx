@@ -1,9 +1,13 @@
-import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { SettingsCard, SettingsInput, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { abortRunRpc, listRunsRpc, retryRunRpc, startRunRpc } from "../../shared/blueprints/rpc";
 import type { RunView, StageView } from "../../shared/blueprints/run";
+import { blueprintsSettings } from "../../shared/blueprints/settings";
+import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
+import { SubTabs } from "../subtabs";
 
 type Colors = PluginScreenProps["theme"]["colors"];
 
@@ -46,6 +50,11 @@ export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
   const [showFinished, setShowFinished] = useState(true);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [picked, setPicked] = useState<string | null>(null);
+  const [startOpen, setStartOpen] = useState(false);
+  const [tabKey, setTabKey] = useState(0);
+  const [openTemplate, setOpenTemplate] = useState<Record<string, boolean>>({});
+  const [showSource, setShowSource] = useState<Record<string, boolean>>({});
+  const settings = useSettings(blueprintsSettings);
   const [vars, setVars] = useState<Record<string, string>>({});
   const [at, setAt] = useState("");
   const [resumeStage, setResumeStage] = useState<Record<string, string>>({});
@@ -124,14 +133,21 @@ export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
     const canResume = run.status === "failed" || run.status === "paused" || run.pmPending !== null;
     const varEntries = Object.entries(run.vars).filter(([, v]) => v !== "").sort(([a], [b]) => (a === "ticket" ? -1 : b === "ticket" ? 1 : 0));
     const open = expanded[run.id];
+    const label = run.vars.ticket || run.vars.incident_id || run.id;
+    const header = (
+      <Pressable onPress={() => setExpanded((e) => ({ ...e, [run.id]: !e[run.id] }))} style={s.line}>
+        <Text style={s.muted}>{open ? "▾" : "▸"}</Text>
+        {pill(run.status, statusColor(run.status, c))}
+        <Text style={[s.text, { fontWeight: "700", flexShrink: 1 }]} numberOfLines={1}>{run.blueprint} · {label}</Text>
+        {run.stage ? <Text style={s.muted} numberOfLines={1}>{run.stage}</Text> : null}
+        <Text style={s.muted}>{ago(now, run.createdAt)}</Text>
+      </Pressable>
+    );
+    if (!open) return <View key={run.id} style={[s.card, { paddingVertical: 6 }]}>{header}</View>;
     return (
       <View key={run.id} style={s.card}>
-        <View style={s.line}>
-          <Text style={[s.text, { fontWeight: "700" }]}>{run.blueprint}</Text>
-          {pill(run.status, statusColor(run.status, c))}
-          <Text style={s.muted} selectable>{run.id}</Text>
-          <Text style={s.muted}>started {ago(now, run.createdAt)} by {run.requestedBy}</Text>
-        </View>
+        {header}
+        <Text style={s.muted} selectable>{run.id} · started by {run.requestedBy}</Text>
         <View style={s.line}>{run.stages.map((st) => stageChip(st, st.id === run.stage))}</View>
         {run.stage ? <Text style={s.text}>Stage: {run.stage}</Text> : null}
         {run.waitingFor ? <Text style={s.muted}>Waiting for {run.waitingFor}</Text> : null}
@@ -141,10 +157,8 @@ export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
         {varEntries.length > 0 ? (
           <Text style={s.muted} selectable>{varEntries.map(([k, v]) => `${k}=${v.length > 60 ? `${v.slice(0, 59)}…` : v}`).join(" · ")}</Text>
         ) : null}
-        <Pressable onPress={() => setExpanded((e) => ({ ...e, [run.id]: !e[run.id] }))}>
-          <Text style={s.muted}>{open ? "▾" : "▸"} History ({run.history.length})</Text>
-        </Pressable>
-        {(open ? run.history.slice(-30) : run.history.slice(-5)).map((h, i) => (
+        <Text style={s.muted}>History ({run.history.length})</Text>
+        {run.history.slice(-30).map((h, i) => (
           <Text key={`${h.at}-${i}`} style={s.muted} selectable>
             {ago(now, h.at)} · {h.event}
             {h.stage ? ` · ${h.stage}` : ""}
@@ -184,79 +198,185 @@ export function BlueprintsScreen({ theme, layout }: PluginScreenProps) {
     );
   };
 
-  const runs = data?.runs ?? [];
-  return (
+  const runs = [...(data?.runs ?? [])].sort((x, y) => Number(y.endedAt === null) - Number(x.endedAt === null) || y.createdAt - x.createdAt);
+  const errors = data?.errors ?? [];
+
+  const startFrom = (b: BlueprintInfo) => {
+    setPicked(b.name);
+    setVars({});
+    setAt("");
+    setStartOpen(true);
+    setTabKey((k) => k + 1);
+  };
+
+  const errorsBox = errors.length > 0 ? (
+    <View style={s.warn}>
+      <Text style={[s.text, { fontWeight: "700" }]}>Blueprint files with errors</Text>
+      {errors.map((e) => (
+        <Text key={e.file} style={s.muted} selectable>{e.file}: {e.message}</Text>
+      ))}
+    </View>
+  ) : null;
+
+  const startForm = (
+    <View style={s.card}>
+      <Text style={[s.text, { fontWeight: "700" }]}>Start a run</Text>
+      {data && data.blueprints.length === 0 ? <Text style={s.muted}>No blueprints yet. They load from the blueprints/ folder of the Factory git source (Settings tab).</Text> : null}
+      <View style={s.line}>
+        {data?.blueprints.map((b) => (
+          <Pressable key={b.name} style={[s.button, picked === b.name ? { borderColor: c.accent } : null]} onPress={() => { setPicked(b.name); setVars({}); setAt(""); }}>
+            <Text style={s.text}>{b.name}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {blueprint ? (
+        <>
+          {blueprint.description ? <Text style={s.muted}>{blueprint.description}</Text> : null}
+          {blueprint.vars.map((v) => (
+            <View key={v.name} style={s.line}>
+              <Text style={s.text}>{v.name}{v.required ? " *" : ""}</Text>
+              <TextInput style={[s.input, { flexGrow: 1 }]} placeholder={v.description} placeholderTextColor={c.foregroundMuted} value={vars[v.name] ?? ""} onChangeText={(t) => setVars((m) => ({ ...m, [v.name]: t }))} />
+            </View>
+          ))}
+          <View style={s.line}>
+            <Text style={s.text}>at</Text>
+            <TextInput style={s.input} placeholder={`first stage (${blueprint.stages.join(", ")})`} placeholderTextColor={c.foregroundMuted} value={at} onChangeText={setAt} />
+          </View>
+          <View style={s.line}>
+            <Pressable style={[s.button, missing.length ? { opacity: 0.5 } : null]} disabled={missing.length > 0} onPress={() => start.mutate()}>
+              <Text style={s.text}>Start</Text>
+            </Pressable>
+            {missing.length ? <Text style={s.muted}>Missing: {missing.map((m) => m.name).join(", ")}</Text> : null}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+
+  const runsTab = () => (
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
-      <Text style={s.h}>Blueprints</Text>
       {query.isError ? <Text style={s.muted}>Could not load: {String(query.error)}</Text> : null}
       {message ? <Text style={s.text}>{message}</Text> : null}
-      {data && data.errors.length > 0 ? (
-        <View style={s.warn}>
-          <Text style={[s.text, { fontWeight: "700" }]}>Blueprint files with errors</Text>
-          {data.errors.map((e) => (
-            <Text key={e.file} style={s.muted} selectable>{e.file}: {e.message}</Text>
-          ))}
-        </View>
-      ) : null}
-
-      <View style={s.card}>
-        <Text style={[s.text, { fontWeight: "700" }]}>Start a run</Text>
-        {data && data.blueprints.length === 0 ? <Text style={s.muted}>No blueprints yet. They load from the blueprints/ folder of the Roles git source.</Text> : null}
-        <View style={s.line}>
-          {data?.blueprints.map((b) => (
-            <Pressable
-              key={b.name}
-              style={[s.button, picked === b.name ? { borderColor: c.accent } : null]}
-              onPress={() => {
-                setPicked(b.name);
-                setVars({});
-                setAt("");
-              }}
-            >
-              <Text style={s.text}>{b.name}</Text>
-            </Pressable>
-          ))}
-        </View>
-        {blueprint ? (
-          <>
-            {blueprint.description ? <Text style={s.muted}>{blueprint.description}</Text> : null}
-            {blueprint.vars.map((v) => (
-              <View key={v.name} style={s.line}>
-                <Text style={s.text}>
-                  {v.name}
-                  {v.required ? " *" : ""}
-                </Text>
-                <TextInput
-                  style={[s.input, { flexGrow: 1 }]}
-                  placeholder={v.description}
-                  placeholderTextColor={c.foregroundMuted}
-                  value={vars[v.name] ?? ""}
-                  onChangeText={(t) => setVars((m) => ({ ...m, [v.name]: t }))}
-                />
-              </View>
-            ))}
-            <View style={s.line}>
-              <Text style={s.text}>at</Text>
-              <TextInput style={s.input} placeholder={`first stage (${blueprint.stages.join(", ")})`} placeholderTextColor={c.foregroundMuted} value={at} onChangeText={setAt} />
-            </View>
-            <View style={s.line}>
-              <Pressable style={[s.button, missing.length ? { opacity: 0.5 } : null]} disabled={missing.length > 0} onPress={() => start.mutate()}>
-                <Text style={s.text}>Start</Text>
-              </Pressable>
-              {missing.length ? <Text style={s.muted}>Missing: {missing.map((m) => m.name).join(", ")}</Text> : null}
-            </View>
-          </>
-        ) : null}
-      </View>
-
       <View style={s.line}>
-        <Text style={[s.text, { fontWeight: "700" }]}>Runs</Text>
+        <Pressable style={s.button} onPress={() => setStartOpen((v) => !v)}>
+          <Text style={s.text}>{startOpen ? "Close" : "Start a run"}</Text>
+        </Pressable>
         <Pressable style={s.button} onPress={() => setShowFinished((v) => !v)}>
           <Text style={s.muted}>{showFinished ? "Hide finished" : "Show finished"}</Text>
         </Pressable>
+        {errors.length > 0 ? <Text style={[s.muted, { color: c.statusWarning }]}>{errors.length} blueprint file{errors.length > 1 ? "s" : ""} with errors (see Templates)</Text> : null}
       </View>
+      {startOpen ? startForm : null}
       {data && runs.length === 0 ? <Text style={s.muted}>No runs yet.</Text> : null}
       {runs.map(renderRun)}
     </ScrollView>
+  );
+
+  const edge = (d: StageDetail, key: string) => `${key} → ${d.on[key]}`;
+  const renderStage = (d: StageDetail, index: number) => {
+    const caps = [d.maxAttempts !== null ? `max_attempts ${d.maxAttempts}` : null, d.maxRuns !== null ? `max_runs ${d.maxRuns}` : null, d.flakeRetries ? `flake_retries ${d.flakeRetries}` : null].filter(Boolean).join(" · ");
+    const keys = Object.keys(d.on);
+    return (
+      <View key={d.id} style={{ borderLeftWidth: 2, borderLeftColor: c.border, paddingLeft: 8, gap: 2 }}>
+        <Text style={s.text}>
+          {index + 1}. <Text style={{ fontWeight: "700" }}>{d.id}</Text> · {d.kind}
+          {d.role ? ` · role ${d.role}` : ""}
+          {d.agent && d.agent !== "new" ? ` · ${d.agent} (same worker)` : ""}
+          {d.tool ? ` · tool ${d.tool}` : ""}
+          {d.childBlueprint ? ` · child run of ${d.childBlueprint}` : ""}
+        </Text>
+        {d.title ? <Text style={s.muted}>{d.title}</Text> : null}
+        {d.skipIf ? <Text style={s.muted}>skipped if {d.skipIf}</Text> : null}
+        {caps ? <Text style={s.muted}>{caps}</Text> : null}
+        {d.gate ? (
+          <Text style={s.muted}>
+            gate (Inbox): {d.gate.question}
+            {d.gate.pr ? ` · tied to PR heads (${d.gate.pr})` : ""}
+            {d.gate.criteria ? " · criteria hashed, identical approval reused" : ""}
+            {d.gate.freeText ? " · free text" : ""}
+            {d.gate.storeAs ? ` · answer stored in ${d.gate.storeAs}` : ""}
+            {d.gate.noteTo ? ` · answer added to notes of ${d.gate.noteTo}` : ""}
+          </Text>
+        ) : null}
+        {d.facts ? <Text style={s.muted}>GitHub facts shown to the worker; data.pr_urls checked on GitHub</Text> : null}
+        {Object.entries(d.verify).map(([v, facts]) => <Text key={v} style={s.muted}>verdict {v} needs on GitHub: {facts.join(", ")}</Text>)}
+        {d.usesLease ? <Text style={s.muted}>uses a lease (see its role)</Text> : null}
+        {keys.length > 0 ? <Text style={s.text} selectable>{keys.map((k) => edge(d, k)).join("   ")}</Text> : null}
+      </View>
+    );
+  };
+
+  const templatesTab = () => (
+    <ScrollView style={s.screen} contentContainerStyle={s.body}>
+      {errorsBox}
+      {data && data.blueprints.length === 0 ? <Text style={s.muted}>No blueprints loaded. They come from the blueprints/ folder of the Factory git source (Settings tab).</Text> : null}
+      {data?.blueprints.map((b) => {
+        const open = openTemplate[b.name];
+        const required = b.vars.filter((v) => v.required).map((v) => v.name);
+        const header = (
+          <Pressable onPress={() => setOpenTemplate((m) => ({ ...m, [b.name]: !m[b.name] }))} style={s.line}>
+            <Text style={s.muted}>{open ? "▾" : "▸"}</Text>
+            <Text style={[s.text, { fontWeight: "700" }]}>{b.name}</Text>
+            <Text style={[s.muted, { flexShrink: 1 }]} numberOfLines={1}>{b.description}</Text>
+            <Text style={s.muted} numberOfLines={1}>{b.source}</Text>
+            <Text style={s.muted}>{b.stages.length} stages</Text>
+            {required.length ? <Text style={s.muted} numberOfLines={1}>needs {required.join(", ")}</Text> : null}
+          </Pressable>
+        );
+        if (!open) return <View key={b.name} style={[s.card, { paddingVertical: 6 }]}>{header}</View>;
+        return (
+          <View key={b.name} style={s.card}>
+            {header}
+            {b.description ? <Text style={s.text}>{b.description}</Text> : null}
+            <Text style={s.muted}>Source: {b.source} · pm_extra_max {b.pmExtraMax}{b.confirm.length ? ` · must be confirmed: ${b.confirm.join(", ")}` : ""}</Text>
+            <Text style={s.muted}>Variables: {b.vars.map((v) => `${v.name}${v.required ? "*" : ""}`).join(", ") || "none"}</Text>
+            <View style={{ gap: 8 }}>{b.details.map(renderStage)}</View>
+            <View style={s.line}>
+              <Pressable style={s.button} onPress={() => startFrom(b)}>
+                <Text style={s.text}>Start a run</Text>
+              </Pressable>
+              <Pressable style={s.button} onPress={() => setShowSource((m) => ({ ...m, [b.name]: !m[b.name] }))}>
+                <Text style={s.muted}>{showSource[b.name] ? "Hide source" : "View source"}</Text>
+              </Pressable>
+            </View>
+            {showSource[b.name] ? <Text style={[s.muted, { fontFamily: "monospace" }]} selectable>{b.text}</Text> : null}
+          </View>
+        );
+      })}
+    </ScrollView>
+  );
+
+  const settingsTab = () => (
+    <ScrollView style={s.screen} contentContainerStyle={s.body}>
+      {settings.status === "ready" ? (
+        <SettingsCard>
+          <SettingsInput label="Working directory for workers" hint="Where new workers start when a stage names none. Required to run anything." initialValue={settings.values.defaultCwd ?? ""} onChangeText={(v) => void settings.save({ ...settings.values, defaultCwd: v.trim() || undefined }, settings.revision)} placeholder="/path/to/checkout" />
+          <SettingsInput label="Worker provider" initialValue={settings.values.defaultProvider} onChangeText={(v) => v.trim() && void settings.save({ ...settings.values, defaultProvider: v.trim() }, settings.revision)} />
+          <SettingsInput label="PM role" hint="Role of the PM agent the Factory spawns when a run has none to ask." initialValue={settings.values.pmRole} onChangeText={(v) => v.trim() && void settings.save({ ...settings.values, pmRole: v.trim() }, settings.revision)} />
+          <SettingsInput label="Poll interval (seconds)" hint="How often PR gates are polled and idle workers checked." initialValue={String(settings.values.pollSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, pollSeconds: Math.round(Number(v)) }, settings.revision)} />
+          <SettingsInput label="Idle grace (seconds)" hint="A worker idle this long without a verdict gets nudged." initialValue={String(settings.values.idleGraceSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, idleGraceSeconds: Math.round(Number(v)) }, settings.revision)} />
+          <SettingsSwitch label="Archive workers when a run finishes" value={settings.values.archiveOnFinish} onValueChange={(on) => void settings.save({ ...settings.values, archiveOnFinish: on }, settings.revision)} />
+          {settings.saveError ? <Text style={{ color: c.statusDanger }}>{settings.saveError}</Text> : null}
+        </SettingsCard>
+      ) : (
+        <Text style={s.muted}>{settings.status === "loading" ? "Loading…" : `Settings: ${"error" in settings ? settings.error : ""}`}</Text>
+      )}
+    </ScrollView>
+  );
+
+  return (
+    <View style={s.screen}>
+      <Text style={[s.h, { padding: layout.compact ? 10 : 20, paddingBottom: 0 }]}>Blueprints</Text>
+      <SubTabs
+        key={tabKey}
+        theme={theme}
+        initial={tabKey > 0 ? "runs" : undefined}
+        tabs={[
+          { key: "runs", label: "Runs", badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
+          { key: "templates", label: "Templates", badge: errors.length || undefined, render: templatesTab },
+          { key: "settings", label: "Settings", render: settingsTab },
+        ]}
+      />
+    </View>
   );
 }
