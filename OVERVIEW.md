@@ -1,0 +1,85 @@
+# Paseo Factory
+
+One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** and **Inbox**. Each module is a tab of the Factory screen and can be switched off in the Factory settings. One MCP server, `factory`, serves all their tools; one git source feeds roles and blueprints.
+
+| Module | Tab | What it does | MCP tools |
+|---|---|---|---|
+| Roles | Roles | Agent roles from git (`PASEO_AGENT_ROLE=<name>`) | none (hook) |
+| Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume` |
+| Leases | Leases | One agent at a time on a named resource | `lease_acquire`, `_renew`, `_release`, `_list` |
+| Warden | Warden | Pings agents that go quiet; supervises subagents | `warden_register`, `_register_subagent`, `_update`, `_done`, `_list` |
+| Inbox | Inbox | Questions and approvals for the human | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
+
+There is no data migration. Setting `importLegacyState` (off by default) copies the state file of the old stand-alone plugin (`agents-leases`, `agents-warden`, `agents-inbox`) once, for a module that has no Factory state yet.
+
+## Git source
+
+Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `docs/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `docs/examples/blueprints`).
+
+## Blueprints
+
+```toml
+version = 1
+name = "ticket"
+confirm = ["ticket"]            # must be checked for real; start passes ticket_confirmed = "true"
+pm_extra_max = 2                # the PM's one judgement may grant at most this many extra attempts
+[vars.ticket]
+required = true
+pattern = "^[A-Z]+-[0-9]+$"
+
+[[stage]]
+id = "implement"
+role = "implementer"            # PASEO_AGENT_ROLE of the worker
+prompt = "Implement {{ticket}} ... {{stage.investigate.summary}}"
+max_attempts = 3                # tries per entry; a turn that ends without a verdict uses one
+max_runs = 50                   # entries over the run (loops)
+flake_retries = 1               # failed turns retried for free
+facts = "pr"                    # show GitHub facts; data.pr_urls is checked on GitHub
+[stage.on]
+done = "qa"                     # verdict -> next stage ("done" and "failed" end the run)
+blocked = "ask-blocked"
+exhausted = "pm"                # PM judgement, once; or a stage id, or "failed"
+[stage.verify]
+done = ["exists", "open"]       # facts GitHub must confirm before the verdict is accepted
+```
+
+Stage kinds: `agent` (default), `gate` (question or approval through the Inbox; `pr = ...` ties it to PR heads, `criteria = ...` is hashed and an identical approval is reused, `store_as` saves a typed answer into a variable, `note_to` adds it to another stage's prompt), `call` (a tool such as `releaser_join`; a Factory or extension tool is called directly, any other by a short-lived worker of the stage's `role`), `blueprint` (a child run, `at` enters it mid-way), and any kind an extension provides. `skip_if = "{{x}} == y"` needs an `on.skipped` edge. `agent = "reuse:<stage>"` sends the task to that stage's worker (a replacement with the same role if it is gone).
+
+Runs are JSON in `~/.paseo/plugin-data/paseo-factory/blueprints.json`, written before every transition; after a daemon restart, running stages are re-dispatched, open gates re-read. Workers are created with `PASEO_AGENT_ROLE`, `PASEO_FACTORY_RUN` and the labels `paseo.factory=1`, `paseo.factory.blueprint`, `.run`, `.stage`, `.role`; every worker gets a Warden task. The Blueprints tab shows one card per run.
+
+PM tools (`blueprint_start` ...) are injected into agents whose `PASEO_AGENT_ROLE` equals the `pmRole` setting (default `pm`) or that have `PASEO_FACTORY_BLUEPRINTS=on`; stage workers get `blueprint_verdict` and `blueprint_status`. `blueprint_retry`, `_resume` and `_abort` are for the run's PM, its starter and agents labelled `paseo.assistant=1`.
+
+## Start endpoint (Events plugin)
+
+The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) and serves on loopback only, with the token as a bearer:
+
+- `POST /blueprints/start`, body `{blueprint, vars, requestedBy, idempotencyKey}` → `200 {runId}`, `404` unknown blueprint, `400` bad vars, `401`. The same `idempotencyKey` returns the same run.
+- `GET /blueprints` → names, descriptions and variables (`required`).
+
+## Inbox and the Assistant
+
+`inbox_pending` lists every pending item and `inbox_answer(item, answer)` answers one; both are for agents labelled `paseo.assistant=1` (others see only their own items and cannot answer). The answer is recorded as "answered by the Assistant on behalf of Louis".
+
+## Extensions
+
+Another plugin registers with the Factory; it gets no sidebar row, only a Factory tab, and its tools join the `factory` MCP server:
+
+```ts
+const factory = (globalThis as any)[Symbol.for("paseo.factory")];
+const unregister = factory.registerExtension({
+  id: "release-trains", version: "1.0.0", tab: "Release Trains",
+  tools: [{ name: "train_status", description: "...", input: z.object({}), run: (input, call) => ({}) }],
+  stageKinds: [{ kind: "train", run: async (ctx) => ({ verdict: "ok", summary: "..." }) }],
+  roles: [{ name: "train-runner", yaml: "name: train-runner\n..." }],
+});
+```
+
+`ctx` carries `runId`, `stageId`, `params` (the stage's own fields, templates rendered), `vars`, `paseo`, `signal` and `services` (`spawn`, `leases`, `warden`, `inbox`; `factory.services()` gives the same outside a stage). Stage kinds must be idempotent: a running stage runs again after a restart. If the extension loads before the Factory, push the registration onto `globalThis[Symbol.for("paseo.factory.pending")]` (an array); the Factory drains it.
+
+## Sidebar badge
+
+On hosts with `client.addAgentBadge`, agents with the `paseo.factory` label show `<blueprint> · <stage>`; the tooltip has the run and the role. Hosts without the API are unaffected.
+
+## Environment
+
+`FACTORY_PORT` (default 47820), `FACTORY_DATA`, `FACTORY_ENDPOINT`, `FACTORY_BLUEPRINTS_DIR` (extra blueprint folder, first in precedence). Per-module scope variables are unchanged: `PASEO_WARDEN`, `PASEO_INBOX`, `PASEO_LEASES` = `off` to skip a module for an agent (`on` with the `opt-in` scope). `PASEO_WARDEN_INTERVAL` sets an agent's default check interval.

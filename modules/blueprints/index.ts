@@ -24,14 +24,21 @@ export function startBlueprints(host: FactoryHost) {
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
   let catalogAt = 0;
-  async function refresh(force = false): Promise<Catalog> {
-    if (!force && Date.now() - catalogAt < 15_000) return catalog;
-    catalogAt = Date.now();
-    const dirs: string[] = [];
-    if (process.env.FACTORY_BLUEPRINTS_DIR) dirs.push(process.env.FACTORY_BLUEPRINTS_DIR);
-    for (const source of await host.configuredSources()) if (host.gitSources) dirs.push(host.gitSources.subDir(source, "blueprints"));
-    catalog = await loadCatalog(dirs);
-    return catalog;
+  let loading: Promise<Catalog> | null = null;
+  function refresh(force = false): Promise<Catalog> {
+    if (loading) return loading;
+    if (!force && Date.now() - catalogAt < 15_000) return Promise.resolve(catalog);
+    loading = (async () => {
+      const dirs: string[] = [];
+      if (process.env.FACTORY_BLUEPRINTS_DIR) dirs.push(process.env.FACTORY_BLUEPRINTS_DIR);
+      for (const source of await host.configuredSources()) if (host.gitSources) dirs.push(host.gitSources.subDir(source, "blueprints"));
+      catalog = await loadCatalog(dirs);
+      catalogAt = Date.now();
+      return catalog;
+    })().finally(() => {
+      loading = null;
+    });
+    return loading;
   }
   void refresh(true);
 
@@ -170,6 +177,7 @@ export function startBlueprints(host: FactoryHost) {
   let stopped = false;
   const loop = async () => {
     try {
+      if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
     } catch (error) {
       console.error("blueprints: tick failed", error);

@@ -1,4 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { z } from "zod";
 import { afterEach, describe, expect, it } from "vitest";
 import { bootPlugin } from "./server/testing";
 
@@ -121,5 +124,76 @@ describe("inbox_answer", () => {
     expect(done).toMatchObject({ status: "answered", answer: { option_id: "yes", by: "assistant" }, recorded_as: "answered by the Assistant on behalf of Louis" });
     const { items } = await b.rpc["inbox.list"]({ audit: true }, b.ctx);
     expect(items[0].answer.by).toBe("assistant");
+  });
+});
+
+describe("extensions", () => {
+  const register = (reg: object) => ((globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void }).registerExtension(reg);
+
+  it("add tools to the factory server and a tab, with no sidebar row of their own", async () => {
+    const { create, open, rpc, ctx } = boot();
+    const remove = register({
+      id: "release-trains",
+      version: "1.0.0",
+      tab: "Release Trains",
+      tools: [{ name: "train_status", description: "Status", input: z.object({}), run: () => ({ ok: true }) }],
+    });
+    const out = await create(request());
+    await open({ agentId: "a1", env: out.env });
+    const overview = await rpc["factory.overview"]({}, ctx);
+    expect(overview.extensions).toEqual([{ id: "release-trains", version: "1.0.0", tab: "Release Trains", tools: ["train_status"], stageKinds: [] }]);
+    const listed = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect(listed.body.result.tools.map((t: any) => t.name)).toContain("train_status");
+    const called = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "train_status", arguments: {} } });
+    expect(JSON.parse(called.body.result.content[0].text)).toEqual({ ok: true });
+    remove();
+    expect((await rpc["factory.overview"]({}, ctx)).extensions).toEqual([]);
+  });
+
+  it("refuse a module id, a repeated id and a repeated tool name", () => {
+    boot();
+    const tool = { name: "x_tool", description: "d", input: z.object({}), run: () => 1 };
+    expect(() => register({ id: "warden", version: "1", tools: [] })).toThrow(/already registered/);
+    const remove = register({ id: "ext-a", version: "1", tools: [tool] });
+    expect(() => register({ id: "ext-a", version: "1", tools: [] })).toThrow(/already registered/);
+    expect(() => register({ id: "ext-b", version: "1", tools: [tool] })).toThrow(/already exists/);
+    expect(() => register({ id: "inbox_ask", version: "1", tools: [] })).toThrow(/lowercase/);
+    remove();
+  });
+
+  it("provide stage kinds that blueprints use, started through the HTTP endpoint", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bp-"));
+    writeFileSync(
+      path.join(dir, "demo.toml"),
+      `name = "demo"\nversion = 1\n[vars.who]\ndefault = "world"\n[[stage]]\nid = "hello"\nkind = "greet"\nname = "{{who}}"\n[stage.on]\nok = "done"\nerror = "failed"\n`,
+    );
+    process.env.FACTORY_BLUEPRINTS_DIR = dir;
+    try {
+      const { rpc, ctx, dir: data } = boot();
+      const seen: unknown[] = [];
+      register({
+        id: "greeter",
+        version: "1",
+        tools: [],
+        stageKinds: [{ kind: "greet", run: async (c: any) => (seen.push(c.params), { verdict: "ok", summary: `hello ${c.params.name}` }) }],
+      });
+      const { endpoint } = await rpc["factory.overview"]({}, ctx);
+      await rpc["blueprints.list"]({ includeFinished: true }, ctx); // loads the catalog
+      const { token } = JSON.parse(readFileSync(`${data}/endpoint.json`, "utf8"));
+      const post = () => fetch(`${endpoint.url}/blueprints/start`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify({ blueprint: "demo", vars: { who: "Louis" }, requestedBy: "events", idempotencyKey: "k" }) });
+      const firstRes = await post();
+      const first = (await firstRes.json()) as { runId: string };
+      expect(first).toEqual({ runId: expect.any(String) });
+      const again = (await (await post()).json()) as { runId: string };
+      expect(again.runId).toBe(first.runId);
+      await new Promise((r) => setTimeout(r, 50));
+      const { runs } = await rpc["blueprints.list"]({ includeFinished: true }, ctx);
+      expect(runs[0]).toMatchObject({ id: first.runId, status: "done", requestedBy: "events" });
+      expect(seen).toEqual([{ name: "Louis" }]);
+      const listed = (await (await fetch(`${endpoint.url}/blueprints`, { headers: { authorization: `Bearer ${token}` } })).json()) as any;
+      expect(listed.blueprints[0]).toMatchObject({ name: "demo", vars: [{ name: "who", required: false }] });
+    } finally {
+      delete process.env.FACTORY_BLUEPRINTS_DIR;
+    }
   });
 });
