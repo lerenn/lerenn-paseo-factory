@@ -7,8 +7,48 @@ import { ghFacts } from "./github";
 import { loadCatalog, type Catalog } from "./loader";
 import { RunStore } from "./store";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
+import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
+import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { abortRunRpc, listRunsRpc, retryRunRpc, startRunRpc } from "../../shared/blueprints/rpc";
 import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
+
+/** What the Blueprints tab shows about a loaded blueprint. */
+function describe({ blueprint, text, source }: { blueprint: Blueprint; text: string; source: string }): BlueprintInfo {
+  return {
+    name: blueprint.name,
+    description: blueprint.description,
+    vars: Object.entries(blueprint.vars).map(([name, v]) => ({ name, required: v.required, description: v.description })),
+    stages: blueprint.stage.map((st) => st.id),
+    source,
+    pmExtraMax: blueprint.pm_extra_max,
+    confirm: blueprint.confirm,
+    text,
+    details: blueprint.stage.map((st): StageDetail => {
+      const kind = st.kind ?? "agent";
+      const a = kind === "agent" ? (st as AgentStage) : null;
+      const g = kind === "gate" ? (st as GateStage) : null;
+      return {
+        id: st.id,
+        kind,
+        title: st.title ?? null,
+        role: a?.role ?? (kind === "call" ? ((st as CallStage).role ?? null) : null),
+        agent: a?.agent ?? null,
+        verdicts: stageVerdicts(st),
+        on: st.on,
+        maxAttempts: a?.max_attempts ?? null,
+        maxRuns: a?.max_runs ?? null,
+        flakeRetries: a?.flake_retries ?? null,
+        skipIf: st.skip_if ?? null,
+        facts: a?.facts ?? null,
+        verify: a?.verify ?? {},
+        gate: g ? { question: g.question, pr: g.pr ?? null, criteria: !!g.criteria, freeText: g.free_text, storeAs: g.store_as ?? null, noteTo: g.note_to ?? null } : null,
+        tool: kind === "call" ? (st as CallStage).tool : null,
+        childBlueprint: kind === "blueprint" ? (st as BlueprintStage).blueprint : null,
+        usesLease: a ? /lease/i.test(a.prompt) : false,
+      };
+    }),
+  };
+}
 
 export function startBlueprints(host: FactoryHost) {
   const { server } = host;
@@ -29,9 +69,11 @@ export function startBlueprints(host: FactoryHost) {
     if (loading) return loading;
     if (!force && Date.now() - catalogAt < 15_000) return Promise.resolve(catalog);
     loading = (async () => {
-      const dirs: string[] = [];
-      if (process.env.FACTORY_BLUEPRINTS_DIR) dirs.push(process.env.FACTORY_BLUEPRINTS_DIR);
-      for (const source of await host.configuredSources()) if (host.gitSources) dirs.push(host.gitSources.subDir(source, "blueprints"));
+      const dirs: { dir: string; label: string }[] = [];
+      if (process.env.FACTORY_BLUEPRINTS_DIR) dirs.push({ dir: process.env.FACTORY_BLUEPRINTS_DIR, label: "local folder" });
+      for (const source of (await host.configuredSources()) as { url: string; ref?: string; path?: string }[]) {
+        if (host.gitSources) dirs.push({ dir: host.gitSources.subDir(source, "blueprints"), label: `${source.url.replace(/^.*[:/]([^/:]+\/[^/]+?)(\.git)?$/, "$1")}@${source.ref ?? "default"}:${source.path ? `${source.path}/` : ""}blueprints` });
+      }
       catalog = await loadCatalog(dirs);
       catalogAt = Date.now();
       return catalog;
@@ -200,12 +242,7 @@ export function startBlueprints(host: FactoryHost) {
         .filter((r) => includeFinished || r.endedAt === null)
         .sort((a, b) => b.createdAt - a.createdAt)
         .map((r) => engine.view(r)),
-      blueprints: [...c.blueprints.values()].map(({ blueprint }) => ({
-        name: blueprint.name,
-        description: blueprint.description,
-        vars: Object.entries(blueprint.vars).map(([name, v]) => ({ name, required: v.required, description: v.description })),
-        stages: blueprint.stage.map((s) => s.id),
-      })),
+      blueprints: [...c.blueprints.values()].map((entry) => describe(entry)),
       errors: c.errors.map((e) => ({ file: path.basename(e.file), message: e.message })),
       settings: current,
     };
