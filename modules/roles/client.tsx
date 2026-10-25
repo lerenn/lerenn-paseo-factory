@@ -1,21 +1,9 @@
-import { type PluginClientContext, type PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { registerRoleCreateOption } from "./client/create-option";
-import { RolesScreen } from "./client/screen";
 
-function RolesItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  return (
-    <SidebarRow
-      label="Agent Roles"
-      icon="UserCog"
-      active={currentScreen?.screenId === "roles"}
-      onPress={() => openScreen({ screenId: "roles" })}
-    />
-  );
-}
+export { RolesScreen } from "./client/screen";
 
-export default function contribute(client: PluginClientContext) {
-  client.addScreen({ id: "roles", title: "Agent Roles", Component: RolesScreen });
-  client.addSidebarHeaderItem({ id: "roles", title: "Agent Roles", Component: RolesItem });
+/** Roles has no sidebar row or screen of its own: the Factory shows it as a tab. */
+export function contributeRoles(client: PluginClientContext) {
   return registerRoleCreateOption(client);
 }
