@@ -233,6 +233,31 @@ describe("setup failures", () => {
     expect([...ctx.items.values()].some((i) => /no PM could be started/.test(i.question))).toBe(true);
   });
 
+  it("a run already waiting for a PM that does not exist is moved on at restart: PM spawn, else the Inbox", async () => {
+    const a = setup();
+    const run = await a.start(undefined, { ownerAgentId: null });
+    await a.engine.turnEnded("agent-1", { kind: "completed" });
+    await a.settle();
+    await a.engine.turnEnded("agent-1", { kind: "completed" });
+    await a.settle();
+    // simulate the persisted state of the stuck run: waiting, judgement pending, no PM
+    const live = a.engine.require(run.id);
+    live.status = "waiting";
+    live.pmAgentId = null;
+    live.pm.pending = { stage: "think", reason: "2 attempts used" };
+    const spawn = a.ports.spawn;
+    a.ports.spawn = async (o) => {
+      if (o.role === "pm") throw new Error("Expected config.provider in provider/model format");
+      return spawn(o);
+    };
+    const b = new Engine(a.store, a.ports);
+    await b.resumeAll();
+    await a.settle();
+    expect(b.require(run.id)).toMatchObject({ status: "paused" });
+    expect(b.require(run.id).error).toMatch(/no PM could be started/);
+    expect(await b.hasLivePm(b.require(run.id))).toBe(false);
+  });
+
   it("refuses to start when the blueprint cannot start any worker", () => {
     const ctx = setup();
     ctx.ports.preflight = () => "defaultCwd is not set";

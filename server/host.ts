@@ -78,6 +78,8 @@ export class FactoryHost {
   /** Set by the Roles module: the git sources the Blueprints module reads its files from. */
   gitSources: { subDir(source: any, name: string): string } | null = null;
   configuredSources: () => Promise<unknown[]> = async () => [];
+  /** Set by the Roles module: a role definition by name (null when unknown). */
+  loadRole: (name: string) => Promise<import("../shared/roles/role").Role | null> = async () => null;
   readonly ready: Promise<void>;
   private started: Promise<void> = Promise.resolve();
 

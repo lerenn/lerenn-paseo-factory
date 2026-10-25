@@ -4,8 +4,8 @@ import { z } from "zod";
 export const settingsSchema = z.object({
   /** Folder new workers start in when a stage names none. */
   defaultCwd: z.string().optional(),
-  /** Provider of workers; a role may replace it. */
-  defaultProvider: z.string().default("claude"),
+  /** "provider/model" of workers; a role's own provider and model replace it. */
+  defaultProvider: z.string().default("claude/claude-sonnet-5-5"),
   /** Role of the PM agent the Factory spawns when a run has none to ask (stalls, judgement calls). */
   pmRole: z.string().default("pm"),
   /** How often PR gates are polled and idle workers checked. */

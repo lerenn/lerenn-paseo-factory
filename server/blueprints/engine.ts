@@ -344,13 +344,22 @@ export class Engine {
     run.waitingFor = `PM judgement on stage ${id}`;
     run.pm.pending = { stage: id, reason };
     this.store.save();
+    await this.notifyPm(run, this.pmText(run, id, reason));
+  }
+
+  private pmText(run: Run, id: string, reason: string): string {
     const max = run.def.pm_extra_max;
-    const text =
+    return (
       `Factory: stage "${id}" of run ${run.id} (${run.blueprint}) is exhausted: ${reason}.\n` +
       `You get ONE judgement call on it. Call blueprint_retry(run="${run.id}", stage="${id}", ...) with extra_attempts (1-${max}, optional note for the worker) to grant bounded extra attempts, ` +
       `or with to="<stage>" and a note to re-scope; or escalate: ask the human with inbox_ask, then blueprint_abort(run="${run.id}") or blueprint_resume once decided.\n` +
-      `Last summary: ${st.summary ?? "none"}`;
-    await this.notifyPm(run, text);
+      `Last summary: ${run.stages[id]?.summary ?? "none"}`
+    );
+  }
+
+  /** True while the run's PM exists; a run without one is steered by anyone, and judged by the human. */
+  async hasLivePm(run: Run): Promise<boolean> {
+    return !!run.pmAgentId && (await this.ports.agentState(run.pmAgentId)) !== "gone";
   }
 
   private askerTitle(run: Run): string {
@@ -926,6 +935,11 @@ export class Engine {
         if (!id) return;
         const st = run.stages[id];
         if (!st) return;
+        // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
+        if (run.pm.pending && !(await this.hasLivePm(run))) {
+          await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
+          return;
+        }
         if (st.status === "entering") {
           const def = this.stageDef(run, id);
           if ((def.kind ?? "agent") === "agent" && st.runs > 0) await this.dispatch(run, id, "retry", { free: true });

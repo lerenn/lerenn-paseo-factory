@@ -1,6 +1,7 @@
 import type { FactoryHost } from "../host";
 import { GitSources } from "./git-sync";
 import { agentCreateHook, sessionOpenHook } from "./hook";
+import { loadRole } from "./loader";
 import { roleAgents } from "./agents";
 import { RoleLimits } from "./limits";
 import { ProposalStore } from "./proposals";
@@ -80,6 +81,7 @@ export function startRoles(host: FactoryHost) {
   });
 
   host.gitSources = gitSources;
+  host.loadRole = async (name) => loadRole(name, (await configured()).map((s) => gitSources.rolesDir(s)));
   host.configuredSources = configured;
 
   return () => {

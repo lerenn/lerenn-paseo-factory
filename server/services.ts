@@ -1,5 +1,6 @@
 import type { FactoryServices, SpawnOptions } from "./extensions";
 import type { FactoryHost } from "./host";
+import { resolveAgentConfig } from "./spawn-config";
 
 /** The services extensions get as `ctx.spawn`, `ctx.leases`, `ctx.warden` and `ctx.inbox`. */
 export function buildServices(host: FactoryHost): FactoryServices {
@@ -11,8 +12,9 @@ export function buildServices(host: FactoryHost): FactoryServices {
     async spawn(o: SpawnOptions) {
       const cwd = o.cwd ?? process.env.FACTORY_DEFAULT_CWD;
       if (!cwd) throw new Error("spawn needs a cwd");
+      const role = o.role ? await host.loadRole(o.role) : null;
       const handle = await host.paseo.agents.create({
-        config: { provider: "claude" },
+        config: resolveAgentConfig(role, process.env.FACTORY_DEFAULT_PROVIDER ?? "claude/claude-sonnet-5-5"),
         cwd,
         title: o.title,
         prompt: o.prompt,

@@ -6,6 +6,7 @@ import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
 import { ghDiff, ghFacts } from "./github";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
+import { resolveAgentConfig } from "../spawn-config";
 import { RunStore } from "./store";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
@@ -99,9 +100,10 @@ export function startBlueprints(host: FactoryHost) {
     async spawn(o) {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
+      const role = await host.loadRole(o.role);
       const handle = await host.paseo.agents.create({
         idempotencyKey: o.idempotencyKey,
-        config: { provider: cfg().defaultProvider },
+        config: resolveAgentConfig(role, cfg().defaultProvider),
         cwd,
         title: o.title,
         prompt: o.prompt,

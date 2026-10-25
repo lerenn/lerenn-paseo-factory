@@ -24,6 +24,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
   /** The PM of the run (or whoever started it) and the Assistant may steer it. */
   async function steer(run: ReturnType<Engine["require"]>, ctx: CallContext): Promise<void> {
     if (ctx.callerId === run.pmAgentId || ctx.callerId === run.ownerAgentId || ctx.callerId === "factory") return;
+    if (!(await engine.hasLivePm(run))) return; // no PM to protect: anyone may steer
     if ((await ctx.labels())["paseo.assistant"] === "1") return;
     throw new UsageError(`Run ${run.id} is steered by its PM (${run.pmAgentId ?? "none"}) and the Assistant.`);
   }
