@@ -1,10 +1,15 @@
-import { execFileSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 // Paseo's plugin loader only accepts source under client/, server/ and shared/ (plus the two entry files).
 // The loader's own validator is not available to CI, so this test mimics it.
-const tracked = execFileSync("git", ["ls-files"], { encoding: "utf8" }).split("\n").filter(Boolean);
+function walk(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.name === "node_modules" || e.name.startsWith(".") ? [] : e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)],
+  );
+}
+const tracked = walk(".").map((f) => f.split(path.sep).join("/").replace(/^\.\//, ""));
 const SOURCE = /\.(ts|tsx)$/;
 const ENTRY = /^index\.(server|client)(\.test)?\.tsx?$/;
 
@@ -26,7 +31,7 @@ describe("plugin layout", () => {
     const bad = tracked
       .filter((f) => /^(client|shared)\/.*\.tsx?$/.test(f) && !f.endsWith(".test.ts"))
       .filter((f) => {
-        const text = execFileSync("cat", [f], { encoding: "utf8" });
+        const text = readFileSync(f, "utf8");
         const re = f.startsWith("client/") ? /from "(\.\.\/)+server\// : /from "(\.\.\/)+(server|client)\//;
         return re.test(text) || /from "node:/.test(text) && f.startsWith("client/");
       });
