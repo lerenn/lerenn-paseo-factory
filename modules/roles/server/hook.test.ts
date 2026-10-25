@@ -28,7 +28,7 @@ describe("agent.create hook", () => {
     await writeFile(path.join(dir, "r.yaml"), "name: r\nmodel: picked\n");
     const create = agentCreateHook(async () => [dir]);
     const withOptions = (role: string) => ({
-      request: { config: { provider: "claude", cwd: "/x" }, pluginOptions: { "agents-roles": { role } } },
+      request: { config: { provider: "claude", cwd: "/x" }, pluginOptions: { "paseo-factory": { role } } },
     });
     const out = await create(withOptions("r"));
     expect(out?.config.model).toBe("picked");

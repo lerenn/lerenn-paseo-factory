@@ -84,7 +84,7 @@ async function doWrite(sources: GitSources, source: GitSource, change: Change, n
 
   try {
     await reset();
-    const folder = path.join(dir, source.path ?? "");
+    const folder = path.join(dir, source.path ?? "", "roles");
     const existing = EXTENSIONS.map((ext) => path.join(folder, name + ext)).find((f) => existsSync(f));
     const action: ChangeAction = change.delete ? "delete" : existing ? "update" : "create";
     if (action === "delete" && !existing) throw new Error(`No role "${name}" in this git source`);

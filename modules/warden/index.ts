@@ -1,22 +1,22 @@
-import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHookContext } from "@getpaseo/plugin/server";
+import type { FactoryHost } from "../../server/host";
+import { adapt } from "../../server/tools";
 import { cancelTaskRpc, commandRpc, listTasksRpc } from "./shared/rpc";
 import { wardenSettings, type WardenSettings } from "./shared/settings";
 import { parseCommand, runCommand } from "./server/command";
 import { analyze, lastAssistantText } from "./server/classify";
 import { Engine, type Actions } from "./server/engine";
-import { WardenHttp } from "./server/http";
 import { INTERVAL_ENV, parseInterval } from "./server/interval";
-import { applyInjection, CAPABILITY_ENV, envValue, scopeApplies, SCOPE_ENV } from "./server/inject";
-import { McpServer } from "./server/mcp";
+import { envValue, NOTE, scopeApplies, SCOPE_ENV, TOOL_NAMES } from "./server/inject";
+import { INSTRUCTIONS } from "./server/instructions";
 import { Store } from "./server/store";
-import { LEGACY_TOOLS, TOOLS } from "./server/tools";
-
-const DEFAULT_PORT = 47822;
+import { TOOLS } from "./server/tools";
 
 type Paseo = PluginHookContext["paseo"];
 type HookAgent = { id: string; workspaceId: string | null; parentAgentId: string | null; title: string | null };
 
-export default function contribute(server: PluginServerContext) {
+export function startWarden(host: FactoryHost) {
+  const { server } = host;
   const settings = server.registerSettings(wardenSettings);
   let current: WardenSettings | null = null;
   let settingsError: string | null = null;
@@ -61,23 +61,22 @@ export default function contribute(server: PluginServerContext) {
       watchers.delete(agentId);
     },
   };
-  const store = new Store(process.env.WARDEN_STATE ?? process.env.WARDER_STATE ?? undefined);
+  const store = new Store(process.env.WARDEN_STATE ?? process.env.WARDER_STATE ?? host.statePath("warden", "agents-warden"));
   const engine = new Engine(store, actions, () => current);
-
-  const http = new WardenHttp({ engine, mcp: new McpServer(TOOLS, LEGACY_TOOLS) });
-  let url: string | null = null;
-  let startError: string | null = null;
-  const port = Number(process.env.WARDEN_PORT ?? process.env.WARDER_PORT ?? DEFAULT_PORT);
-  // Resumed agents keep the URL they were created with, so the port has to be stable.
-  const started = http.start(port).then(
-    (u) => {
-      url = u;
+  host.engines.warden = engine;
+  const removeTools = host.registerTools("warden", TOOLS.map((t) => adapt(t, engine)));
+  host.setInstructions("warden", INSTRUCTIONS);
+  host.contribute({
+    module: "warden",
+    note: NOTE,
+    async tools(request) {
+      await ready;
+      // A bad interval fails creation loudly instead of silently dropping the default.
+      const asked = envValue(request.env, INTERVAL_ENV);
+      if (asked) parseInterval(asked);
+      return current?.enabled && scopeApplies(current.scope, request.env) ? TOOL_NAMES : null;
     },
-    (err: Error) => {
-      startError = `warden cannot listen on 127.0.0.1:${port}: ${err.message}. Set WARDEN_PORT on the daemon.`;
-      console.error(startError);
-    },
-  );
+  });
 
   const known = (agent: HookAgent) => {
     const result = store.upsertAgent(agent.id, { title: agent.title, parentId: agent.parentAgentId, workspaceId: agent.workspaceId });
@@ -86,21 +85,8 @@ export default function contribute(server: PluginServerContext) {
   };
 
   const removers = [
-    server.before("agent.create", async ({ request }, ctx) => {
-      capture(ctx);
-      await ready;
-      // A bad interval fails creation loudly instead of silently dropping the default.
-      const asked = envValue(request.env, INTERVAL_ENV);
-      if (asked) parseInterval(asked);
-      if (!current?.enabled || !scopeApplies(current.scope, request.env)) return;
-      await started;
-      if (!url) throw new Error(`${startError} Create the agent with ${SCOPE_ENV}=off to skip warden.`);
-      return applyInjection(request, { url, capability: store.createSession() });
-    }),
     server.before("agent.session_open", ({ request }, ctx) => {
       capture(ctx);
-      const capability = envValue(request.env, CAPABILITY_ENV);
-      if (capability) store.bind(capability, request.agentId);
       const interval = envValue(request.env, INTERVAL_ENV);
       let defaultIntervalMinutes: number | undefined;
       try {
@@ -110,16 +96,16 @@ export default function contribute(server: PluginServerContext) {
       }
       store.upsertAgent(request.agentId, { optOut: envValue(request.env, SCOPE_ENV)?.toLowerCase() === "off", defaultIntervalMinutes });
     }),
-    server.on("agent.created", ({ agent }, ctx) => {
+    host.on("warden", "agent.created", ({ agent }, ctx) => {
       capture(ctx);
       known(agent);
     }),
-    server.on("agent.turn_started", ({ agent }, ctx) => {
+    host.on("warden", "agent.turn_started", ({ agent }, ctx) => {
       capture(ctx);
       known(agent);
       engine.turnStarted(agent.id);
     }),
-    server.on("agent.turn_ended", ({ agent, timeline }, ctx) => {
+    host.on("warden", "agent.turn_ended", ({ agent, timeline }, ctx) => {
       capture(ctx);
       known(agent);
       engine.turnEnded(agent.id);
@@ -137,18 +123,17 @@ export default function contribute(server: PluginServerContext) {
         });
       }
     }),
-    server.on("agent.permission_requested", ({ agent }, ctx) => {
+    host.on("warden", "agent.permission_requested", ({ agent }, ctx) => {
       capture(ctx);
       engine.permission(agent.id, true);
     }),
-    server.on("agent.permission_resolved", ({ agent }, ctx) => {
+    host.on("warden", "agent.permission_resolved", ({ agent }, ctx) => {
       capture(ctx);
       engine.permission(agent.id, false);
     }),
-    server.on("agent.archived", ({ agent }, ctx) => {
+    host.on("warden", "agent.archived", ({ agent }, ctx) => {
       capture(ctx);
       engine.agentArchived(agent.id);
-      store.forgetAgentSessions(agent.id);
     }),
   ];
 
@@ -239,7 +224,7 @@ export default function contribute(server: PluginServerContext) {
     capture(ctx);
     await seedChildren(ctx);
     await resolveNames(ctx);
-    return { now: Date.now(), tasks: engine.views(), settings: current, settingsError, endpoint: { url, error: startError } };
+    return { now: Date.now(), tasks: engine.views(), settings: current, settingsError, endpoint: { url: host.url, error: host.startError } };
   });
   server.handle(cancelTaskRpc, ({ taskId }, ctx) => {
     capture(ctx);
@@ -255,6 +240,6 @@ export default function contribute(server: PluginServerContext) {
     for (const stop of watchers.values()) stop();
     watchers.clear();
     unsubscribeSettings();
-    void http.stop();
+    removeTools();
   };
 }

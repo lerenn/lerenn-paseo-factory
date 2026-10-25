@@ -1,10 +1,9 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
 import type { Answer, InboxOption, ItemStatus } from "../shared/item";
 
-export const defaultStatePath = path.join(homedir(), ".paseo", "plugin-data", "agents-inbox", "state.json");
+export const defaultStatePath = null as string | null;
 
 export interface Item {
   id: string;
@@ -21,6 +20,8 @@ export interface Item {
   expiresAt: number | null;
   defaultOptionId: string | null;
   defaultText: string | null;
+  /** Asked by the Factory itself (blueprint gate): never messaged back. */
+  internal?: boolean;
   readAt: number | null;
   answer: Answer | null;
   comment: string | null;

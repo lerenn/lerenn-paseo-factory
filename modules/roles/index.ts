@@ -1,4 +1,4 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { FactoryHost } from "../../server/host";
 import { GitSources } from "./server/git-sync";
 import { agentCreateHook, sessionOpenHook } from "./server/hook";
 import { RoleLimits } from "./server/limits";
@@ -17,7 +17,8 @@ import {
 } from "./shared/rpc";
 import { rolesSettings, type GitSource } from "./shared/settings";
 
-export default function contribute(server: PluginServerContext) {
+export function startRoles(host: FactoryHost) {
+  const { server } = host;
   const settings = server.registerSettings(rolesSettings);
   const gitSources = new GitSources();
   const tokens = new TokenStore();
@@ -39,11 +40,9 @@ export default function contribute(server: PluginServerContext) {
   });
 
   const limits = new RoleLimits();
-  const removeHook = server.before(
-    "agent.create",
-    agentCreateHook(async () => (await configured()).map((s) => gitSources.rolesDir(s)), limits),
-  );
-  const removeSessionHook = server.before("agent.session_open", sessionOpenHook(limits));
+  const createHook = agentCreateHook(async () => (await configured()).map((s) => gitSources.rolesDir(s)), limits);
+  host.beforeCreate(async (request, ctx) => (host.enabled("roles") ? ((await createHook({ request }, ctx)) ?? undefined) : undefined));
+  const removeSessionHook = server.before("agent.session_open", (input, ctx) => (host.enabled("roles") ? sessionOpenHook(limits)(input) : undefined));
 
   server.handle(listRolesRpc, async () => ({
     roles: await service.list(),
@@ -72,8 +71,10 @@ export default function contribute(server: PluginServerContext) {
     return {};
   });
 
+  host.gitSources = gitSources;
+  host.configuredSources = configured;
+
   return () => {
-    removeHook();
     removeSessionHook();
     unsubscribe();
     gitSources.stop();

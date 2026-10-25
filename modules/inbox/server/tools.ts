@@ -7,6 +7,15 @@ export interface ToolContext {
   engine: Engine;
   /** The calling agent. */
   callerId: string;
+  /** Labels of the caller; undefined in tests that do not need them. */
+  labels?: () => Promise<Record<string, string>>;
+}
+
+/** Agents with this label (the Assistant plugin's) may see and answer every pending item, on Louis's behalf. */
+export const ASSISTANT_LABEL = "paseo.assistant";
+
+async function isAssistant(ctx: ToolContext): Promise<boolean> {
+  return (await ctx.labels?.())?.[ASSISTANT_LABEL] === "1";
 }
 
 export interface ToolDef {
@@ -88,6 +97,40 @@ export const TOOLS: ToolDef[] = [
         .filter((i) => i.agentId === ctx.callerId && (!status || i.status === status))
         .sort((a, b) => b.createdAt - a.createdAt)
         .map(summary),
+  },
+  {
+    name: "inbox_pending",
+    description:
+      "Pending inbox items waiting for the human, across all agents, with their options. Only for agents labelled paseo.assistant=1 (the Assistant plugin); other agents see their own pending items.",
+    input: z.object({}),
+    async run(_input, ctx) {
+      const assistant = await isAssistant(ctx);
+      return ctx.engine.store
+        .pending()
+        .filter((i) => assistant || i.agentId === ctx.callerId)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((i) => ({ ...summary(i), asked_by: i.agentId, context: i.context, options: i.options, allow_free_text: i.allowFreeText, created_at: new Date(i.createdAt).toISOString() }));
+    },
+  },
+  {
+    name: "inbox_answer",
+    description:
+      "Answer a pending item on behalf of Louis. Only for agents labelled paseo.assistant=1 (the Assistant plugin); the answer is recorded as \"answered by the Assistant on behalf of Louis\". " +
+      "`answer` is an option id, or free text for items that take it. Answer only what Louis said; never decide for him.",
+    input: z.object({
+      item: z.string().describe("The item id from inbox_pending."),
+      answer: z.string().min(1).max(10_000).describe("An option id, or free text."),
+      comment: z.string().max(2000).optional(),
+    }),
+    async run({ item, answer, comment }, ctx) {
+      if (!(await isAssistant(ctx))) throw new UsageError("inbox_answer is for the Assistant only (agents labelled paseo.assistant=1).");
+      const found = ctx.engine.store.get(item);
+      if (!found) throw new UsageError(`No inbox item "${item}".`);
+      const isOption = found.options.some((o) => o.id === answer);
+      const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, "assistant");
+      if (!result.ok) throw new UsageError(result.message ?? "Not answered.");
+      return { ...summary(result.item!), recorded_as: "answered by the Assistant on behalf of Louis" };
+    },
   },
   {
     name: "inbox_withdraw",

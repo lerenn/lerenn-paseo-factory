@@ -1,10 +1,9 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
 import type { LeaseMode } from "../shared/lease";
 
-export const defaultStatePath = path.join(homedir(), ".paseo", "plugin-data", "agents-leases", "state.json");
+export const defaultStatePath = null as string | null;
 
 export interface Holder {
   agentId: string;

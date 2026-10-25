@@ -12,7 +12,7 @@ type GitSource = Pick<ConfiguredSource, "url" | "ref" | "path" | "intervalMinute
 
 const execFileAsync = promisify(execFile);
 
-export const gitCacheRoot = path.join(homedir(), ".paseo", "agents-roles", "git");
+export const gitCacheRoot = path.join(homedir(), ".paseo", "factory", "git");
 
 export interface SyncStatus {
   lastSync: string | null;
@@ -92,8 +92,13 @@ export class GitSources {
   }
 
   /** Directory holding the role files of `source` (its folder inside the clone). */
+  /** A subfolder of the source's Factory folder: roles/, blueprints/, ... */
+  subDir(source: GitSource, name: string): string {
+    return path.join(this.cacheDir(source), source.path ?? "", name);
+  }
+
   rolesDir(source: GitSource): string {
-    return path.join(this.cacheDir(source), source.path ?? "");
+    return this.subDir(source, "roles");
   }
 
   status(source: GitSource): SyncStatus {

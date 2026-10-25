@@ -1,11 +1,8 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
 
-export const defaultStatePath = path.join(homedir(), ".paseo", "plugin-data", "agents-warden", "state.json");
-/** State of the pre-rename plugin (agents-warder); read once when there is no state under the new name yet. */
-export const legacyStatePath = path.join(homedir(), ".paseo", "plugin-data", "agents-warder", "state.json");
+export const defaultStatePath = null as string | null;
 
 export type TaskState = "active" | "done" | "expired" | "archived" | "cancelled" | "gave-up";
 
@@ -84,8 +81,7 @@ export class Store {
   private load(): State {
     if (!this.file) return { sessions: {}, agents: {}, tasks: [] };
     try {
-      const source = this.file === defaultStatePath && !existsSync(this.file) ? legacyStatePath : this.file;
-      const s = JSON.parse(readFileSync(source, "utf8"));
+      const s = JSON.parse(readFileSync(this.file, "utf8"));
       const tasks: Task[] = s.tasks ?? [];
       for (const sup of (s.supervisions ?? []) as LegacySupervision[]) {
         tasks.push({

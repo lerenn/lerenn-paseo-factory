@@ -164,10 +164,3 @@ export const TOOLS: ToolDef[] = [
     },
   },
 ];
-
-/** Deprecated `warder_*` aliases of the tools, still callable by agents that were injected before the rename. */
-export const LEGACY_TOOLS: ToolDef[] = TOOLS.map((t) => ({
-  ...t,
-  name: t.name.replace("warden_", "warder_"),
-  description: `Deprecated alias of ${t.name}. ${t.description}`,
-}));

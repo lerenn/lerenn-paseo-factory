@@ -23,7 +23,11 @@ export interface AskInput {
   expiresInMinutes?: number;
   defaultAnswer?: string;
   dedupeKey?: string;
+  /** Asked by the Factory for a blueprint gate or escalation: nobody is messaged when it is answered. */
+  internal?: boolean;
 }
+
+export type Resolution = "answered" | "expired";
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -34,6 +38,7 @@ export function fingerprint(kind: string, question: string, options: InboxOption
 
 export class Engine {
   private lastSendAt = Number.NEGATIVE_INFINITY;
+  private readonly listeners = new Set<(item: Item, how: Resolution) => void>();
   private busy = false;
   private readonly permissions = new Set<string>();
 
@@ -43,6 +48,26 @@ export class Engine {
     private readonly settings: () => InboxSettings | null,
     private readonly now: () => number = Date.now,
   ) {}
+
+  /** Told when an item is answered or expires; used by the Factory's blueprint gates. */
+  onResolved(listener: (item: Item, how: Resolution) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private resolved(item: Item, how: Resolution): void {
+    if (item.internal) {
+      item.owed = null;
+      item.delivery = "none";
+    }
+    for (const l of this.listeners) {
+      try {
+        l(item, how);
+      } catch (error) {
+        console.error("inbox: listener failed", error);
+      }
+    }
+  }
 
   // ---- asking ----
 
@@ -85,6 +110,7 @@ export class Engine {
         expiresAt: expiry ? now + expiry * 60_000 : null,
         defaultOptionId,
         defaultText,
+        internal: input.internal ?? false,
       },
       now,
     );
@@ -96,7 +122,7 @@ export class Engine {
   // ---- answering (human) ----
 
   /** Records the answer once. A second answer is refused and changes nothing. */
-  answer(itemId: string, input: { optionId?: string; text?: string; comment?: string }): { ok: boolean; message: string | null; item: Item | null } {
+  answer(itemId: string, input: { optionId?: string; text?: string; comment?: string }, by: "human" | "assistant" = "human"): { ok: boolean; message: string | null; item: Item | null } {
     const item = this.store.get(itemId);
     const now = this.now();
     if (!item) return { ok: false, message: "No such item.", item: null };
@@ -114,14 +140,15 @@ export class Engine {
     } else return refuse("Pick an option or write an answer.");
 
     item.status = "answered";
-    item.answer = { optionId: input.optionId ?? null, text: input.optionId ? null : text, by: "human", at: now };
+    item.answer = { optionId: input.optionId ?? null, text: input.optionId ? null : text, by, at: now };
     item.comment = input.comment?.trim() || (input.optionId ? text : null);
     item.owed = "answer";
     item.delivery = "pending";
     item.readAt ??= now;
     item.endedAt = now;
-    this.store.log({ itemId, type: "answered", actor: "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
+    this.store.log({ itemId, type: "answered", actor: by === "assistant" ? "assistant on behalf of Louis" : "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
     this.store.save();
+    this.resolved(item, "answered");
     return { ok: true, message: null, item };
   }
 
@@ -173,12 +200,14 @@ export class Engine {
           item.delivery = "pending";
           item.endedAt = now;
           this.store.log({ itemId: item.id, type: "expired", actor: "system", detail: `default: ${item.defaultOptionId ?? item.defaultText}` }, now);
+          this.resolved(item, "answered");
         } else {
           item.status = "expired";
           item.owed = "expired";
           item.delivery = "pending";
           item.endedAt = now;
           this.store.log({ itemId: item.id, type: "expired", actor: "system", detail: null }, now);
+          this.resolved(item, "expired");
         }
         this.store.save();
       }
@@ -192,7 +221,7 @@ export class Engine {
 
   /** Backstop for a missed agent.archived event: ask about askers of pending items, a few per tick. */
   private async sweepArchived(): Promise<void> {
-    const agents = [...new Set(this.store.pending().map((i) => i.agentId))].slice(0, 5);
+    const agents = [...new Set(this.store.pending().filter((i) => !i.internal).map((i) => i.agentId))].slice(0, 5);
     for (const agentId of agents) {
       let archived = false;
       try {
@@ -213,7 +242,7 @@ export class Engine {
     const answer = a.optionId ? `${a.optionId}${label !== a.optionId ? ` (${label})` : ""}` : `"${a.text}"`;
     return render(s?.answerTemplate ?? "", {
       ...fallback,
-      by: a.by === "default" ? " by default after expiry" : "",
+      by: a.by === "default" ? " by default after expiry" : a.by === "assistant" ? " by the Assistant on behalf of Louis" : "",
       answer,
       comment: item.comment ? `. Comment: ${item.comment}` : "",
     });

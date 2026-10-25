@@ -1,19 +1,19 @@
-import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginHookContext } from "@getpaseo/plugin/server";
+import type { FactoryHost } from "../../server/host";
+import { adapt } from "../../server/tools";
 import { answerRpc, countRpc, listItemsRpc, readRpc } from "./shared/rpc";
 import { inboxSettings, type InboxSettings } from "./shared/settings";
 import { Engine, type Actions } from "./server/engine";
-import { InboxHttp } from "./server/http";
-import { applyInjection, CAPABILITY_ENV, scopeApplies, SCOPE_ENV } from "./server/inject";
-import { McpServer } from "./server/mcp";
+import { NOTE, scopeApplies, SCOPE_ENV, TOOL_NAMES } from "./server/inject";
+import { INSTRUCTIONS } from "./server/instructions";
 import { Store } from "./server/store";
 import { TOOLS } from "./server/tools";
-
-const DEFAULT_PORT = 47825;
 
 type Paseo = PluginHookContext["paseo"];
 type HookAgent = { id: string; workspaceId: string | null; title: string | null };
 
-export default function contribute(server: PluginServerContext) {
+export function startInbox(host: FactoryHost) {
+  const { server } = host;
   const settings = server.registerSettings(inboxSettings);
   let current: InboxSettings | null = null;
   let settingsError: string | null = null;
@@ -42,61 +42,46 @@ export default function contribute(server: PluginServerContext) {
       return handle.archivedAt !== null;
     },
   };
-  const store = new Store(process.env.INBOX_STATE ?? undefined);
+  const store = new Store(process.env.INBOX_STATE ?? host.statePath("inbox", "agents-inbox"));
   const engine = new Engine(store, actions, () => current);
-
-  const http = new InboxHttp({ engine, mcp: new McpServer(TOOLS) });
-  let url: string | null = null;
-  let startError: string | null = null;
-  const port = Number(process.env.INBOX_PORT ?? DEFAULT_PORT);
-  // Resumed agents keep the URL they were created with, so the port has to be stable.
-  const started = http.start(port).then(
-    (u) => {
-      url = u;
+  host.engines.inbox = engine;
+  const removeTools = host.registerTools("inbox", TOOLS.map((t) => adapt(t, engine)));
+  host.setInstructions("inbox", INSTRUCTIONS);
+  host.contribute({
+    module: "inbox",
+    note: NOTE,
+    async tools(request) {
+      await ready;
+      return current?.enabled && scopeApplies(current.scope, request.env) ? TOOL_NAMES : null;
     },
-    (err: Error) => {
-      startError = `inbox cannot listen on 127.0.0.1:${port}: ${err.message}. Set INBOX_PORT on the daemon.`;
-      console.error(startError);
-    },
-  );
+  });
 
   const known = (agent: HookAgent) => store.upsertAgent(agent.id, { title: agent.title, workspaceId: agent.workspaceId });
 
   const removers = [
-    server.before("agent.create", async ({ request }, ctx) => {
-      capture(ctx);
-      await ready;
-      if (!current?.enabled || !scopeApplies(current.scope, request.env)) return;
-      await started;
-      if (!url) throw new Error(`${startError} Create the agent with ${SCOPE_ENV}=off to skip the inbox.`);
-      return applyInjection(request, { url, capability: store.createSession() });
-    }),
     server.before("agent.session_open", ({ request }, ctx) => {
       capture(ctx);
-      const capability = request.env[CAPABILITY_ENV];
-      if (capability) store.bind(capability, request.agentId);
       store.upsertAgent(request.agentId, { optOut: request.env[SCOPE_ENV]?.toLowerCase() === "off" });
     }),
-    server.on("agent.created", ({ agent }, ctx) => {
+    host.on("inbox", "agent.created", ({ agent }, ctx) => {
       capture(ctx);
       known(agent);
     }),
-    server.on("agent.turn_started", ({ agent }, ctx) => {
+    host.on("inbox", "agent.turn_started", ({ agent }, ctx) => {
       capture(ctx);
       known(agent);
     }),
-    server.on("agent.permission_requested", ({ agent }, ctx) => {
+    host.on("inbox", "agent.permission_requested", ({ agent }, ctx) => {
       capture(ctx);
       engine.permission(agent.id, true);
     }),
-    server.on("agent.permission_resolved", ({ agent }, ctx) => {
+    host.on("inbox", "agent.permission_resolved", ({ agent }, ctx) => {
       capture(ctx);
       engine.permission(agent.id, false);
     }),
-    server.on("agent.archived", ({ agent }, ctx) => {
+    host.on("inbox", "agent.archived", ({ agent }, ctx) => {
       capture(ctx);
       engine.agentArchived(agent.id);
-      store.forgetAgentSessions(agent.id);
     }),
   ];
 
@@ -144,7 +129,7 @@ export default function contribute(server: PluginServerContext) {
       events: audit ? store.events().slice(-500) : [],
       settings: current,
       settingsError,
-      endpoint: { url, error: startError },
+      endpoint: { url: host.url, error: host.startError },
     };
   });
   server.handle(countRpc, (_input, ctx) => {
@@ -169,6 +154,6 @@ export default function contribute(server: PluginServerContext) {
     if (timer) clearTimeout(timer);
     for (const remove of removers) remove();
     unsubscribeSettings();
-    void http.stop();
+    removeTools();
   };
 }
