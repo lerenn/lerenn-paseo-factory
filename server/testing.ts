@@ -13,10 +13,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { factorySettingsSchema } from "../shared/settings";
-import { settingsSchema as wardenSettingsSchema } from "../modules/warden/shared/settings";
-import { settingsSchema as inboxSettingsSchema } from "../modules/inbox/shared/settings";
-import { settingsSchema as leasesSettingsSchema } from "../modules/leases/shared/settings";
-import { settingsSchema as blueprintsSettingsSchema } from "../modules/blueprints/shared/settings";
+import { settingsSchema as wardenSettingsSchema } from "../shared/warden/settings";
+import { settingsSchema as inboxSettingsSchema } from "../shared/inbox/settings";
+import { settingsSchema as leasesSettingsSchema } from "../shared/leases/settings";
+import { settingsSchema as blueprintsSettingsSchema } from "../shared/blueprints/settings";
 import contribute from "../index.server";
 
 type Handler = (input: any, ctx: any) => any;

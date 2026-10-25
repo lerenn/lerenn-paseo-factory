@@ -2,12 +2,12 @@ import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plug
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
 import { FactoryScreen } from "./client/screen";
-import { hostBadgeComponent } from "./modules/leases/client/host-badge";
-import { useRunsNeedingAttention } from "./modules/blueprints/client";
-import { useInboxCount } from "./modules/inbox/client";
-import { useLeasesWaiting } from "./modules/leases/client";
-import { contributeRoles } from "./modules/roles/client";
-import { contributeWarden } from "./modules/warden/client";
+import { hostBadgeComponent } from "./client/leases/host-badge";
+import { useRunsNeedingAttention } from "./client/blueprints";
+import { useInboxCount } from "./client/inbox";
+import { useLeasesWaiting } from "./client/leases";
+import { contributeRoles } from "./client/roles";
+import { contributeWarden } from "./client/warden";
 
 const HostBadge = hostBadgeComponent();
 

@@ -1,9 +1,9 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { startBlueprints } from "./modules/blueprints";
-import { startInbox } from "./modules/inbox";
-import { startLeases } from "./modules/leases";
-import { startRoles } from "./modules/roles";
-import { startWarden } from "./modules/warden";
+import { startBlueprints } from "./server/blueprints";
+import { startInbox } from "./server/inbox";
+import { startLeases } from "./server/leases";
+import { startRoles } from "./server/roles";
+import { startWarden } from "./server/warden";
 import { FactoryHost } from "./server/host";
 import { buildServices } from "./server/services";
 import { overviewRpc } from "./shared/rpc";

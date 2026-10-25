@@ -12,9 +12,13 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 
 There is no data migration. Setting `importLegacyState` (off by default) copies the state file of the old stand-alone plugin (`agents-leases`, `agents-warden`, `agents-inbox`) once, for a module that has no Factory state yet.
 
+## Layout
+
+Source lives in `client/`, `server/` and `shared/` only (Paseo's plugin loader requires it); each module has a subfolder in each (`server/warden`, `client/warden`, `shared/warden`). `layout.test.ts` checks this in CI.
+
 ## Git source
 
-Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `docs/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `docs/examples/blueprints`).
+Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `shared/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `shared/examples/blueprints`).
 
 ## Blueprints
 

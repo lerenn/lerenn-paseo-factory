@@ -3,11 +3,11 @@ import { SettingsCard, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { BlueprintsScreen } from "../modules/blueprints/client";
-import { InboxScreen } from "../modules/inbox/client";
-import { LeasesScreen } from "../modules/leases/client";
-import { RolesScreen } from "../modules/roles/client";
-import { WardenScreen } from "../modules/warden/client";
+import { BlueprintsScreen } from "./blueprints";
+import { InboxScreen } from "./inbox";
+import { LeasesScreen } from "./leases";
+import { RolesScreen } from "./roles";
+import { WardenScreen } from "./warden";
 import { overviewRpc } from "../shared/rpc";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
