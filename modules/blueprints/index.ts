@@ -82,7 +82,9 @@ export function startBlueprints(host: FactoryHost) {
       await agentRef(agentId).archive();
     },
     ask(o) {
-      const { item } = inbox().ask({
+      const e = inbox();
+      e.store.upsertAgent(`blueprint:${o.runId}`, { title: o.title });
+      const { item } = e.ask({
         agentId: `blueprint:${o.runId}`,
         question: o.question,
         kind: o.kind,

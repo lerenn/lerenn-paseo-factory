@@ -34,6 +34,8 @@ export interface Ports {
   archive(agentId: string): Promise<void>;
   ask(o: {
     runId: string;
+    /** Shown as the asker in the Inbox. */
+    title: string;
     question: string;
     context: string;
     options: { id: string; label: string }[];
@@ -347,10 +349,15 @@ export class Engine {
     await this.notifyPm(run, text);
   }
 
+  private askerTitle(run: Run): string {
+    return `Factory · ${run.blueprint} · ${run.vars.ticket || run.vars.incident_id || run.id}`;
+  }
+
   private escalate(run: Run, id: string, why: string): void {
     try {
       this.ports.ask({
         runId: run.id,
+        title: this.askerTitle(run),
         question: `Run ${run.id} (${run.blueprint}) is stuck at stage ${id}: ${clip(why, 300)}`,
         context: `Blueprint ${run.blueprint} sha ${run.sha}, vars ${JSON.stringify(run.vars)}. Resume it with blueprint_resume(run="${run.id}", stage="${id}", extra_attempts=N) or leave it failed.`,
         options: [],
@@ -668,6 +675,7 @@ export class Engine {
     const context = [def.context ? this.r(run, def.context) : "", facts ? `PRs this gate is tied to:${facts}` : "", criteriaSha ? `Criteria sha: ${criteriaSha.slice(0, 12)}` : ""].filter(Boolean).join("\n\n");
     const { itemId } = this.ports.ask({
       runId: run.id,
+      title: this.askerTitle(run),
       question: this.r(run, def.question),
       context,
       options,
