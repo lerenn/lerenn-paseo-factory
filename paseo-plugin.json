@@ -1,6 +1,6 @@
 {
   "id": "paseo-factory",
-  "name": "Paseo Factory",
+  "name": "Factory",
   "description": "Roles, Blueprints, Leases, Warden and Inbox in one plugin, with one git source and one MCP server.",
   "requirements": { "paseo": ">=0.11.2" },
   "build": [["npm", "ci"]]

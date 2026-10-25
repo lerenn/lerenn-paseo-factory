@@ -52,8 +52,8 @@ interface AgentBadgeClient {
 export default function contribute(client: PluginClientContext) {
   installRegistry();
   const cleanups: (() => void | Promise<void>)[] = [];
-  cleanups.push(client.addScreen({ id: "factory", title: "Paseo Factory", Component: FactoryScreen }));
-  cleanups.push(client.addSidebarHeaderItem({ id: "factory", title: "Paseo Factory", Component: FactoryItem }));
+  cleanups.push(client.addScreen({ id: "factory", title: "Factory", Component: FactoryScreen }));
+  cleanups.push(client.addSidebarHeaderItem({ id: "factory", title: "Factory", Component: FactoryItem }));
   cleanups.push(contributeRoles(client), contributeWarden(client));
 
   const badges = client as unknown as AgentBadgeClient;
