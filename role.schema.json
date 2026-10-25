@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "default": 1,
+      "type": "number",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "description": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "modeId": {
+      "type": "string"
+    },
+    "thinkingOptionId": {
+      "type": "string"
+    },
+    "systemPrompt": {
+      "type": "string"
+    },
+    "mcpServers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9_.-]*)$"
+      }
+    },
+    "preapprovedTools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "tool"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "env": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "maxConcurrent": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "plugins": {
+      "type": "object",
+      "properties": {
+        "kubeTemplate": {
+          "type": "string"
+        },
+        "warder": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "on",
+                "off"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "on",
+                    "off"
+                  ]
+                },
+                "interval": {
+                  "type": "string",
+                  "pattern": "^(\\d+h)?(\\d+m)?(\\d+s)?$|^\\d+$"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "ticket": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "providerOptions": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "additionalProperties": false
+}
