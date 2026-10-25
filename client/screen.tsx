@@ -75,17 +75,36 @@ function ExtensionTab({ theme, layout, ext }: PluginScreenProps & { ext: { id: s
   );
 }
 
+function TabRow({ tabs, current, onPick, theme }: { tabs: { key: string; label: string; health?: "ok" | "degraded" }[]; current: string; onPick(key: string): void; theme: PluginScreenProps["theme"] }) {
+  const c = theme.colors;
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, padding: 10, flex: 1 }}>
+      {tabs.map((t) => (
+        <Pressable
+          key={t.key}
+          onPress={() => onPick(t.key)}
+          style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: t.key === current ? c.accent : c.border }}
+        >
+          {t.health ? <View accessibilityLabel={t.health === "ok" ? "extension reachable" : "extension unreachable"} style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: t.health === "ok" ? c.statusSuccess : c.statusWarning }} /> : null}
+          <Text style={{ color: t.key === current ? c.foreground : c.foregroundMuted, fontSize: 13 }}>{t.label}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 export function FactoryScreen(props: PluginScreenProps) {
   const { theme } = props;
   const overview = useRpc(overviewRpc);
   const query = useQuery({ queryKey: ["factory", "overview"], queryFn: () => overview({}), refetchInterval: 15_000 });
   const modules = query.data?.settings?.modules;
-  const tabs = useMemo(() => {
-    const list: { key: string; label: string }[] = MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id, label: TITLES[id] }));
-    for (const e of query.data?.extensions ?? []) if (e.tab) list.push({ key: `ext:${e.id}`, label: e.tab });
-    list.push({ key: SETTINGS_TAB, label: "Settings" });
-    return list;
+  const { builtin, extensionTabs } = useMemo(() => {
+    const builtin: { key: string; label: string }[] = MODULES.filter((id) => modules?.[id] ?? true).map((id) => ({ key: id, label: TITLES[id] }));
+    builtin.push({ key: SETTINGS_TAB, label: "Settings" });
+    const extensionTabs = (query.data?.extensions ?? []).filter((e) => e.tab).map((e) => ({ key: `ext:${e.id}`, label: e.tab as string, health: e.health }));
+    return { builtin, extensionTabs };
   }, [modules, query.data?.extensions]);
+  const tabs = useMemo(() => [...builtin, ...extensionTabs], [builtin, extensionTabs]);
   const [picked, setPicked] = useState<string>("blueprints");
   const tab = tabs.some((t) => t.key === picked) ? picked : tabs[0].key;
   const c = theme.colors;
@@ -101,16 +120,14 @@ export function FactoryScreen(props: PluginScreenProps) {
   }
   return (
     <View style={{ flex: 1, backgroundColor: c.surface0 }}>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, padding: 10, borderBottomWidth: 1, borderBottomColor: c.border }}>
-        {tabs.map((t) => (
-          <Pressable
-            key={t.key}
-            onPress={() => setPicked(t.key)}
-            style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: t.key === tab ? c.accent : c.border }}
-          >
-            <Text style={{ color: t.key === tab ? c.foreground : c.foregroundMuted, fontSize: 13 }}>{t.label}</Text>
-          </Pressable>
-        ))}
+      <View style={{ borderBottomWidth: 1, borderBottomColor: c.border }}>
+        <TabRow tabs={builtin} current={tab} onPick={setPicked} theme={theme} />
+        {extensionTabs.length > 0 ? (
+          <View style={{ flexDirection: "row", alignItems: "center", borderTopWidth: 1, borderTopColor: c.border }}>
+            <Text style={{ color: c.foregroundMuted, fontSize: 11, paddingLeft: 12, textTransform: "uppercase" }}>Extensions</Text>
+            <TabRow tabs={extensionTabs} current={tab} onPick={setPicked} theme={theme} />
+          </View>
+        ) : null}
       </View>
       {query.data?.endpoint.error ? <Text style={{ color: c.statusDanger, padding: 10 }}>{query.data.endpoint.error}</Text> : null}
       <View style={{ flex: 1 }}>{body}</View>

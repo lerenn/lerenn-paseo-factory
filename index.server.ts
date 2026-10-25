@@ -35,7 +35,7 @@ export default function contribute(server: PluginServerContext) {
     return {
       settings: host.settings,
       endpoint: { url: host.url, error: host.startError },
-      extensions: host.listExtensions().map((e) => ({ id: e.id, version: e.version, tab: e.tab, tools: e.tools.map((t) => t.name), stageKinds: e.stageKinds.map((k) => k.kind) })),
+      extensions: host.listExtensions().map((e) => ({ id: e.id, version: e.version, tab: e.tab, tools: e.tools.map((t) => t.name), stageKinds: e.stageKinds.map((k) => k.kind), health: host.extensionHealth(e.id) })),
     };
   });
 

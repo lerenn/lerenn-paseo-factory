@@ -172,7 +172,7 @@ describe("extensions", () => {
     const out = await create(request());
     await open({ agentId: "a1", env: out.env });
     const overview = await rpc["factory.overview"]({}, ctx);
-    expect(overview.extensions).toEqual([{ id: "release-trains", version: "1.0.0", tab: "Release Trains", tools: ["train_status"], stageKinds: [] }]);
+    expect(overview.extensions).toEqual([{ id: "release-trains", version: "1.0.0", tab: "Release Trains", tools: ["train_status"], stageKinds: [], health: "ok" }]);
     const listed = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(listed.body.result.tools.map((t: any) => t.name)).toContain("train_status");
     const called = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "train_status", arguments: {} } });

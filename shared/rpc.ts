@@ -9,7 +9,7 @@ export const overviewRpc = defineRpc({
   output: z.object({
     settings: factorySettingsSchema.nullable(),
     endpoint: z.object({ url: z.string().nullable(), error: z.string().nullable() }),
-    extensions: z.array(z.object({ id: z.string(), version: z.string(), tab: z.string().nullable(), tools: z.array(z.string()), stageKinds: z.array(z.string()) })),
+    extensions: z.array(z.object({ id: z.string(), version: z.string(), tab: z.string().nullable(), tools: z.array(z.string()), stageKinds: z.array(z.string()), health: z.enum(["ok", "degraded"]).default("ok") })),
   }),
 });
 

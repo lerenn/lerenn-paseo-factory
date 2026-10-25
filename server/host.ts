@@ -329,6 +329,11 @@ export class FactoryHost {
     this.remotes.set(raw.id, entry);
   }
 
+  /** "degraded" while a remote extension has unreachable calls or probes in a row. */
+  extensionHealth(id: string): "ok" | "degraded" {
+    return (this.remotes.get(id)?.handle.failures ?? 0) > 0 ? "degraded" : "ok";
+  }
+
   /** Probe the remote extensions; drop the ones that stay unreachable. */
   async checkRemotes(): Promise<string[]> {
     const dropped: string[] = [];
