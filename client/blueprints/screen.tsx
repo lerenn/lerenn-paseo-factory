@@ -10,6 +10,7 @@ import { buildTimeline, formatDuration } from "../../shared/blueprints/timeline"
 import { blueprintsSettings } from "../../shared/blueprints/settings";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { SubTabs } from "../subtabs";
+import { BlueprintGraph } from "./graph";
 
 type Colors = PluginScreenProps["theme"]["colors"];
 
@@ -184,9 +185,20 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
           const agentId = run.stages.find((st) => st.id === run.stage)?.agentId ?? null;
           return agentId ? <TranscriptPeek agentId={agentId} theme={theme} navigation={navigation} /> : null;
         })()}
-        <Pressable onPress={() => setExpanded((e) => ({ ...e, [`tl:${run.id}`]: !e[`tl:${run.id}`] }))}>
-          <Text style={s.muted}>{expanded[`tl:${run.id}`] ? "▾" : "▸"} Timeline</Text>
-        </Pressable>
+        <View style={s.line}>
+          <Pressable onPress={() => setExpanded((e) => ({ ...e, [`tl:${run.id}`]: !e[`tl:${run.id}`] }))}>
+            <Text style={s.muted}>{expanded[`tl:${run.id}`] ? "▾" : "▸"} Timeline</Text>
+          </Pressable>
+          <Pressable onPress={() => setExpanded((e) => ({ ...e, [`gr:${run.id}`]: !e[`gr:${run.id}`] }))}>
+            <Text style={s.muted}>{expanded[`gr:${run.id}`] ? "▾" : "▸"} Graph</Text>
+          </Pressable>
+        </View>
+        {expanded[`gr:${run.id}`] ? (
+          (() => {
+            const bp = data?.blueprints.find((b) => b.name === run.blueprint);
+            return bp ? <BlueprintGraph blueprint={bp} run={run} runs={data?.runs ?? []} blueprints={data?.blueprints ?? []} theme={theme} navigation={navigation} /> : <Text style={s.muted}>The blueprint {run.blueprint} is no longer loaded.</Text>;
+          })()
+        ) : null}
         {expanded[`tl:${run.id}`]
           ? buildTimeline(run.history, now, run.endedAt).map((seg, i) => (
               <View key={`${seg.stage}-${seg.entry}-${i}`} style={{ gap: 1, paddingLeft: 8 }}>
@@ -381,6 +393,10 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             {b.description ? <Text style={s.text}>{b.description}</Text> : null}
             <Text style={s.muted}>Source: {b.source} · pm_extra_max {b.pmExtraMax}{b.confirm.length ? ` · must be confirmed: ${b.confirm.join(", ")}` : ""}</Text>
             <Text style={s.muted}>Variables: {b.vars.map((v) => `${v.name}${v.required ? "*" : ""}`).join(", ") || "none"}</Text>
+            <Pressable onPress={() => setShowSource((m) => ({ ...m, [`gr:${b.name}`]: !m[`gr:${b.name}`] }))}>
+              <Text style={s.muted}>{showSource[`gr:${b.name}`] ? "▾" : "▸"} Graph</Text>
+            </Pressable>
+            {showSource[`gr:${b.name}`] ? <BlueprintGraph blueprint={b} run={null} runs={data?.runs ?? []} blueprints={data?.blueprints ?? []} theme={theme} navigation={navigation} /> : null}
             <View style={{ gap: 8 }}>{b.details.map(renderStage)}</View>
             <View style={s.line}>
               <Pressable style={s.button} onPress={() => startFrom(b)}>
