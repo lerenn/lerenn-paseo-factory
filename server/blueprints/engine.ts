@@ -31,6 +31,8 @@ export interface Ports {
   now(): number;
   spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string> }): Promise<{ agentId: string }>;
   send(agentId: string, text: string): Promise<void>;
+  /** Information for an agent (not a task): Agents Mail when installed, else `send`. */
+  report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   agentState(agentId: string): Promise<"running" | "idle" | "gone">;
   archive(agentId: string): Promise<void>;
   ask(o: {
@@ -275,7 +277,7 @@ export class Engine {
       if (parent) void this.exclusive(parent.id, () => this.childFinished(parent, run)).catch((e) => this.crash(parent, e));
     }
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
-    for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void this.ports.send(id, text).catch(() => undefined);
+    for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
     if (this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
   }
 
