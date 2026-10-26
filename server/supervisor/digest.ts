@@ -23,6 +23,6 @@ export function digestMessage(send: readonly Issue[]): string {
   return (
     `Factory digest (${send.length} issue${send.length === 1 ? "" : "s"} for you):\n` +
     send.map((i) => `- ${i.text}`).join("\n") +
-    `\nAct with your tools (blueprint_abort / blueprint_retry / blueprint_resume, extension_restart, lease and warden tools), and ask Louis through inbox_ask when a person must decide.`
+    `\nAct with your tools (blueprint_abort / blueprint_retry / blueprint_resume, extension_restart, lease and warden tools), and ask the user through inbox_ask when a person must decide.`
   );
 }

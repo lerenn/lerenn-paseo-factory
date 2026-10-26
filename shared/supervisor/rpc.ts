@@ -38,7 +38,7 @@ export const supervisorStartRpc = defineRpc({
   output: z.object({ ok: z.boolean(), message: z.string().nullable() }),
 });
 
-/** Louis writes to the Supervisor from its tab. */
+/** the user writes to the Supervisor from its tab. */
 export const supervisorSendRpc = defineRpc({
   name: "supervisor.send",
   input: z.object({ text: z.string().min(1).max(4000) }),

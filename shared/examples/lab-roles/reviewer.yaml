@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/lerenn/paseo-agents-roles/main/role.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lerenn/paseo-factory/main/role.schema.json
 version: 1
 name: reviewer
 description: "Reviews a diff for correctness, risk and missing tests without editing code."

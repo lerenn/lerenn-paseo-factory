@@ -19,7 +19,7 @@ describe("activity", () => {
   it("merges runs, inbox, leases and extension events, newest first, with roles and links", () => {
     const items = buildActivity({
       runs: [run],
-      inbox: [{ at: 5, itemId: "i1", type: "answered", actor: "assistant on behalf of Louis", detail: "approve" }, { at: 5, itemId: "i1", type: "delivered", actor: "system", detail: null }],
+      inbox: [{ at: 5, itemId: "i1", type: "answered", actor: "assistant on behalf of the user", detail: "approve" }, { at: 5, itemId: "i1", type: "delivered", actor: "system", detail: null }],
       leases: [{ at: 6, lease: "pr:a/b#1@abc", type: "acquired", actor: "agent-1", detail: null }, { at: 6, lease: "x", type: "renewed", actor: "a", detail: null }],
       extensions: [{ at: 8, extension: "release-trains", type: "deploy", title: "prd deploy of backend v1.2.3" }],
     });

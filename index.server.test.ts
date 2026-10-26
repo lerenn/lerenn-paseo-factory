@@ -124,7 +124,7 @@ describe("inbox_answer", () => {
     const denied = await mcp(endpoint.url, plain, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "inbox_answer", arguments: { item: asked.item_id, answer: "yes" } } });
     expect(denied.body.result.isError).toBe(true);
     const done = await call(assistant, "inbox_answer", { item: asked.item_id, answer: "yes" });
-    expect(done).toMatchObject({ status: "answered", answer: { option_id: "yes", by: "assistant" }, recorded_as: "answered by the Assistant on behalf of Louis" });
+    expect(done).toMatchObject({ status: "answered", answer: { option_id: "yes", by: "assistant" }, recorded_as: "answered by the Assistant on behalf of the user" });
     const { items } = await b.rpc["inbox.list"]({ audit: true }, b.ctx);
     expect(items[0].answer.by).toBe("assistant");
   });
@@ -514,9 +514,9 @@ describe("the Supervisor", () => {
       const chat = await b.rpc["supervisor.status"]({}, b.ctx);
       expect(chat.status.requests[0]).toMatchObject({ fromName: "Coordinator", answer: "Yes." });
 
-      // Louis writes from the tab
+      // the user writes from the tab
       expect(await b.rpc["supervisor.send"]({ text: "status?" }, b.ctx)).toEqual({ ok: true, message: null });
-      expect(sent.at(-1)!.text).toBe("Message from Louis (Supervisor tab): status?");
+      expect(sent.at(-1)!.text).toBe("Message from the user (Supervisor tab): status?");
     } finally {
       delete process.env.FACTORY_DEFAULT_CWD;
     }

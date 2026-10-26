@@ -103,7 +103,7 @@ describe("requests from other agents", () => {
 });
 
 describe("extension restarts", () => {
-  it("allows one restart per extension per hour, then points to Louis", async () => {
+  it("allows one restart per extension per hour, then points to the user", async () => {
     const { supervisor, advance } = setup();
     expect(await supervisor.restartExtension("release-trains")).toBe("restarted release-trains");
     await expect(supervisor.restartExtension("release-trains")).rejects.toThrow(/once per hour.*inbox_ask/);

@@ -9,7 +9,7 @@ export const INSTRUCTIONS = `The Factory Supervisor is the one persistent agent 
 
 Anyone can reach it: supervisor_ask(question) relays your question and returns its answer (or a pending request id to poll with supervisor_ask_status); supervisor_status shows its state and stable agent id, which you can also steer directly with a normal agent message.
 
-If you are the Supervisor: answer requests with supervisor_reply, restart a crashed extension with extension_restart (once per hour per extension; after that ask Louis with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on the lab repository for Louis to approve.`;
+If you are the Supervisor: answer requests with supervisor_reply, restart a crashed extension with extension_restart (once per hour per extension; after that ask the user with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on the lab repository for the user to approve.`;
 
 export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">[] {
   return [
@@ -54,7 +54,7 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
     {
       name: "extension_restart",
       description:
-        "Supervisor only: ask a crashed or unreachable extension to restart itself (the extension must support it). At most once per hour per extension; a second request within the hour is refused, so ask Louis through inbox_ask.",
+        "Supervisor only: ask a crashed or unreachable extension to restart itself (the extension must support it). At most once per hour per extension; a second request within the hour is refused, so ask the user through inbox_ask.",
       input: z.object({ id: z.string().describe("Extension id, for example release-trains.") }),
       requiresLabel: supervisorOnly,
       async run({ id }) {

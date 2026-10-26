@@ -148,7 +148,7 @@ export class Engine {
     item.delivery = "pending";
     item.readAt ??= now;
     item.endedAt = now;
-    this.store.log({ itemId, type: "answered", actor: by === "assistant" ? "assistant on behalf of Louis" : "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
+    this.store.log({ itemId, type: "answered", actor: by === "assistant" ? "assistant on behalf of the user" : "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
     this.store.save();
     this.resolved(item, "answered");
     return { ok: true, message: null, item };
@@ -244,7 +244,7 @@ export class Engine {
     const answer = a.optionId ? `${a.optionId}${label !== a.optionId ? ` (${label})` : ""}` : `"${a.text}"`;
     return render(s?.answerTemplate ?? "", {
       ...fallback,
-      by: a.by === "default" ? " by default after expiry" : a.by === "assistant" ? " by the Assistant on behalf of Louis" : "",
+      by: a.by === "default" ? " by default after expiry" : a.by === "assistant" ? " by the Assistant on behalf of the user" : "",
       answer,
       comment: item.comment ? `. Comment: ${item.comment}` : "",
     });

@@ -150,12 +150,12 @@ export class Supervisor {
 
   // ---- extension restarts ----
 
-  /** At most once an hour per extension; a second request inside the hour tells the Supervisor to ask Louis. */
+  /** At most once an hour per extension; a second request inside the hour tells the Supervisor to ask the user. */
   async restartExtension(id: string): Promise<string> {
     const now = this.ports.now();
     const allowed = restartAllowed(this.state.data.restarts, id, now);
     if (!allowed.ok) {
-      throw new Error(`Extension ${id} was already restarted ${allowed.minutesAgo} min ago (limit: once per hour). Ask Louis through inbox_ask what to do.`);
+      throw new Error(`Extension ${id} was already restarted ${allowed.minutesAgo} min ago (limit: once per hour). Ask the user through inbox_ask what to do.`);
     }
     this.state.data.restarts.push({ extension: id, at: now });
     this.state.save();
