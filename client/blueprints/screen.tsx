@@ -190,7 +190,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             <Text style={s.muted}>{expanded[`tl:${run.id}`] ? "▾" : "▸"} Timeline</Text>
           </Pressable>
           <Pressable onPress={() => setExpanded((e) => ({ ...e, [`gr:${run.id}`]: !e[`gr:${run.id}`] }))}>
-            <Text style={s.muted}>{expanded[`gr:${run.id}`] ? "▾" : "▸"} Graph</Text>
+            <Text style={s.muted}>{expanded[`gr:${run.id}`] ? "▾" : "▸"} Flows</Text>
           </Pressable>
         </View>
         {expanded[`gr:${run.id}`] ? (
@@ -394,7 +394,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             <Text style={s.muted}>Source: {b.source} · pm_extra_max {b.pmExtraMax}{b.confirm.length ? ` · must be confirmed: ${b.confirm.join(", ")}` : ""}</Text>
             <Text style={s.muted}>Variables: {b.vars.map((v) => `${v.name}${v.required ? "*" : ""}`).join(", ") || "none"}</Text>
             <Pressable onPress={() => setShowSource((m) => ({ ...m, [`gr:${b.name}`]: !m[`gr:${b.name}`] }))}>
-              <Text style={s.muted}>{showSource[`gr:${b.name}`] ? "▾" : "▸"} Graph</Text>
+              <Text style={s.muted}>{showSource[`gr:${b.name}`] ? "▾" : "▸"} Flows</Text>
             </Pressable>
             {showSource[`gr:${b.name}`] ? <BlueprintGraph blueprint={b} run={null} runs={data?.runs ?? []} blueprints={data?.blueprints ?? []} theme={theme} navigation={navigation} /> : null}
             <View style={{ gap: 8 }}>{b.details.map(renderStage)}</View>
