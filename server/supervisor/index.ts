@@ -6,6 +6,7 @@ import { SupervisorState } from "./state";
 import { INSTRUCTIONS, supervisorTools, TOOL_NAMES_OPEN, TOOL_NAMES_SUPERVISOR } from "./tools";
 import { supervisorSettings, type SupervisorSettings } from "../../shared/supervisor/settings";
 import { settingsSchema } from "../../shared/supervisor/settings";
+import { setWorkspaceTitle, workspaceTitle } from "../workspace-title";
 
 export function startSupervisor(host: FactoryHost) {
   const { server } = host;
@@ -35,6 +36,7 @@ export function startSupervisor(host: FactoryHost) {
         // No kube template: it runs on the daemon, not in a pod.
         env: { PASEO_AGENT_ROLE: current.role, PASEO_WARDEN: "on", PASEO_FACTORY_BLUEPRINTS: "on" },
       });
+      await setWorkspaceTitle(host.paseo, handle.id, workspaceTitle(current.role));
       return handle.id;
     },
     async send(agentId, text) {

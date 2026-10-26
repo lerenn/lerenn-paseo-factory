@@ -8,6 +8,7 @@ import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { RunStore } from "./store";
+import { retitleFactoryWorkspaces, setWorkspaceTitle } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
@@ -110,6 +111,7 @@ export function startBlueprints(host: FactoryHost) {
         labels: o.labels,
         env: o.env,
       });
+      if (o.workspaceTitle) await setWorkspaceTitle(host.paseo, handle.id, o.workspaceTitle);
       return { agentId: handle.id };
     },
     async send(agentId, text) {
@@ -258,10 +260,16 @@ export function startBlueprints(host: FactoryHost) {
   // ---- events ----
   const removers = [
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
+      void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
       void recordSpend(agent.id, turnId);
       void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];
+  const runVars = (id: string) => {
+    const run = store.get(id);
+    return run ? { vars: run.vars, blueprint: run.blueprint } : undefined;
+  };
+  host.whenPaseo((paseo) => void retitleFactoryWorkspaces(paseo, runVars));
   const unlisten = host.engines.inbox?.onResolved((item: { id: string; agentId: string }) => {
     if (item.agentId.startsWith("blueprint:")) void engine.gateResolved(item.id).catch((e) => console.error("blueprints: gate failed", e));
   });

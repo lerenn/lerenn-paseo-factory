@@ -170,6 +170,7 @@ describe("starting", () => {
     expect(spawned[0].role).toBe("investigator");
     expect(spawned[0].labels).toMatchObject({ "paseo.factory": "1", "paseo.factory.blueprint": "flow", "paseo.factory.run": run.id, "paseo.factory.stage": "think", "paseo.factory.role": "investigator" });
     expect(spawned[0].env).toMatchObject({ PASEO_AGENT_ROLE: "investigator", PASEO_FACTORY_RUN: run.id });
+    expect(spawned[0].workspaceTitle).toMatch(/^Investigator: flow bp-/);
     expect(spawned[0].prompt).toContain("Investigate ANY-1");
     expect(spawned[0].prompt).toContain("blueprint_verdict");
     expect(wardens).toEqual(["agent-1"]);
