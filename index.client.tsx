@@ -1,7 +1,7 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
-import { badgeText, badgeTooltip } from "./client/agent-badge";
+import { AGENT_BADGES } from "./client/agent-badge";
 import { installRegistry } from "./client/registry";
 import { FactoryScreen } from "./client/screen";
 import { hostBadgeComponent } from "./client/leases/host-badge";
@@ -60,18 +60,7 @@ export default function contribute(client: PluginClientContext) {
   const badges = client as unknown as AgentBadgeClient;
   if (typeof badges.addAgentBadge === "function") {
     try {
-      cleanups.push(
-        badges.addAgentBadge({
-          id: "factory-run",
-          scope: "workspace",
-          match: { labels: { "paseo.factory": "*" } },
-          render: {
-            icon: "Factory",
-            text: (a) => badgeText(a.labels),
-            tooltip: (a) => badgeTooltip(a.labels),
-          },
-        }),
-      );
+      for (const badge of AGENT_BADGES) cleanups.push(badges.addAgentBadge(badge));
     } catch (error) {
       console.error("factory: could not register the agent badge", error);
     }

@@ -1,3 +1,4 @@
+import { listAgents } from "./list-agents";
 import type { Paseo } from "./host";
 
 const ACRONYMS = new Set(["pm", "pr", "qa", "ci", "ui", "api"]);
@@ -56,7 +57,7 @@ type Listed = { id: string; labels?: Record<string, string> };
 /** Re-title the workspaces of live Factory agents (startup, and after a turn when the host may have generated its own title). */
 export async function retitleFactoryWorkspaces(paseo: Paseo, runVars: (runId: string) => { vars: Record<string, string>; blueprint: string } | undefined, only?: string): Promise<void> {
   try {
-    const { entries } = await paseo.agents.list({ filter: { includeArchived: false } } as never);
+    const { entries } = await listAgents(paseo);
     for (const { agent } of entries as { agent: Listed }[]) {
       if (only && agent.id !== only) continue;
       const labels = agent.labels ?? {};

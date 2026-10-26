@@ -1,3 +1,4 @@
+import { listAgents } from "../list-agents";
 import type { PluginHookContext } from "@getpaseo/plugin/server";
 import type { FactoryHost } from "../host";
 import { adapt } from "../tools";
@@ -148,7 +149,7 @@ export function startWarden(host: FactoryHost) {
   async function reconcile(): Promise<void> {
     if (!paseo || store.active().length === 0) return;
     try {
-      const { entries } = await paseo.agents.list({ filter: { includeArchived: false } } as never);
+      const { entries } = await listAgents(paseo);
       const live = (entries as { agent: LiveAgent }[]).map((e) => e.agent);
       for (const { task, why } of watchesToDrop(store.active(), live)) {
         if (why === "archived") engine.finish(task, "archived", "The agent is archived or gone");
@@ -207,7 +208,7 @@ export function startWarden(host: FactoryHost) {
     if (!extra && Date.now() - reconciledAt < 30_000) return;
     reconciledAt = Date.now();
     try {
-      const { entries } = await ctx.paseo.agents.list({ filter: { includeArchived: false } } as never);
+      const { entries } = await listAgents(ctx.paseo);
       type Listed = { id: string; title: string | null; workspaceId: string | null; status?: string; parentAgentId?: string | null; labels?: Record<string, string> };
       const live = new Map<string, Listed>();
       for (const { agent } of entries as { agent: Listed }[]) if (agent.status !== "closed") live.set(agent.id, agent);

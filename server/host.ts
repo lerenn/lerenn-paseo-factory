@@ -1,3 +1,4 @@
+import { listAgents } from "./list-agents";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -123,6 +124,11 @@ export class FactoryHost {
     return this.current;
   }
 
+  /** Runtime of the workspaces the Factory creates. */
+  get runtime(): "kubernetes" | "local" {
+    return this.current?.runtime ?? "kubernetes";
+  }
+
   /** A module that is not switched off. Before the settings are read, everything is on. */
   enabled(module: ModuleId | string): boolean {
     const modules = this.current?.modules as Record<string, boolean> | undefined;
@@ -190,7 +196,7 @@ export class FactoryHost {
     if (cached && Date.now() - cached.at < 30_000) return cached.labels;
     let labels: Record<string, string> = {};
     try {
-      const { entries } = await this.paseo.agents.list({ filter: { includeArchived: false } } as never);
+      const { entries } = await listAgents(this.paseo);
       for (const { agent } of entries as { agent: { id: string; labels?: Record<string, string> } }[]) {
         this.labelCache.set(agent.id, { at: Date.now(), labels: agent.labels ?? {}, title: (agent as { title?: string | null }).title ?? null });
         if (agent.id === agentId) labels = agent.labels ?? {};

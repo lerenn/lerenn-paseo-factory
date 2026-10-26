@@ -16,6 +16,8 @@ export const factorySettingsSchema = z.object({
       supervisor: z.boolean().default(true),
     })
     .default({ roles: true, blueprints: true, leases: true, warden: true, inbox: true, supervisor: true }),
+  /** Where every workspace the Factory creates (Supervisor, PMs, stage workers) runs: a pod, or the daemon. */
+  runtime: z.enum(["kubernetes", "local"]).default("kubernetes"),
   /**
    * One-off, off by default: on the next start, a module with no Factory state yet copies the state
    * file of its old stand-alone plugin (agents-leases, agents-warden, agents-inbox).
