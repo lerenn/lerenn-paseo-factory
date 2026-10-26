@@ -39,7 +39,9 @@ export function createReporter(opts: Options): (agentId: string, report: Report)
     try {
       const raw = JSON.parse(readFileSync(file(), "utf8")) as { url?: string; token?: string };
       if (raw.url && raw.token) {
-        const res = await doFetch(`${raw.url.replace(/\/$/, "")}/api/health`, { headers: { authorization: `Bearer ${raw.token}` }, signal: AbortSignal.timeout?.(2000) } as never);
+        const abort = new AbortController();
+        const timer = setTimeout(() => abort.abort(), 2000);
+        const res = await doFetch(`${raw.url.replace(/\/$/, "")}/api/health`, { headers: { authorization: `Bearer ${raw.token}` }, signal: abort.signal }).finally(() => clearTimeout(timer));
         if (res.ok) found = { url: raw.url.replace(/\/$/, ""), token: raw.token };
       }
     } catch {
