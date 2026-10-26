@@ -80,7 +80,7 @@ head_moved = "check"
 
 function setup(source = flow) {
   let time = 1_000_000;
-  const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string }[] = [];
+  const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string }[] = [];
   const sent: { to: string; text: string }[] = [];
   const states = new Map<string, "running" | "idle" | "gone">();
   const items = new Map<string, { gate: GateState; question: string; withdrawn: string | null }>();
@@ -93,7 +93,7 @@ function setup(source = flow) {
     now: () => time,
     async spawn(o) {
       const agentId = `agent-${++agents}`;
-      spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey });
+      spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey, workspaceTitle: o.workspaceTitle });
       states.set(agentId, "running");
       return { agentId };
     },
@@ -170,6 +170,7 @@ describe("starting", () => {
     expect(spawned[0].role).toBe("investigator");
     expect(spawned[0].labels).toMatchObject({ "paseo.factory": "1", "paseo.factory.blueprint": "flow", "paseo.factory.run": run.id, "paseo.factory.stage": "think", "paseo.factory.role": "investigator" });
     expect(spawned[0].env).toMatchObject({ PASEO_AGENT_ROLE: "investigator", PASEO_FACTORY_RUN: run.id });
+    expect(spawned[0].workspaceTitle).toBe("Investigator: ANY-1");
     expect(spawned[0].prompt).toContain("Investigate ANY-1");
     expect(spawned[0].prompt).toContain("blueprint_verdict");
     expect(wardens).toEqual(["agent-1"]);

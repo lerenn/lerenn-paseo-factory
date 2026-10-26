@@ -4,6 +4,7 @@ import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallSta
 import type { RunView, StageView } from "../../shared/blueprints/run";
 import type { Run, RunStore, StageState } from "./store";
 import { condition, render } from "./template";
+import { workspaceTitle } from "../workspace-title";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
@@ -28,7 +29,7 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; cwd?: string; labels: Record<string, string>; env: Record<string, string> }): Promise<{ agentId: string }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string> }): Promise<{ agentId: string }>;
   send(agentId: string, text: string): Promise<void>;
   agentState(agentId: string): Promise<"running" | "idle" | "gone">;
   archive(agentId: string): Promise<void>;
@@ -420,6 +421,7 @@ export class Engine {
         role,
         prompt: text,
         title: `PM ${run.blueprint} ${run.id}`,
+        workspaceTitle: workspaceTitle(role, run.vars, `${run.blueprint} ${run.id}`),
         cwd: this.ports.settings().defaultCwd,
         labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm" },
         env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id },
@@ -583,6 +585,7 @@ export class Engine {
           role: def.role,
           prompt: replaced ? `${prompt}\n\nNote: the worker that held this role earlier is gone; you are its replacement. Read the repository and PR state before continuing.` : prompt,
           title: `${run.blueprint} · ${id} · ${run.vars.ticket || run.id}`,
+          workspaceTitle: workspaceTitle(def.role, run.vars, `${run.blueprint} ${run.id}`),
           cwd: def.cwd ? this.r(run, def.cwd) : this.ports.settings().defaultCwd,
           labels: {
             "paseo.factory": "1",
