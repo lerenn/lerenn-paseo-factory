@@ -42,8 +42,13 @@ export function bootPlugin(settings: Record<string, object> = {}, paseoOverrides
   };
   const sent: { id: string; text: string }[] = [];
   const paseo: any = {
-    workspaces: { list: async () => ({ entries: [{ id: "w", projectDisplayName: "Proj", projectCustomName: null, name: "ws-branch", title: "Nice workspace" }] }) },
+    workspaces: {
+      create: async (o: { title?: string }) => ({ id: "ws-new", agents: { create: async (a: unknown) => paseo.agents.create(a) } }),
+      ref: () => ({ refresh: async () => ({ title: null }), setTitle: async () => ({ title: null }) }),
+      list: async () => ({ entries: [{ id: "w", projectDisplayName: "Proj", projectCustomName: null, name: "ws-branch", title: "Nice workspace" }] }),
+    },
     agents: {
+      create: async () => ({ id: "agent-new" }),
       list: async () => ({ entries: [] }),
       ref: (id: string) => ({
         send: async (text: string) => void sent.push({ id, text }),

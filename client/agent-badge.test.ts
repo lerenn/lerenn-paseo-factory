@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeText, badgeTooltip } from "./agent-badge";
+import { badgeText, badgeTooltip, badgesFor } from "./agent-badge";
 
 describe("agent badge", () => {
   it("shows blueprint and stage for a run agent", () => {
@@ -15,5 +15,13 @@ describe("agent badge", () => {
   it("never prints placeholders for missing labels", () => {
     expect(badgeText({ "paseo.factory.stage": "think" })).toBe("think");
     expect(badgeTooltip({ "paseo.factory": "1" })).toBe("Factory agent");
+  });
+
+  it("every Factory agent gets exactly one badge: the Supervisor, a PM, a worker", () => {
+    const supervisor = { "paseo.factory": "1", "paseo.factory.supervisor": "1", "paseo.factory.role": "supervisor" };
+    const pm = { "paseo.factory": "1", "paseo.factory.run": "bp-1", "paseo.factory.role": "pm", "paseo.factory.stage": "pm", "paseo.factory.blueprint": "ticket" };
+    expect(badgesFor(supervisor).map((b) => b.id)).toEqual(["factory-supervisor"]);
+    expect(badgesFor(pm).map((b) => b.id)).toEqual(["factory-run"]);
+    expect(badgesFor({}).length).toBe(0);
   });
 });

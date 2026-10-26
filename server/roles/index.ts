@@ -1,3 +1,4 @@
+import { listAgents } from "../list-agents";
 import type { FactoryHost } from "../host";
 import { GitSources } from "./git-sync";
 import { agentCreateHook, sessionOpenHook } from "./hook";
@@ -53,7 +54,7 @@ export function startRoles(host: FactoryHost) {
   }));
   server.handle(listRoleAgentsRpc, async (_input, ctx) => {
     host.capture(ctx);
-    const { entries } = await ctx.paseo.agents.list({ filter: { includeArchived: false } } as never);
+    const { entries } = await listAgents(ctx.paseo);
     const { entries: workspaces } = await ctx.paseo.workspaces.list();
     return { agents: roleAgents((entries as unknown as { agent: never }[]).map((e) => e.agent), limits.registered(), workspaces as never) };
   });

@@ -7,8 +7,9 @@ import { ghDiff, ghFacts } from "./github";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
+import { spawnAgent } from "../spawn-agent";
 import { RunStore } from "./store";
-import { retitleFactoryWorkspaces, setWorkspaceTitle } from "../workspace-title";
+import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
@@ -102,17 +103,17 @@ export function startBlueprints(host: FactoryHost) {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
       const role = await host.loadRole(o.role);
-      const handle = await host.paseo.agents.create({
+      const { agentId } = await spawnAgent(host.paseo, host.runtime, {
         idempotencyKey: o.idempotencyKey,
-        config: resolveAgentConfig(role, cfg().defaultProvider),
+        config: resolveAgentConfig(role, cfg().defaultProvider) as never,
         cwd,
         title: o.title,
+        workspaceTitle: o.workspaceTitle ?? o.title,
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
       });
-      if (o.workspaceTitle) await setWorkspaceTitle(host.paseo, handle.id, o.workspaceTitle);
-      return { agentId: handle.id };
+      return { agentId };
     },
     async send(agentId, text) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
