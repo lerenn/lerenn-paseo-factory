@@ -20,7 +20,7 @@ export function supervisorRpcs(host: FactoryHost, supervisor: Supervisor, settin
     const id = supervisor.state.data.agentId;
     if (!id) return { ok: false, message: "The Supervisor is not running; start it first." };
     try {
-      await host.paseo.agents.ref(id).send(`Message from Louis (Supervisor tab): ${text}`, { activeTurnBehavior: "steer" });
+      await host.paseo.agents.ref(id).send(`Message from the user (Supervisor tab): ${text}`, { activeTurnBehavior: "steer" });
       return { ok: true, message: null };
     } catch (error) {
       return { ok: false, message: (error as Error).message };

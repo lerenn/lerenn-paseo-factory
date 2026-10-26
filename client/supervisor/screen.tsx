@@ -5,13 +5,13 @@ import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { transcriptRpc, type TranscriptMessage } from "../../shared/rpc";
 import { supervisorSendRpc, supervisorStartRpc, supervisorStatusRpc } from "../../shared/supervisor/rpc";
 
-/** Who a message in the Supervisor's chat comes from: the Factory, another agent, or Louis. */
+/** Who a message in the Supervisor's chat comes from: the Factory, another agent, or the user. */
 export function senderOf(text: string): { who: string; body: string } {
   const request = /^Supervisor request (\S+) from "([^"]+)" \(([^)]*)\): ([\s\S]*)$/.exec(text);
   if (request) return { who: request[2], body: `${request[4].split("\nAnswer with supervisor_reply")[0]} [${request[1]}]` };
   if (text.startsWith("Factory digest")) return { who: "Factory", body: text };
-  const louis = /^Message from Louis \(Supervisor tab\): ([\s\S]*)$/.exec(text);
-  if (louis) return { who: "Louis", body: louis[1] };
+  const user = /^Message from (?:the user|Louis) \(Supervisor tab\): ([\s\S]*)$/.exec(text);
+  if (user) return { who: "You", body: user[1] };
   return { who: "Factory", body: text };
 }
 
@@ -119,7 +119,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
         <TextInput
           value={text}
           onChangeText={setText}
-          placeholder="Message the Supervisor as Louis…"
+          placeholder="Message the Supervisor…"
           placeholderTextColor={c.foregroundMuted}
           multiline
           style={{ borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8, color: c.foreground, minHeight: 40 }}

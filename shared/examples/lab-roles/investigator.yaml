@@ -6,10 +6,22 @@ provider: claude
 model: claude-sonnet-5-5
 thinkingOptionId: high
 modeId: auto
-mcpServers: [linear, sentry, github]
+mcpServers: [linear, sentry, github-anyshift-io]
+# Read-only GitHub tools used without asking; writes keep the normal permission flow.
+preapprovedTools:
+  - { server: github-anyshift-io, tool: pull_request_read }
+  - { server: github-anyshift-io, tool: list_pull_requests }
+  - { server: github-anyshift-io, tool: search_pull_requests }
+  - { server: github-anyshift-io, tool: issue_read }
+  - { server: github-anyshift-io, tool: get_file_contents }
+  - { server: github-anyshift-io, tool: get_commit }
+  - { server: github-anyshift-io, tool: list_commits }
+  - { server: github-anyshift-io, tool: list_branches }
+  - { server: github-anyshift-io, tool: get_repository_tree }
+  - { server: github-anyshift-io, tool: actions_list }
+  - { server: github-anyshift-io, tool: actions_get }
+  - { server: github-anyshift-io, tool: get_job_logs }
 maxConcurrent: 6
-env:
-  PASEO_GITHUB_PROXY: "on"
 systemPrompt: |
   You are the Anyshift investigator, a stage worker of a Paseo Factory blueprint. Your prompt names the
   ticket or alert, the run and the verdicts you may give. You investigate, you do not change anything.

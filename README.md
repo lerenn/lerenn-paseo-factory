@@ -14,7 +14,7 @@ There is no data migration. Setting `importLegacyState` (off by default) copies 
 
 ## Supervisor
 
-A sixth tab (between Overview and Activity) for the **Supervisor**: ONE persistent agent per Factory (role `supervisor`, label `paseo.factory.supervisor=1`, created without a kube template so it runs on the daemon; its id is kept in `supervisor.json`). A PM supervises one run; the Supervisor supervises the Factory: runs paused, failed or waiting for a PM that does not exist, spawn failures, lease contention and expiry, extension health, role and blueprint load errors, git sync errors, Warden escalations. The Factory sends it a debounced "Factory digest" (a problem is told once, again after `repeatMinutes` while open); it acts with `blueprint_abort/_retry/_resume`, asks Louis with `inbox_ask`, and changes roles or blueprints only through lab pull requests.
+A sixth tab (between Overview and Activity) for the **Supervisor**: ONE persistent agent per Factory (role `supervisor`, label `paseo.factory.supervisor=1`, created without a kube template so it runs on the daemon; its id is kept in `supervisor.json`). A PM supervises one run; the Supervisor supervises the Factory: runs paused, failed or waiting for a PM that does not exist, spawn failures, lease contention and expiry, extension health, role and blueprint load errors, git sync errors, Warden escalations. The Factory sends it a debounced "Factory digest" (a problem is told once, again after `repeatMinutes` while open); it acts with `blueprint_abort/_retry/_resume`, asks the user with `inbox_ask`, and changes roles or blueprints only through lab pull requests.
 
 - Open to every agent: `supervisor_ask(question)` relays your question (with your agent name) and returns the answer, or a request id to poll with `supervisor_ask_status`; `supervisor_status` shows its state and stable agent id (steer it directly with a normal agent message too).
 - Supervisor only: `supervisor_reply(request, answer)`, `extension_restart(id)`. A restart calls `POST <callback>/restart` on the extension (extensions opt in; 404 means unsupported) and is allowed once per hour per extension.
@@ -82,7 +82,7 @@ The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) 
 
 ## Inbox and the Assistant
 
-`inbox_pending` lists every pending item and `inbox_answer(item, answer)` answers one; both are for agents labelled `paseo.assistant=1` (others see only their own items and cannot answer). The answer is recorded as "answered by the Assistant on behalf of Louis".
+`inbox_pending` lists every pending item and `inbox_answer(item, answer)` answers one; both are for agents labelled `paseo.assistant=1` (others see only their own items and cannot answer). The answer is recorded as "answered by the Assistant on behalf of the user".
 
 ## Extensions
 

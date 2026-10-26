@@ -11,7 +11,7 @@ export interface ToolContext {
   labels?: () => Promise<Record<string, string>>;
 }
 
-/** Agents with this label (the Assistant plugin's) may see and answer every pending item, on Louis's behalf. */
+/** Agents with this label (the Assistant plugin's) may see and answer every pending item, on the user's behalf. */
 export const ASSISTANT_LABEL = "paseo.assistant";
 
 async function isAssistant(ctx: ToolContext): Promise<boolean> {
@@ -133,8 +133,8 @@ export const TOOLS: ToolDef[] = [
   {
     name: "inbox_answer",
     description:
-      "Answer a pending item on behalf of Louis. Only for agents labelled paseo.assistant=1 (the Assistant plugin); the answer is recorded as \"answered by the Assistant on behalf of Louis\". " +
-      "`answer` is an option id, or free text for items that take it. Answer only what Louis said; never decide for him.",
+      "Answer a pending item on behalf of the user. Only for agents labelled paseo.assistant=1 (the Assistant plugin); the answer is recorded as \"answered by the Assistant on behalf of the user\". " +
+      "`answer` is an option id, or free text for items that take it. Answer only what the user said; never decide for him.",
     input: z.object({
       item: z.string().describe("The item id from inbox_pending."),
       answer: z.string().min(1).max(10_000).describe("An option id, or free text."),
@@ -147,7 +147,7 @@ export const TOOLS: ToolDef[] = [
       const isOption = found.options.some((o) => o.id === answer);
       const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, "assistant");
       if (!result.ok) throw new UsageError(result.message ?? "Not answered.");
-      return { ...summary(result.item!), recorded_as: "answered by the Assistant on behalf of Louis" };
+      return { ...summary(result.item!), recorded_as: "answered by the Assistant on behalf of the user" };
     },
   },
   {
