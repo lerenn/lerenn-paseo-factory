@@ -77,9 +77,27 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
           <Segment key={j} a={e.points[j]} b={p} color={color} opacity={opacity} width={width} />
         ))}
         <Arrow edge={e} color={color} opacity={opacity} />
-        <Text pointerEvents="none" style={{ position: "absolute", left: e.label.x, top: e.label.y, color: e.taken ? foreground : c.foregroundMuted, opacity: dim ? 0.45 : 1, fontSize: 10 }}>
-          {e.verdict}
-        </Text>
+        <View
+          pointerEvents="none"
+          style={{
+            position: "absolute",
+            left: e.label.x,
+            top: e.label.y,
+            width: e.label.w,
+            height: e.label.h,
+            borderRadius: 7,
+            borderWidth: 1,
+            borderColor: e.taken ? c.accent : c.border,
+            backgroundColor: c.surface1,
+            opacity: dim ? 0.6 : 1,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text numberOfLines={1} style={{ color: e.taken ? foreground : c.foregroundMuted, fontSize: 10, lineHeight: 12 }}>
+            {e.verdict}
+          </Text>
+        </View>
       </View>
     );
   });
