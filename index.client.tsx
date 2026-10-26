@@ -1,6 +1,7 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
+import { badgeText, badgeTooltip } from "./client/agent-badge";
 import { installRegistry } from "./client/registry";
 import { FactoryScreen } from "./client/screen";
 import { hostBadgeComponent } from "./client/leases/host-badge";
@@ -66,8 +67,8 @@ export default function contribute(client: PluginClientContext) {
           match: { labels: { "paseo.factory": "*" } },
           render: {
             icon: "Factory",
-            text: (a) => `${a.labels["paseo.factory.blueprint"] ?? "factory"} · ${a.labels["paseo.factory.stage"] ?? "?"}`,
-            tooltip: (a) => `Factory run ${a.labels["paseo.factory.run"] ?? "?"} · role ${a.labels["paseo.factory.role"] ?? "?"}`,
+            text: (a) => badgeText(a.labels),
+            tooltip: (a) => badgeTooltip(a.labels),
           },
         }),
       );
