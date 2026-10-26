@@ -84,6 +84,12 @@ The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) 
 
 `inbox_pending` lists every pending item and `inbox_answer(item, answer)` answers one; both are for agents labelled `paseo.assistant=1` (others see only their own items and cannot answer). The answer is recorded as "answered by the Assistant on behalf of the user".
 
+## Reports, exclusions, roadmap
+
+- **Reports go through Agents Mail when it is installed.** Information the Factory sends to an agent (Supervisor digests, run finished or failed notices) is mailed (`kind` digest | run) if `~/.paseo/agents-mail/endpoint.json` exists and `/api/health` answers (checked once a minute); otherwise, or if the mail fails, it is sent directly as before. Tasks, nudges, judgement calls, `supervisor_ask` and Inbox questions stay direct.
+- **`excludePaths` / `excludeAgents` (Factory settings).** The Factory never lists, watches, digests or spawns an agent whose directory is inside an excluded path (default: the Security coordinator's anyshift-monorepo checkout), and refuses to spawn there.
+- **Roadmap:** merge the Assistant's Decisions with the Factory Inbox (later; the Inbox stays as it is).
+
 ## Extensions
 
 Another plugin registers with the Factory; it gets no sidebar row, only a Factory tab, and its tools join the `factory` MCP server:

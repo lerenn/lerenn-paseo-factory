@@ -12,6 +12,8 @@ export interface SupervisorPorts {
   /** Create the agent on the daemon; resolves with its id. */
   create(o: { idempotencyKey: string; prompt: string; cwd: string }): Promise<string>;
   send(agentId: string, text: string): Promise<void>;
+  /** Information for the Supervisor (digests): Agents Mail when installed, else `send`. */
+  report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   agentState(agentId: string): Promise<"running" | "idle" | "gone">;
   issues(): Promise<Issue[]>;
   nameOf(agentId: string): Promise<string>;
@@ -106,7 +108,9 @@ export class Supervisor {
       if (!data.agentId) return;
     }
     try {
-      await this.ports.send(data.agentId, digestMessage(send));
+      const body = digestMessage(send);
+      if (this.ports.report) await this.ports.report(data.agentId, { subject: `Factory digest: ${send.length} problem${send.length === 1 ? "" : "s"}`, body, kind: "digest" });
+      else await this.ports.send(data.agentId, body);
       data.told = told;
       this.lastDigestAt = this.ports.now();
       this.state.save();

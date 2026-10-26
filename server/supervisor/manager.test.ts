@@ -81,6 +81,19 @@ describe("Supervisor digest", () => {
   });
 });
 
+describe("Supervisor digest reports", () => {
+  it("goes through the report port (Agents Mail) when there is one, not through send", async () => {
+    const reports: { to: string; subject: string; kind: string; body: string }[] = [];
+    const { supervisor, sent, setIssues } = setup({ report: async (to, r) => void reports.push({ to, ...r }) });
+    setIssues([{ key: "run:1", text: "Run bp-1 is paused" }]);
+    await supervisor.digest();
+    expect(sent).toHaveLength(0);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ to: "sup-1", kind: "digest", subject: "Factory digest: 1 problem" });
+    expect(reports[0].body).toMatch(/Run bp-1 is paused/);
+  });
+});
+
 describe("requests from other agents", () => {
   it("relays a question with the caller's name and returns the answer", async () => {
     const { supervisor, sent } = setup();

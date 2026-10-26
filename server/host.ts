@@ -7,7 +7,9 @@ import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { PluginBeforeRequests, PluginHookContext, PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
-import { factorySettings, type FactorySettings, type ModuleId } from "../shared/settings";
+import { createReporter } from "./report";
+import { setExclusions } from "./exclusions";
+import { factorySettings, factorySettingsSchema, type FactorySettings, type ModuleId } from "../shared/settings";
 import { McpServer } from "./mcp";
 import { SessionStore } from "./sessions";
 import type { CallContext, HostTool } from "./tools";
@@ -101,11 +103,16 @@ export class FactoryHost {
   }
   private unsubscribe: () => void;
 
+  /** Information for an agent: through Agents Mail when it is there, else sent directly. */
+  readonly report = createReporter({ send: (id, text) => this.paseo.agents.ref(id).send(text, { activeTurnBehavior: "steer" }) as Promise<void> });
+
   constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null } = {}) {
     this.sessions = new SessionStore(opts.sessionsFile === undefined ? path.join(dataDir(), "sessions.json") : opts.sessionsFile);
+    setExclusions({ paths: factorySettingsSchema.parse({}).excludePaths, agents: [] });
     const settings = server.registerSettings(factorySettings);
     const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
       this.current = state.status === "ready" ? state.values : null;
+      setExclusions({ paths: this.current?.excludePaths ?? factorySettingsSchema.parse({}).excludePaths, agents: this.current?.excludeAgents ?? [] });
     };
     this.ready = settings.read().then(apply);
     this.unsubscribe = settings.subscribe(apply);

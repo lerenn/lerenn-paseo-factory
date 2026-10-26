@@ -42,6 +42,7 @@ export function startSupervisor(host: FactoryHost) {
     async send(agentId, text) {
       await host.paseo.agents.ref(agentId).send(text, { activeTurnBehavior: "steer" });
     },
+    report: (agentId, report) => host.report(agentId, report),
     async agentState(agentId) {
       try {
         const found = await host.paseo.agents.ref(agentId).refresh();

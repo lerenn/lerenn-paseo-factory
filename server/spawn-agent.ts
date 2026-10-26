@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Paseo } from "./host";
+import { pathExcluded } from "./exclusions";
 import { setWorkspaceTitle } from "./workspace-title";
 
 export type Runtime = "kubernetes" | "local";
@@ -29,6 +30,7 @@ export function slugFor(title: string, suffix: string = randomBytes(2).toString(
  * local: the agent runs on the daemon, as before.
  */
 export async function spawnAgent(paseo: Paseo, runtime: Runtime, o: SpawnAgentInput): Promise<{ agentId: string; workspaceId: string | null }> {
+  if (pathExcluded(o.cwd)) throw new Error(`${o.cwd} is excluded from the Factory (Factory setting excludePaths): pick another working directory.`);
   const agent = { idempotencyKey: o.idempotencyKey, config: o.config, title: o.title, prompt: o.prompt, labels: o.labels, env: o.env };
   if (runtime === "local") {
     const handle = await paseo.agents.create({ ...agent, cwd: o.cwd } as never);
