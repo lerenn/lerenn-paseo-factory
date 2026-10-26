@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildGraph, layerStages, NODE_H, NODE_W } from "./graph";
+import { readFileSync } from "node:fs";
+import { buildGraph, layerStages, LABEL_H, labelWidth, NODE_H, NODE_W, segmentCrossesRect, type Graph } from "./graph";
+import { parseBlueprint } from "../../server/blueprints/toml";
 import type { StageDetail } from "./rpc";
 import type { RunView } from "./run";
 
@@ -85,4 +87,58 @@ describe("with a run", () => {
     expect(pm.nodes.find((n) => n.id === "pm")!.state).toBe("waiting");
     expect(pm.edges.find((e) => e.to === "pm")!.taken).toBe(true);
   });
+});
+
+describe("readable layout of the shipped blueprints", () => {
+  const load = (name: string): StageDetail[] =>
+    parseBlueprint(readFileSync(new URL(`../examples/blueprints/${name}.toml`, import.meta.url), "utf8")).blueprint.stage.map((st) => {
+      const kind = st.kind ?? "agent";
+      return { ...base, id: st.id, kind, role: (st as { role?: string }).role ?? null, on: st.on, childBlueprint: kind === "blueprint" ? (st as { blueprint: string }).blueprint : null };
+    });
+  const boxes = (g: Graph) => g.nodes.map((n) => ({ id: n.id, x: n.x, y: n.y, w: n.w, h: n.h }));
+  const overlap = (a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+  for (const name of ["incident", "ticket"]) {
+    describe(name, () => {
+      const g = buildGraph(load(name));
+      it("has no node overlap and stays axis-aligned", () => {
+        const b = boxes(g);
+        for (const x of b) for (const y of b) if (x.id < y.id) expect(overlap(x, y), `${x.id} / ${y.id}`).toBe(false);
+        for (const e of g.edges) e.points.slice(1).forEach((p, i) => expect(p.x === e.points[i].x || p.y === e.points[i].y).toBe(true));
+      });
+      it("never routes an edge segment through a node", () => {
+        for (const e of g.edges)
+          for (let i = 1; i < e.points.length; i++) for (const n of boxes(g)) expect(segmentCrossesRect(e.points[i - 1], e.points[i], n), `${e.from}>${e.to} (${e.verdict}) through ${n.id}`).toBe(false);
+      });
+      it("keeps every label clear of nodes, other labels and the canvas border", () => {
+        const labels = g.edges.map((e) => ({ id: `${e.from}>${e.to}:${e.verdict}`, ...e.label }));
+        for (const e of g.edges) {
+          expect(e.label.w).toBe(labelWidth(e.verdict));
+          expect(e.label.h).toBe(LABEL_H);
+        }
+        for (const l of labels) {
+          expect(l.x >= 0 && l.y >= 0 && l.x + l.w <= g.width && l.y + l.h <= g.height, `${l.id} inside canvas`).toBe(true);
+          for (const n of boxes(g)) expect(overlap(l, n), `${l.id} over node ${n.id}`).toBe(false);
+        }
+        for (const a of labels) for (const b of labels) if (a.id < b.id) expect(overlap(a, b), `${a.id} / ${b.id}`).toBe(false);
+      });
+      it("keeps each label next to its own edge", () => {
+        for (const e of g.edges) {
+          const l = e.label;
+          const near = e.points.slice(1).some((p, i) => segmentCrossesRect(e.points[i], p, { x: l.x - 8, y: l.y - 8, w: l.w + 16, h: l.h + 16 }));
+          expect(near, `${e.from}>${e.to} ${e.verdict}`).toBe(true);
+        }
+      });
+      it("gives every edge its own track and port", () => {
+        const seen = new Set<string>();
+        for (const e of g.edges) {
+          const first = `out:${e.from}:${e.points[0].y}`;
+          const last = `in:${e.to}:${e.points[e.points.length - 1].y}`;
+          expect(seen.has(first) || seen.has(last), `${e.from}>${e.to}`).toBe(false);
+          seen.add(first);
+          seen.add(last);
+        }
+      });
+    });
+  }
 });
