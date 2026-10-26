@@ -65,9 +65,9 @@ Runs are JSON in `~/.paseo/plugin-data/paseo-factory/blueprints.json`, written b
 
 PM tools (`blueprint_start` ...) are injected into agents whose `PASEO_AGENT_ROLE` equals the `pmRole` setting (default `pm`) or that have `PASEO_FACTORY_BLUEPRINTS=on`; stage workers get `blueprint_verdict` and `blueprint_status`. `blueprint_retry`, `_resume` and `_abort` are for the run's PM, its starter and agents labelled `paseo.assistant=1`.
 
-## Spend and timelines
+## Spend, timelines and flows
 
-The Overview tab (first, default) is a read-only dashboard: blueprint runs (failing or stalled highlighted), pending Inbox items, leases, Warden attention, live role agents, git sync status, extension health, recent activity and **Spend**. Spend aggregates Paseo's per-turn usage (`lastUsage`: tokens and `totalCostUsd`), recorded at each `agent.turn_ended` of agents the Factory spawned (label `paseo.factory=1`), per run, role and day (RPC `blueprints.spend`, stored in `spend.json`). Each run card has a **Timeline**: time per stage, working vs waiting, dispatches and retries, gate open/close times and escalations, built from the run's saved history.
+The Overview tab (first, default) is a read-only dashboard: blueprint runs (failing or stalled highlighted), pending Inbox items, leases, Warden attention, live role agents, git sync status, extension health, recent activity and **Spend**. Spend aggregates Paseo's per-turn usage (`lastUsage`: tokens and `totalCostUsd`), recorded at each `agent.turn_ended` of agents the Factory spawned (label `paseo.factory=1`), per run, role and day (RPC `blueprints.spend`, stored in `spend.json`). Each run card has a **Timeline**: time per stage, working vs waiting, dispatches and retries, gate open/close times and escalations, built from the run's saved history. Next to Timeline, **Flows** (default view stays Timeline) draws the run as a graph: stages (agents) as nodes, verdict transitions as edges, the path taken highlighted, live state and child runs; on a blueprint template it shows the static shape.
 
 ## Activity, diffs, transcripts
 

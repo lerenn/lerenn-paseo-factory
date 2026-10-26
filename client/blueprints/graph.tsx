@@ -175,7 +175,7 @@ interface Props {
   navigation?: PluginScreenProps["navigation"];
 }
 
-/** Blueprint execution as a graph: stages as nodes, verdict transitions as edges, the path taken highlighted. */
+/** Flows: blueprint execution as a graph: stages as nodes, verdict transitions as edges, the path taken highlighted. */
 export function BlueprintGraph(props: Props) {
   return <Canvas {...props} depth={0} />;
 }
