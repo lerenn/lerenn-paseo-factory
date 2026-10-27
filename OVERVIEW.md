@@ -18,7 +18,7 @@ A sixth tab (between Overview and Activity) for the **Supervisor**: ONE persiste
 
 - Open to every agent: `supervisor_ask(question)` relays your question (with your agent name) and returns the answer, or a request id to poll with `supervisor_ask_status`; `supervisor_status` shows its state and stable agent id (steer it directly with a normal agent message too).
 - Supervisor only: `supervisor_reply(request, answer)`, `extension_restart(id)`. A restart calls `POST <callback>/restart` on the extension (extensions opt in; 404 means unsupported) and is allowed once per hour per extension.
-- Settings: `autoStart`, `cwd` (or `FACTORY_DEFAULT_CWD`), `role`, `defaultProvider`, `digestSeconds`, `repeatMinutes`, `askTimeoutSeconds`. The tab shows its chat (each incoming message tagged with the caller), status, watched problems and a Start / Restart button. `PASEO_SUPERVISOR=off` skips the supervisor tools for an agent.
+- Settings: `autoStart`, `cwd` (or `FACTORY_DEFAULT_CWD`), `role`, `defaultProvider`, `digestSeconds`, `repeatMinutes`, `askTimeoutSeconds`. The tab embeds the Supervisor's normal agent conversation (the app's own thread and composer; requests from agents show as ordinary messages), status, watched problems and a Start / Restart button. `PASEO_SUPERVISOR=off` skips the supervisor tools for an agent.
 
 ## Warden is for Factory agents only
 
