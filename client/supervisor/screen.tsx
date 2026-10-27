@@ -1,19 +1,9 @@
 import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { transcriptRpc, type TranscriptMessage } from "../../shared/rpc";
-import { supervisorSendRpc, supervisorStartRpc, supervisorStatusRpc } from "../../shared/supervisor/rpc";
-
-/** Who a message in the Supervisor's chat comes from: the Factory, another agent, or the user. */
-export function senderOf(text: string): { who: string; body: string } {
-  const request = /^Supervisor request (\S+) from "([^"]+)" \(([^)]*)\): ([\s\S]*)$/.exec(text);
-  if (request) return { who: request[2], body: `${request[4].split("\nAnswer with supervisor_reply")[0]} [${request[1]}]` };
-  if (text.startsWith("Factory digest")) return { who: "Factory", body: text };
-  const user = /^Message from (?:the user|Louis) \(Supervisor tab\): ([\s\S]*)$/.exec(text);
-  if (user) return { who: "You", body: user[1] };
-  return { who: "Factory", body: text };
-}
+import { Pressable, ScrollView, Text, View } from "react-native";
+import { agentChatComponent } from "./agent-chat";
+import { supervisorStartRpc, supervisorStatusRpc } from "../../shared/supervisor/rpc";
 
 const ago = (now: number, at: number) => {
   const m = Math.max(0, Math.round((now - at) / 60_000));
@@ -25,32 +15,15 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
   const queryClient = useQueryClient();
   const callStatus = useRpc(supervisorStatusRpc);
   const callStart = useRpc(supervisorStartRpc);
-  const callSend = useRpc(supervisorSendRpc);
-  const callTranscript = useRpc(transcriptRpc);
-  const [text, setText] = useState("");
   const [message, setMessage] = useState<string | null>(null);
 
   const status = useQuery({ queryKey: ["supervisor", "status"], queryFn: () => callStatus({}), refetchInterval: 5_000 });
   const s = status.data?.status;
-  const chat = useQuery({
-    queryKey: ["supervisor", "chat", s?.agentId],
-    queryFn: () => callTranscript({ agentId: s!.agentId!, limit: 40 }),
-    enabled: !!s?.agentId,
-    refetchInterval: 5_000,
-  });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["supervisor"] });
   const start = useMutation({
     mutationFn: (restart: boolean) => callStart({ restart }),
     onSuccess: (r) => {
       setMessage(r.ok ? null : r.message);
-      refresh();
-    },
-  });
-  const send = useMutation({
-    mutationFn: () => callSend({ text }),
-    onSuccess: (r) => {
-      setMessage(r.ok ? null : r.message);
-      if (r.ok) setText("");
       refresh();
     },
   });
@@ -61,7 +34,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
   const button = { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface2 } as const;
   const now = Date.now();
   const running = s?.state === "running" || s?.state === "idle";
-  const messages: TranscriptMessage[] = chat.data?.messages ?? [];
+  const AgentChat = agentChatComponent();
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: layout.compact ? 10 : 16, gap: 10 }}>
@@ -98,35 +71,12 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
       <View style={card}>
         <Text style={[body, { fontWeight: "700" }]}>Chat</Text>
         {!s?.agentId ? <Text style={muted}>The Supervisor is not running.</Text> : null}
-        {chat.data && !chat.data.ok ? <Text style={muted}>Could not read the chat: {chat.data.error}</Text> : null}
-        {messages.map((m, i) => {
-          const from = m.role === "user" ? senderOf(m.text) : { who: m.role === "assistant" ? "Supervisor" : m.role, body: m.text };
-          return (
-            <View key={i} style={{ gap: 1 }}>
-              <Text style={{ color: m.role === "assistant" ? c.accent : c.foregroundMuted, fontSize: 11, fontWeight: "700" }}>{from.who}</Text>
-              <Text style={body} selectable numberOfLines={12}>
-                {from.body}
-              </Text>
-            </View>
-          );
-        })}
-        {(s?.requests ?? []).length > 0 ? <Text style={[muted, { marginTop: 6 }]}>Requests from agents</Text> : null}
-        {(s?.requests ?? []).slice(-6).map((r) => (
-          <Text key={r.id} style={muted} numberOfLines={2} selectable>
-            {r.fromName} asked ({ago(now, r.at)}): {r.question} → {r.answer ?? "pending"}
-          </Text>
-        ))}
-        <TextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="Message the Supervisor…"
-          placeholderTextColor={c.foregroundMuted}
-          multiline
-          style={{ borderWidth: 1, borderColor: c.border, borderRadius: 6, padding: 8, color: c.foreground, minHeight: 40 }}
-        />
-        <Pressable style={[button, !text.trim() || !s?.agentId ? { opacity: 0.5 } : null]} disabled={!text.trim() || !s?.agentId} onPress={() => send.mutate()}>
-          <Text style={body}>Send</Text>
-        </Pressable>
+        {s?.agentId && !AgentChat ? <Text style={muted}>This app cannot embed the conversation; use Open agent.</Text> : null}
+        {s?.agentId && AgentChat ? (
+          <View style={{ height: layout.compact ? 520 : 680, borderRadius: 8, overflow: "hidden" }}>
+            <AgentChat key={s.agentId} agentId={s.agentId} />
+          </View>
+        ) : null}
       </View>
     </ScrollView>
   );
