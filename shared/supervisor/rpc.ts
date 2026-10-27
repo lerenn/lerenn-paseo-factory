@@ -10,19 +10,31 @@ export const supervisorRequestSchema = z.object({
   at: z.number(),
   answer: z.string().nullable(),
   answeredAt: z.number().nullable(),
+  /** When the request reached the Supervisor; null while it waits for the agent to wake (absent on older entries: delivered). */
+  deliveredAt: z.number().nullable().optional(),
 });
 export type SupervisorRequest = z.infer<typeof supervisorRequestSchema>;
 
 export const supervisorStatusSchema = z.object({
   /** The stable agent id to steer it by. */
   agentId: z.string().nullable(),
-  state: z.enum(["running", "idle", "stopped", "not-started", "error"]),
+  state: z.enum(["running", "idle", "stopped", "not-started", "error", "archived", "waking"]),
   error: z.string().nullable(),
   startedAt: z.number().nullable(),
   issues: z.array(z.object({ key: z.string(), text: z.string() })),
   lastDigestAt: z.number().nullable(),
   restarts: z.array(z.object({ extension: z.string(), at: z.number() })),
   requests: z.array(supervisorRequestSchema),
+  /** Why the Factory is (not) busy, and when the idle archive is due. */
+  busy: z.object({ busy: z.boolean(), reasons: z.array(z.string()) }),
+  idleArchiveAt: z.number().nullable(),
+  archivedAt: z.number().nullable(),
+  /** Messages and requests waiting for the agent to wake. */
+  queued: z.number(),
+  /** Problems seen while archived that did not wake it. */
+  flags: z.array(z.object({ key: z.string(), text: z.string(), at: z.number() })),
+  /** Past and current sessions, oldest first. */
+  incarnations: z.array(z.object({ n: z.number(), agentId: z.string(), startedAt: z.number(), endedAt: z.number().nullable(), reason: z.string().nullable() })),
 });
 export type SupervisorStatus = z.infer<typeof supervisorStatusSchema>;
 
