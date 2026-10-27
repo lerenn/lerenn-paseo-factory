@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { buildGraph, STATE_LINE_H, SUB_LINE_H, TEXT_PAD, TITLE_LINE_H, type GraphEdge, type GraphNode, type NodeState } from "../../shared/blueprints/graph";
+import { buildGraph, nodeBorder, STATE_LINE_H, SUB_LINE_H, TEXT_PAD, TITLE_LINE_H, type GraphEdge, type GraphNode, type NodeState } from "../../shared/blueprints/graph";
 import type { BlueprintInfo } from "../../shared/blueprints/rpc";
 import type { RunView } from "../../shared/blueprints/run";
 
@@ -107,6 +107,7 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
 
   const node = (n: GraphNode) => {
     const color = stateColor(n.state, c);
+    const border = nodeBorder(n);
     const dim = !!run && !n.visited;
     const clickable = !!n.agentId && !!navigation?.openAgent;
     const child = n.childBlueprint ? blueprints.find((b) => b.name === n.childBlueprint) : undefined;
@@ -123,9 +124,9 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
           width: n.w,
           height: n.h,
           borderRadius: n.kind === "terminal" ? n.h / 2 : 8,
-          borderWidth: n.current ? 3 : 1,
-          borderColor: n.kind === "gate" ? c.statusWarning : n.state === "static" || n.state === "pending" ? c.border : color,
-          borderStyle: n.kind === "gate" || n.kind === "pm" ? "dashed" : "solid",
+          borderWidth: border.width,
+          borderColor: border.tone === "warning" ? c.statusWarning : border.tone === "neutral" ? c.foregroundMuted : color,
+          borderStyle: border.style,
           backgroundColor: c.surface1,
           opacity: dim ? 0.45 : 1,
           paddingHorizontal: TEXT_PAD,

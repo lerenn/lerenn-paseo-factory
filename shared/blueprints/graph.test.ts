@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { buildGraph, layerStages, LABEL_H, labelWidth, NODE_H, NODE_W, segmentCrossesRect, SUB_CHAR_W, SUB_LINE_H, TEXT_PAD, TITLE_LINE_H, titleCapacity, type Graph } from "./graph";
+import { buildGraph, layerStages, nodeBorder, type NodeState, LABEL_H, labelWidth, NODE_H, NODE_W, segmentCrossesRect, SUB_CHAR_W, SUB_LINE_H, TEXT_PAD, TITLE_LINE_H, titleCapacity, type Graph } from "./graph";
 import { parseBlueprint } from "../../server/blueprints/toml";
 import type { StageDetail } from "./rpc";
 import type { RunView } from "./run";
@@ -92,6 +92,24 @@ describe("with a run", () => {
   });
 });
 
+describe("node outlines", () => {
+  const states: NodeState[] = ["static", "pending", "waiting", "running", "done", "blocked", "failed", "skipped"];
+  it("gives every state of every kind a visible border", () => {
+    for (const kind of ["agent", "gate", "call", "blueprint", "terminal"])
+      for (const state of states)
+        for (const current of [false, true]) {
+          const b = nodeBorder({ kind, state, current });
+          expect(b.width, `${kind}/${state}`).toBeGreaterThanOrEqual(1);
+          expect(["solid", "dashed"]).toContain(b.style);
+          expect(["state", "warning", "neutral"]).toContain(b.tone);
+        }
+  });
+  it("outlines waiting and not-started stages in the neutral tone, like the static shape", () => {
+    for (const state of ["static", "pending", "waiting"] as NodeState[]) expect(nodeBorder({ kind: "agent", state, current: false })).toEqual({ width: 1, style: "solid", tone: "neutral" });
+    expect(nodeBorder({ kind: "agent", state: "running", current: true })).toMatchObject({ width: 3, tone: "state" });
+  });
+});
+
 describe("readable layout of the shipped blueprints", () => {
   const load = (name: string): StageDetail[] =>
     parseBlueprint(readFileSync(new URL(`../examples/blueprints/${name}.toml`, import.meta.url), "utf8")).blueprint.stage.map((st) => {
@@ -156,6 +174,20 @@ describe("readable layout of the shipped blueprints", () => {
           const last = e.points[e.points.length - 1];
           const target = g.nodes.find((n) => n.id === e.to)!;
           expect(last.x, `${e.from}>${e.to} enters ${e.back ? "right" : "left"}`).toBe(e.back ? target.x + target.w : target.x);
+        }
+      });
+      it("draws failure stubs out of the right side of their node, chip at the end", () => {
+        for (const e of g.edges.filter((x) => x.stub)) {
+          const n = g.nodes.find((x) => x.id === e.from)!;
+          expect(e.points, `${e.from}>${e.to}`).toHaveLength(2);
+          const [p, q] = e.points;
+          expect(p.x).toBe(n.x + n.w);
+          expect(p.y > n.y && p.y < n.y + n.h, "port on the side").toBe(true);
+          expect(q.y).toBe(p.y);
+          expect(q.x).toBeGreaterThan(p.x);
+          expect(e.label.x).toBe(q.x);
+          expect(e.label.y + e.label.h / 2).toBe(p.y);
+          expect(e.label.y >= n.y && e.label.y + e.label.h <= n.y + n.h, "chip level with its node").toBe(true);
         }
       });
       it("keeps parallel lanes of different edges at least 8px apart", () => {

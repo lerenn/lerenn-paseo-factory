@@ -39,7 +39,7 @@ export interface GraphEdge {
   taken: boolean;
   /** Goes back to an earlier (or the same) column: a loop. It leaves the left side of its source and enters the right side of its target. */
   back: boolean;
-  /** A failure edge (to the PM or to failed): a short stub under its source ending in its label, not a line across the graph. */
+  /** A failure edge (to the PM or to failed): a short stub leaving the right side of its source and ending in its label, not a line across the graph. */
   stub: boolean;
   /** Axis-aligned polyline, in graph coordinates. */
   points: { x: number; y: number }[];
@@ -74,9 +74,9 @@ const MARGIN = 14;
 export const LABEL_H = 14;
 const LABEL_CHAR_W = 6.2;
 const LABEL_PAD = 8;
-/** Failure stubs under a node: one 18px row each. */
+/** Failure stubs on the right side of a node, below its other ports: one 18px row each. */
 const STUB_ROW = 18;
-const STUB_LEN = 10;
+const STUB_LEN = 14;
 /** Text metrics of the node boxes (12px bold title, 10px subtitle and state line). */
 export const TEXT_PAD = 8;
 export const TITLE_CHAR_W = 7.2;
@@ -104,6 +104,22 @@ export function subtitleOf(kind: string, role: string | null, childBlueprint: st
 export function nodeHeight(kind: string, titleLines: number, subtitle: string, withState: boolean): number {
   if (kind === "terminal") return Math.max(TERMINAL_H, 2 * BOX_PAD_Y + TITLE_LINE_H);
   return Math.max(NODE_H, 2 * BOX_PAD_Y + titleLines * TITLE_LINE_H + (subtitle ? SUB_LINE_H : 0) + (withState ? STATE_LINE_H : 0));
+}
+
+/** How a node box is outlined: every state has a visible border, the current stage a thick one. */
+export interface NodeBorder {
+  width: number;
+  style: "solid" | "dashed";
+  /** Which theme colour: the state's own, the warning colour (gates) or the neutral muted one. */
+  tone: "state" | "warning" | "neutral";
+}
+
+export function nodeBorder(n: Pick<GraphNode, "kind" | "state" | "current">): NodeBorder {
+  return {
+    width: n.current ? 3 : 1,
+    style: n.kind === "gate" || n.kind === "pm" ? "dashed" : "solid",
+    tone: n.kind === "gate" ? "warning" : n.state === "static" || n.state === "pending" || n.state === "waiting" || n.state === "skipped" ? "neutral" : "state",
+  };
 }
 
 const TERMINAL = new Set(["done"]);
@@ -172,7 +188,8 @@ function stateOf(status: string | undefined): NodeState {
  * columns, gaps with one vertical track per edge. A forward edge leaves the right side of its source and enters the left
  * side of its target; a loop leaves the left side of its source and enters the right side of its target, so it stays
  * in the gaps next to the nodes it joins. Edges that skip columns (or loop further than one) travel along the channel
- * nearest to their ends. Failure edges (to the PM, to failed) are short stubs under their source ending in their label.
+ * nearest to their ends. Failure edges (to the PM, to failed) are short stubs leaving the right side of their source, ending in their label,
+ * in a strip of the gap kept clear of the tracks.
  */
 export function buildGraph(details: readonly StageDetail[], run?: RunView | null): Graph {
   const stages = details.map((d) => d.id);
@@ -269,11 +286,16 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
   // Gaps (index -1 is the left margin, cols - 1 the right one): wide enough for the tracks and for the widest label leaving.
   const tracksIn = new Map<number, number>();
   for (const r of routes) if (!r.e.stub) for (const g of new Set([r.g1, r.g2])) tracksIn.set(g, (tracksIn.get(g) ?? 0) + 1);
+  // Right after a column, a strip for the failure stubs (stub and chip); the tracks run to the right of it.
+  const stripWidth = (g: number): number => {
+    const widest = Math.max(0, ...routes.filter((r) => r.e.stub && r.g1 === g).map((r) => r.label));
+    return widest ? STUB_LEN + widest + 4 : 0;
+  };
   const gapWidth = (g: number): number => {
     const tracks = tracksIn.get(g) ?? 0;
     const labels = Math.max(0, ...routes.filter((r) => !r.e.stub && r.g1 === g).map((r) => r.label + 8));
-    const need = tracks ? PAD * 2 + (tracks - 1) * TRACK : 0;
-    return g < 0 || g === cols - 1 ? Math.max(MARGIN, need) : Math.max(GAP_MIN, need, labels);
+    const need = (tracks ? PAD * 2 + (tracks - 1) * TRACK : 0) + stripWidth(g);
+    return g < 0 || g === cols - 1 ? Math.max(MARGIN, need) : Math.max(GAP_MIN, need, labels + stripWidth(g));
   };
   const colX: number[] = [];
   let cursor = gapWidth(-1);
@@ -316,7 +338,7 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
         x: colX[col],
         y: 0,
         w: NODE_W,
-        h: Math.max(nodeHeight(kind, titleLines, subtitle, !!run && !terminal), (ports + 1) * PORT),
+        h: Math.max(nodeHeight(kind, titleLines, subtitle, !!run && !terminal), (ports + 1) * PORT + (stubsOf.get(id)?.length ?? 0) * STUB_ROW),
         layer: col,
         state: !run ? "static" : terminal ? (reached ? "done" : "pending") : stateOf(sv?.status),
         current: !!run && run.stage === id && run.endedAt === null,
@@ -329,12 +351,8 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
     });
   });
 
-  // Vertical layout: channel 0, row 0, its stubs, channel 1, row 1, ... channel `rows`.
+  // Vertical layout: channel 0, row 0, channel 1, row 1, ... channel `rows`.
   const rowH = Array.from({ length: rows }, (_, r) => Math.max(0, ...nodes.filter((n) => rowOf.get(n.id) === r).map((n) => n.h)));
-  const stubSpace = Array.from({ length: rows }, (_, r) => {
-    const most = Math.max(0, ...nodes.filter((n) => rowOf.get(n.id) === r).map((n) => stubsOf.get(n.id)?.length ?? 0));
-    return most ? most * STUB_ROW + 6 : 0;
-  });
   const rowTop: number[] = [];
   const laneTop: number[] = [];
   const channelH: number[] = [];
@@ -346,7 +364,7 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
     y += channelH[c];
     if (c < rows) {
       rowTop[c] = y;
-      y += rowH[c] + stubSpace[c];
+      y += rowH[c];
     }
   }
   const layoutBottom = y + MARGIN;
@@ -366,8 +384,10 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
         const kb = turnY(b, b.e.from === n.id ? b.e.to : b.e.from);
         return ka - kb || a.index - b.index;
       });
+      // The right side keeps its lower end for the failure stubs.
+      const room = n.h - (side === "right" ? (stubsOf.get(n.id)?.length ?? 0) * STUB_ROW : 0);
       mine.forEach((r, i) => {
-        const py = n.y + (n.h * (i + 1)) / (mine.length + 1);
+        const py = n.y + (room * (i + 1)) / (mine.length + 1);
         // A self loop both leaves and enters this node: it appears once on each side, so tell them apart by direction.
         if (r.e.from === n.id && (side === "right") !== r.e.isBack) outY.set(r.index, py);
         if (r.e.to === n.id && (side === "left") !== r.e.isBack) inY.set(r.index, py);
@@ -412,13 +432,13 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
   const crossings = (a: Attach, b: Attach) =>
     b.left.filter((v) => inside(v, extent(a))).length +
     a.right.filter((v) => inside(v, extent(b))).length +
-    // Two horizontals at the same height would run into each other between the tracks.
-    50 * a.right.filter((v) => b.left.some((w) => Math.abs(v - w) < 1)).length;
+    // Two horizontals at (nearly) the same height would run into each other between the tracks.
+    50 * a.right.filter((v) => b.left.some((w) => Math.abs(v - w) < 8)).length;
   const trackX = new Map<string, number>();
   for (const [g, list] of attachments) {
     const order = bestOrder(list, crossings);
-    const start = g < 0 ? 0 : colX[g] + NODE_W;
-    const free = gapWidth(g) - (order.length - 1) * TRACK;
+    const start = g < 0 ? 0 : colX[g] + NODE_W + stripWidth(g);
+    const free = gapWidth(g) - stripWidth(g) - (order.length - 1) * TRACK;
     order.forEach((a, i) => trackX.set(`${g}:${a.route}`, start + free / 2 + i * TRACK));
   }
 
@@ -429,10 +449,10 @@ export function buildGraph(details: readonly StageDetail[], run?: RunView | null
     if (r.e.stub) {
       const list = stubsOf.get(a.id)!;
       const k = list.indexOf(r);
-      const tx = a.x + 10;
-      const sy = a.y + a.h + 9 + k * STUB_ROW;
-      fixed[r.index] = { x: tx + STUB_LEN, y: sy - LABEL_H / 2, w: r.label, h: LABEL_H };
-      return { r, points: [{ x: tx, y: a.y + a.h }, { x: tx, y: sy }, { x: tx + STUB_LEN, y: sy }] as Pt[] };
+      const sy = a.y + a.h - (list.length - k) * STUB_ROW + STUB_ROW / 2;
+      const ex = a.x + a.w + STUB_LEN;
+      fixed[r.index] = { x: ex, y: sy - LABEL_H / 2, w: r.label, h: LABEL_H };
+      return { r, points: [{ x: a.x + a.w, y: sy }, { x: ex, y: sy }] as Pt[] };
     }
     const b = pos.get(r.e.to)!;
     const sy = outY.get(r.index)!;
