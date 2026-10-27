@@ -31,6 +31,8 @@ export interface Ports {
   now(): number;
   spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string> }): Promise<{ agentId: string }>;
   send(agentId: string, text: string): Promise<void>;
+  /** A new run exists (the Supervisor wakes on it). */
+  runStarted?(run: Run): void;
   /** Information for an agent (not a task): Agents Mail when installed, else `send`. */
   report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   agentState(agentId: string): Promise<"running" | "idle" | "gone">;
@@ -167,6 +169,11 @@ export class Engine {
     run.stages[first] = { ...freshStage(), status: "entering" };
     this.store.add(run);
     void this.exclusive(run.id, () => this.enter(run, first)).catch((e) => this.crash(run, e));
+    try {
+      this.ports.runStarted?.(run);
+    } catch (error) {
+      console.error("blueprints: runStarted failed", error);
+    }
     return run;
   }
 

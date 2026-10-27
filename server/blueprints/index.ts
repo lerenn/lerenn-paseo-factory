@@ -119,6 +119,7 @@ export function startBlueprints(host: FactoryHost) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
     },
     report: (agentId, report) => host.report(agentId, report),
+    runStarted: () => host.engines.supervisor?.wake(),
     async agentState(agentId) {
       try {
         const found = await agentRef(agentId).refresh();

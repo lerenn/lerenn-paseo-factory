@@ -5,11 +5,11 @@ import { SUPERVISOR_LABEL, type Supervisor } from "./manager";
 
 const supervisorOnly = { key: SUPERVISOR_LABEL, value: "1" };
 
-export const INSTRUCTIONS = `The Factory Supervisor is the one persistent agent that watches the Factory itself (stuck runs with no PM, spawn failures, leases, extensions, config errors).
+export const INSTRUCTIONS = `The Factory Supervisor is the agent that watches the Factory itself (stuck runs with no PM, spawn failures, leases, extensions, config errors).
 
-Anyone can reach it: supervisor_ask(question) relays your question and returns its answer (or a pending request id to poll with supervisor_ask_status); supervisor_status shows its state and stable agent id, which you can also steer directly with a normal agent message.
+It runs on demand: it is archived when the Factory is idle and created again when something needs it (the first answer then takes longer). Anyone can reach it: supervisor_ask(question) relays your question and returns its answer (or a queued/pending request id to poll with supervisor_ask_status); supervisor_status shows its state and stable agent id, which you can also steer directly with a normal agent message.
 
-If you are the Supervisor: answer requests with supervisor_reply, restart a crashed extension with extension_restart (once per hour per extension; after that ask the user with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on the lab repository for the user to approve.`;
+If you are the Supervisor: answer requests with supervisor_reply, keep what your next session needs with supervisor_note, restart a crashed extension with extension_restart (once per hour per extension; after that ask the user with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on the lab repository for the user to approve.`;
 
 export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">[] {
   return [
@@ -28,8 +28,9 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
       input: z.object({ request: z.string() }),
       run({ request }) {
         const r = supervisor.request(request);
-        if (!r) throw new UsageError(`No request "${request}".`);
-        return { request: r.id, status: r.answer === null ? "pending" : "answered", answer: r.answer };
+        const status = supervisor.requestStatus(request);
+        if (!r || !status) throw new UsageError(`No request "${request}".`);
+        return { request: r.id, status, answer: r.answer };
       },
     },
     {
@@ -38,7 +39,7 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
       input: z.object({}),
       async run() {
         const s = await supervisor.status();
-        return { agent_id: s.agentId, state: s.state, error: s.error, started_at: s.startedAt, watching: s.issues.map((i) => i.text), last_digest_at: s.lastDigestAt, extension_restarts: s.restarts };
+        return { agent_id: s.agentId, state: s.state, error: s.error, started_at: s.startedAt, watching: s.issues.map((i) => i.text), last_digest_at: s.lastDigestAt, extension_restarts: s.restarts, flags: s.flags.map((f) => f.text), queued: s.queued, busy: s.busy.reasons };
       },
     },
     {
@@ -49,6 +50,16 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
       run({ request, answer }) {
         const r = supervisor.reply(request, answer);
         return { request: r.id, delivered_to: r.fromName };
+      },
+    },
+    {
+      name: "supervisor_note",
+      description:
+        "Supervisor only: keep a note for your next session. You run on demand and are archived when the Factory is idle; the Factory keeps your notes (8 KB, oldest dropped first) and gives them back in the intro of the next session. Write one before you are archived (the Factory asks) and whenever you promise or wait for something.",
+      input: z.object({ text: z.string().min(1).max(2000) }),
+      requiresLabel: supervisorOnly,
+      run({ text }) {
+        return { saved: true, bytes: Buffer.byteLength(supervisor.note(text)) };
       },
     },
     {
@@ -65,4 +76,4 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
 }
 
 export const TOOL_NAMES_OPEN = ["supervisor_ask", "supervisor_ask_status", "supervisor_status"];
-export const TOOL_NAMES_SUPERVISOR = ["supervisor_reply", "extension_restart"];
+export const TOOL_NAMES_SUPERVISOR = ["supervisor_reply", "supervisor_note", "extension_restart"];
