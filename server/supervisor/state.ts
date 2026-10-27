@@ -20,8 +20,8 @@ interface State {
   incarnations: Incarnation[];
   /** When the agent was archived for being idle (null while one runs). */
   archivedAt: number | null;
-  /** Digest text waiting for the agent to wake. */
-  pendingDigest: string | null;
+  /** Digests waiting for the agent to wake. */
+  pendingDigests: { subject: string; body: string }[];
   /** Messages from the user (Supervisor tab) waiting for the agent to wake. */
   outbox: string[];
   /** Problems seen while the agent was archived that did not wake it. */
@@ -55,7 +55,7 @@ export function appendMemory(memory: string, text: string, at: number): string {
 
 /** The Supervisor's id, requests, extension restarts and what it was already told, kept across restarts. */
 export class SupervisorState {
-  private state: State = { agentId: null, startedAt: null, generation: 0, restarts: [], requests: [], told: {}, workspaceId: null, memory: "", lastIncarnation: 0, incarnations: [], archivedAt: null, pendingDigest: null, outbox: [], flags: [] };
+  private state: State = { agentId: null, startedAt: null, generation: 0, restarts: [], requests: [], told: {}, workspaceId: null, memory: "", lastIncarnation: 0, incarnations: [], archivedAt: null, pendingDigests: [], outbox: [], flags: [] };
 
   constructor(private readonly file: string | null) {
     if (file) {
