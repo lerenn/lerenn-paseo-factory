@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { buildGraph, type GraphEdge, type GraphNode, type NodeState } from "../../shared/blueprints/graph";
+import { buildGraph, STATE_LINE_H, SUB_LINE_H, TEXT_PAD, TITLE_LINE_H, type GraphEdge, type GraphNode, type NodeState } from "../../shared/blueprints/graph";
 import type { BlueprintInfo } from "../../shared/blueprints/rpc";
 import type { RunView } from "../../shared/blueprints/run";
 
@@ -64,6 +64,9 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
   const c = theme.colors;
   const graph = useMemo(() => buildGraph(blueprint.details, run), [blueprint, run]);
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [fit, setFit] = useState(false);
+  const [avail, setAvail] = useState(0);
+  const scale = fit && avail > 0 ? Math.min(1, avail / graph.width) : 1;
 
   const foreground = c.foreground;
   const edgeLayer = graph.edges.map((e, i) => {
@@ -76,7 +79,7 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
         {e.points.slice(1).map((p, j) => (
           <Segment key={j} a={e.points[j]} b={p} color={color} opacity={opacity} width={width} />
         ))}
-        <Arrow edge={e} color={color} opacity={opacity} />
+        {e.stub ? null : <Arrow edge={e} color={color} opacity={opacity} />}
         <View
           pointerEvents="none"
           style={{
@@ -95,7 +98,7 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
           }}
         >
           <Text numberOfLines={1} style={{ color: e.taken ? foreground : c.foregroundMuted, fontSize: 10, lineHeight: 12 }}>
-            {e.verdict}
+            {e.labelText}
           </Text>
         </View>
       </View>
@@ -125,22 +128,22 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
           borderStyle: n.kind === "gate" || n.kind === "pm" ? "dashed" : "solid",
           backgroundColor: c.surface1,
           opacity: dim ? 0.45 : 1,
-          paddingHorizontal: 8,
-          paddingVertical: 4,
+          paddingHorizontal: TEXT_PAD,
+          paddingVertical: 6,
+          overflow: "hidden",
           justifyContent: "center",
         }}
       >
-        <Text numberOfLines={1} style={{ color: foreground, fontSize: 12, fontWeight: "700", textAlign: n.kind === "terminal" ? "center" : "left" }}>
-          {n.kind === "gate" ? "? " : ""}
-          {n.label}
+        <Text numberOfLines={n.titleLines} style={{ color: foreground, fontSize: 12, lineHeight: TITLE_LINE_H, fontWeight: "700", textAlign: n.kind === "terminal" ? "center" : "left", paddingRight: n.kind === "blueprint" ? 14 : 0 }}>
+          {n.title}
         </Text>
-        {n.kind !== "terminal" ? (
-          <Text numberOfLines={1} style={{ color: c.foregroundMuted, fontSize: 10 }}>
-            {n.kind === "gate" ? "Inbox question" : n.kind === "pm" ? "PM judgement" : n.kind === "blueprint" ? `run ${n.childBlueprint ?? "blueprint"}` : n.kind === "call" ? "tool call" : (n.role ?? "")}
+        {n.subtitle ? (
+          <Text numberOfLines={1} style={{ color: c.foregroundMuted, fontSize: 10, lineHeight: SUB_LINE_H }}>
+            {n.subtitle}
           </Text>
         ) : null}
         {n.state !== "static" && n.kind !== "terminal" ? (
-          <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+          <View style={{ flexDirection: "row", gap: 6, alignItems: "center", height: STATE_LINE_H }}>
             <Text style={{ color, fontSize: 10, fontWeight: "700" }}>{STATE_LABEL[n.state]}</Text>
             {n.retries > 0 ? <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>↻ {n.retries}</Text> : null}
             {clickable ? <Text style={{ color: c.accent, fontSize: 10 }}>open ↗</Text> : null}
@@ -158,12 +161,19 @@ function Canvas({ blueprint, run, runs, blueprints, theme, navigation, depth }: 
   const nested = graph.nodes.filter((n) => n.kind === "blueprint" && open[n.id]);
   return (
     <View style={{ gap: 8 }}>
-      <ScrollView horizontal showsHorizontalScrollIndicator>
-        <View style={{ width: graph.width, height: graph.height }}>
-          {edgeLayer}
-          {graph.nodes.map(node)}
-        </View>
-      </ScrollView>
+      <Pressable onPress={() => setFit((f) => !f)} style={{ alignSelf: "flex-start" }}>
+        <Text style={{ color: c.accent, fontSize: 11 }}>{fit ? "Actual size" : "Fit to width"}</Text>
+      </Pressable>
+      <View style={{ alignSelf: "stretch" }} onLayout={(ev) => setAvail(ev.nativeEvent.layout.width)}>
+        <ScrollView horizontal showsHorizontalScrollIndicator persistentScrollbar nestedScrollEnabled style={{ width: "100%", flexGrow: 0 }} contentContainerStyle={{ paddingBottom: 12 }}>
+          <View style={{ width: graph.width * scale, height: graph.height * scale }}>
+            <View style={{ width: graph.width, height: graph.height, transform: [{ scale }], transformOrigin: "top left" } as object}>
+              {edgeLayer}
+              {graph.nodes.map(node)}
+            </View>
+          </View>
+        </ScrollView>
+      </View>
       {nested.map((n) => {
         const childRun = run ? [...runs].filter((r) => r.parent?.runId === run.id && r.parent.stageId === n.id).sort((a, b) => b.createdAt - a.createdAt)[0] : undefined;
         const child = blueprints.find((b) => b.name === (childRun?.blueprint ?? n.childBlueprint));
