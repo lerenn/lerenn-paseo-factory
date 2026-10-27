@@ -11,13 +11,51 @@ interface State {
   requests: SupervisorRequest[];
   /** issue key -> last time it was told to the Supervisor */
   told: Record<string, number>;
+  /** The workspace (pod) of the current agent, archived with it. */
+  workspaceId: string | null;
+  /** Notes kept by the Supervisor (supervisor_note) across sessions, capped at MAX_MEMORY bytes. */
+  memory: string;
+  /** Number of the current or last session. */
+  lastIncarnation: number;
+  incarnations: Incarnation[];
+  /** When the agent was archived for being idle (null while one runs). */
+  archivedAt: number | null;
+  /** Digests waiting for the agent to wake. */
+  pendingDigests: { subject: string; body: string }[];
+  /** Messages from the user (Supervisor tab) waiting for the agent to wake. */
+  outbox: string[];
+  /** Problems seen while the agent was archived that did not wake it. */
+  flags: { key: string; text: string; at: number }[];
+}
+
+export interface Incarnation {
+  n: number;
+  agentId: string;
+  workspaceId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  reason: string | null;
 }
 
 const MAX_REQUESTS = 200;
+export const MAX_INCARNATIONS = 20;
+export const MAX_MEMORY = 8 * 1024;
+
+/** Append a note and keep the newest MAX_MEMORY bytes, cutting at a note start. */
+export function appendMemory(memory: string, text: string, at: number): string {
+  const next = `${memory}${memory && !memory.endsWith("\n") ? "\n" : ""}- ${new Date(at).toISOString().slice(0, 16)}Z ${text.trim().replace(/\n+/g, "\n  ")}\n`;
+  let cut = next;
+  while (Buffer.byteLength(cut) > MAX_MEMORY) {
+    const nl = cut.indexOf("\n- ", 1);
+    if (nl === -1) return cut.slice(-MAX_MEMORY);
+    cut = cut.slice(nl + 1);
+  }
+  return cut;
+}
 
 /** The Supervisor's id, requests, extension restarts and what it was already told, kept across restarts. */
 export class SupervisorState {
-  private state: State = { agentId: null, startedAt: null, generation: 0, restarts: [], requests: [], told: {} };
+  private state: State = { agentId: null, startedAt: null, generation: 0, restarts: [], requests: [], told: {}, workspaceId: null, memory: "", lastIncarnation: 0, incarnations: [], archivedAt: null, pendingDigests: [], outbox: [], flags: [] };
 
   constructor(private readonly file: string | null) {
     if (file) {
@@ -35,6 +73,7 @@ export class SupervisorState {
 
   save(): void {
     if (!this.file) return;
+    if (this.state.incarnations.length > MAX_INCARNATIONS) this.state.incarnations.splice(0, this.state.incarnations.length - MAX_INCARNATIONS);
     if (this.state.requests.length > MAX_REQUESTS) this.state.requests.splice(0, this.state.requests.length - MAX_REQUESTS);
     mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${process.pid}.tmp`;

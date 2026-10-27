@@ -82,6 +82,8 @@ export class FactoryHost {
   readonly issueSources: (() => Issue[] | Promise<Issue[]>)[] = [];
   /** Extensions dropped for being unreachable, with when (cleared when they register again). */
   readonly droppedExtensions = new Map<string, number>();
+  /** Called with the id of an extension that was just dropped (the Supervisor wakes on it). */
+  readonly extensionDropped: ((id: string) => void)[] = [];
   private http: Server | null = null;
   private current: FactorySettings | null = null;
   private paseoRef: Paseo | null = null;
@@ -388,6 +390,7 @@ export class FactoryHost {
         dropped.push(id);
         this.droppedExtensions.set(id, Date.now());
         console.error(`factory: extension "${id}" dropped, its callback is unreachable`);
+        for (const listener of this.extensionDropped) listener(id);
       }
     }
     return dropped;
