@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { agentChatComponent } from "./agent-chat";
+import { supervisorStateLabel } from "./state-label";
 import { supervisorSendRpc, supervisorStartRpc, supervisorStatusRpc } from "../../shared/supervisor/rpc";
 
 const ago = (now: number, at: number) => {
@@ -18,6 +19,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
   const callSend = useRpc(supervisorSendRpc);
   const [message, setMessage] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [showPrevious, setShowPrevious] = useState(false);
 
   const status = useQuery({ queryKey: ["supervisor", "status"], queryFn: () => callStatus({}), refetchInterval: 5_000 });
@@ -40,7 +42,6 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
     },
   });
 
-  const card = { padding: 12, gap: 4, borderRadius: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1 } as const;
   const muted = { color: c.foregroundMuted, fontSize: 12 } as const;
   const body = { color: c.foreground, fontSize: 13 } as const;
   const button = { paddingVertical: 6, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface2 } as const;
@@ -51,11 +52,46 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
   const previous = (s?.incarnations ?? []).filter((i) => i.agentId !== s?.agentId).reverse();
   const AgentChat = agentChatComponent();
 
+  const dot = waking ? c.statusWarning : running ? c.statusSuccess : c.foregroundMuted;
+
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: layout.compact ? 10 : 16, gap: 10 }}>
-      <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>Supervisor</Text>
+    <View style={{ flex: 1, backgroundColor: c.surface0, padding: layout.compact ? 8 : 12, gap: 8 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: dot }} />
+        <Text style={[body, { flex: 1 }]}>{supervisorStateLabel(s?.state, !!s?.incarnations.length)}</Text>
+        <Pressable style={button} onPress={() => setMenuOpen(!menuOpen)} accessibilityLabel="Details">
+          <Text style={body}>…</Text>
+        </Pressable>
+      </View>
       {message ? <Text style={{ color: c.statusDanger }}>{message}</Text> : null}
-      <View style={card}>
+      <View style={{ flex: 1, gap: 8 }}>
+        {!s?.agentId && waking ? <Text style={muted}>Waking up… your message is delivered once it is up.</Text> : null}
+        {!s?.agentId ? (
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TextInput
+              value={draft}
+              onChangeText={setDraft}
+              placeholder="Message to the Supervisor"
+              placeholderTextColor={c.foregroundMuted}
+              style={{ flex: 1, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
+            />
+            <Pressable style={button} onPress={() => draft.trim() && send.mutate(draft.trim())}>
+              <Text style={body}>Send</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {s?.agentId && !AgentChat ? <Text style={muted}>This app cannot embed the conversation; use Open agent.</Text> : null}
+        {s?.agentId && AgentChat ? (
+          <View style={{ flex: 1 }}>
+            <AgentChat key={s.agentId} agentId={s.agentId} />
+          </View>
+        ) : null}
+      </View>
+
+
+      {menuOpen ? (
+        <ScrollView style={{ position: "absolute", top: layout.compact ? 44 : 52, right: layout.compact ? 8 : 12, width: 360, maxWidth: "95%", maxHeight: "80%", borderRadius: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1 }} contentContainerStyle={{ padding: 12, gap: 14 }}>
+      <View style={{ gap: 4 }}>
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <Text style={[body, { fontWeight: "700" }]}>{!s ? "…" : waking ? "waking up…" : archived ? "Archived (idle)" : s.state}</Text>
           {s?.agentId ? <Text style={muted} selectable>agent {s.agentId}</Text> : null}
@@ -75,7 +111,6 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
             {s.busy.busy ? `Busy: ${s.busy.reasons.slice(0, 3).join(", ")}` : s.idleArchiveAt ? `Idle: archived ${ago(s.idleArchiveAt, now) === "just now" ? "any moment" : `in ${Math.max(1, Math.round((s.idleArchiveAt - now) / 60_000))}m`}` : "Idle"}
           </Text>
         ) : null}
-        {archived && s?.archivedAt ? <Text style={muted}>Archived {ago(now, s.archivedAt)}. It wakes by itself for a run, a new problem, a request or your message.</Text> : null}
         {s && s.queued > 0 ? <Text style={muted}>{s.queued} item{s.queued === 1 ? "" : "s"} waiting for the Supervisor to wake up…</Text> : null}
         {(s?.flags ?? []).slice(-5).map((f) => (
           <Text key={f.key} style={{ color: c.statusWarning, fontSize: 12 }} numberOfLines={2}>
@@ -95,31 +130,8 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
         ))}
       </View>
 
-      <View style={{ gap: 8 }}>
-        {!s?.agentId ? <Text style={muted}>{waking ? "The Supervisor is waking up…" : archived ? "The Supervisor is archived while the Factory is idle. Write below to wake it; the message is delivered once it is up." : "The Supervisor is not running."}</Text> : null}
-        {!s?.agentId ? (
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <TextInput
-              value={draft}
-              onChangeText={setDraft}
-              placeholder="Message to the Supervisor"
-              placeholderTextColor={c.foregroundMuted}
-              style={{ flex: 1, color: c.foreground, borderWidth: 1, borderColor: c.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 }}
-            />
-            <Pressable style={button} onPress={() => draft.trim() && send.mutate(draft.trim())}>
-              <Text style={body}>Send</Text>
-            </Pressable>
-          </View>
-        ) : null}
-        {s?.agentId && !AgentChat ? <Text style={muted}>This app cannot embed the conversation; use Open agent.</Text> : null}
-        {s?.agentId && AgentChat ? (
-          <View style={{ height: layout.compact ? 520 : 680 }}>
-            <AgentChat key={s.agentId} agentId={s.agentId} />
-          </View>
-        ) : null}
-      </View>
 
-      <View style={card}>
+      <View style={{ gap: 4 }}>
         <Pressable onPress={() => setShowPrevious(!showPrevious)}>
           <Text style={[body, { fontWeight: "700" }]}>Previous sessions ({previous.length}) {showPrevious ? "▾" : "▸"}</Text>
         </Pressable>
@@ -140,7 +152,8 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
           : null}
       </View>
 
-      <View style={card}>
+
+      <View style={{ gap: 4 }}>
         <Text style={[body, { fontWeight: "700" }]}>Requests</Text>
         {(s?.requests ?? []).length === 0 ? <Text style={muted}>No request from other agents yet.</Text> : null}
         {(s?.requests ?? [])
@@ -157,6 +170,8 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
             </View>
           ))}
       </View>
-    </ScrollView>
+        </ScrollView>
+      ) : null}
+    </View>
   );
 }
