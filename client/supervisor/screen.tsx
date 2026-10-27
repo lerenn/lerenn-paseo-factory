@@ -95,8 +95,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
         ))}
       </View>
 
-      <View style={card}>
-        <Text style={[body, { fontWeight: "700" }]}>Chat</Text>
+      <View style={{ gap: 8 }}>
         {!s?.agentId ? <Text style={muted}>{waking ? "The Supervisor is waking up…" : archived ? "The Supervisor is archived while the Factory is idle. Write below to wake it; the message is delivered once it is up." : "The Supervisor is not running."}</Text> : null}
         {!s?.agentId ? (
           <View style={{ flexDirection: "row", gap: 8 }}>
@@ -114,7 +113,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
         ) : null}
         {s?.agentId && !AgentChat ? <Text style={muted}>This app cannot embed the conversation; use Open agent.</Text> : null}
         {s?.agentId && AgentChat ? (
-          <View style={{ height: layout.compact ? 520 : 680, borderRadius: 8, overflow: "hidden" }}>
+          <View style={{ height: layout.compact ? 520 : 680 }}>
             <AgentChat key={s.agentId} agentId={s.agentId} />
           </View>
         ) : null}
