@@ -105,7 +105,8 @@ done = ["exists", "open"]
 [[stage]]
 id = "ask-blocked"
 kind = "gate"
-question = "{{ticket}} is blocked: {{stage.implement.summary}}"
+# {{from.*}} is the stage that sent the run here (implement, qa or babysit), not always implement.
+question = "{{ticket}} is blocked at {{from.stage}} ({{from.verdict}}): {{from.summary}}"
 free_text = true
 note_to = "implement"
 [stage.on]

@@ -14,6 +14,30 @@ export const settingsSchema = z.object({
   idleGraceSeconds: z.number().int().min(10).default(90),
   /** Archive the workers of a finished run. */
   archiveOnFinish: z.boolean().default(false),
+  /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. */
+  events: z.object({ mailTo: z.string().default("@assistant") }).default({ mailTo: "@assistant" }),
+  /** After a run ends (done, failed or aborted), a small separate agent mails one short retrospective. */
+  retro: z
+    .object({
+      enabled: z.boolean().default(true),
+      mailTo: z.string().default("@user"),
+      role: z.string().default("retro"),
+      /** Spend above this is flagged in the run history (a turn cannot be cut short). */
+      maxUsd: z.number().min(0).default(0.3),
+      /** The retro agent is given up on (and archived) after this long. */
+      timeoutMinutes: z.number().min(1).default(10),
+      /** A run that went through without a retry gets a three-line mail instead of an agent. */
+      skipTrivial: z.boolean().default(true),
+    })
+    .default({ enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }),
+  /** After the retro, archive the run's workers and their workspaces, except worktrees with uncommitted or unpushed work. */
+  janitor: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Plan and report what would be archived, archive nothing. */
+      dryRun: z.boolean().default(true),
+    })
+    .default({ enabled: false, dryRun: true }),
 });
 export type BlueprintsSettings = z.output<typeof settingsSchema>;
 

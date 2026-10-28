@@ -139,3 +139,12 @@ On hosts with `client.addAgentBadge`, agents with the `paseo.factory` label show
 ## Environment
 
 `FACTORY_PORT` (default 47820), `FACTORY_DATA`, `FACTORY_ENDPOINT`, `FACTORY_BLUEPRINTS_DIR` (extra blueprint folder, first in precedence). Per-module scope variables are unchanged: `PASEO_WARDEN`, `PASEO_INBOX`, `PASEO_LEASES` = `off` to skip a module for an agent (`on` with the `opt-in` scope). `PASEO_WARDEN_INTERVAL` sets an agent's default check interval.
+
+## Around a run: event mails, retro, janitor
+
+Settings of the Blueprints module (`events`, `retro`, `janitor`):
+
+- **Event mails** (`events.mailTo`, default `@assistant`, empty = off): one short mail (run id, stage, reason) when a run starts waiting on a gate or paused for a person, when a stage exhausts its attempts (this also covers the wait for the PM), and when a run fails or is aborted. A mail is sent once per event (keys are stored on the run). No mail for a run that goes well, nor for a failed child run (its parent reports).
+- **Retro** (`retro.*`): when any run ends (done, failed or aborted) the Factory computes a digest of its history (timeline, attempts and retries, gate waits, human versus agent time, review rounds, flakes such as exit 137 or pod start timeouts, spend) and starts a small separate agent (role `retro`, default Haiku, runs on the daemon, no repository) that mails `retro.mailTo` (default `@user`) one short retrospective. A run that went straight through (nothing retried, nobody judged, under 15 minutes or a dependency bump) gets a three-line mail built without an agent (`retro.skipTrivial`). If the agent cannot start, the digest itself is mailed. `retro.maxUsd` flags a retro that cost more (it cannot cut a turn short); `retro.timeoutMinutes` gives up on a retro that never ends.
+- **Janitor** (`janitor.enabled`, `janitor.dryRun`): after the retro, archive the run's workers (every agent the Factory spawned for it) and their workspaces (pods). Each workspace is first inspected with a short terminal running `git status --porcelain` and `git log HEAD --branches --not --remotes`; a workspace with uncommitted files, unpushed commits, or whose check did not answer is KEPT and reported in the retro. With `dryRun` (the default) nothing is archived and the retro says what would be. Replaces `archiveOnFinish` when enabled.
+- `{{from.stage}}`, `{{from.verdict}}`, `{{from.summary}}` in blueprint templates are the stage whose edge led to the current one (the `ask-blocked` gate uses them).

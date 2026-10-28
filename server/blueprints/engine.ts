@@ -5,6 +5,7 @@ import type { RunView, StageView } from "../../shared/blueprints/run";
 import type { Run, RunStore, StageState } from "./store";
 import { condition, render } from "./template";
 import { workspaceTitle } from "../workspace-title";
+import { PostRun } from "./post";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
@@ -29,12 +30,21 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string> }): Promise<{ agentId: string }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; local?: boolean }): Promise<{ agentId: string; workspaceId?: string | null }>;
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
   /** Information for an agent (not a task): Agents Mail when installed, else `send`. */
   report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
+  /** Settings of the event mails, the retro and the janitor. */
+  post?(): PostSettings;
+  /** Archive a workspace (the pod of a Kubernetes agent). */
+  archiveWorkspace?(workspaceId: string): Promise<void>;
+  /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
+  worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
+  /** Usage recorded for a run / an agent. */
+  spend?(runId: string): { costUsd: number; turns: number } | null;
+  spendOfAgent?(agentId: string): number;
   agentState(agentId: string): Promise<"running" | "idle" | "gone">;
   archive(agentId: string): Promise<void>;
   ask(o: {
@@ -61,6 +71,30 @@ export interface Ports {
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
   settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean };
+}
+
+export interface PostSettings {
+  /** Who gets the event mails ("" = nobody). */
+  eventsMailTo: string;
+  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean };
+  janitor: { enabled: boolean; dryRun: boolean };
+}
+
+/** Something a person or the PM should hear about while a run goes on. */
+export interface RunEvent {
+  kind: "waiting" | "exhausted" | "failed" | "aborted";
+  stage: string | null;
+  reason: string;
+  /** Same key, same event: sent once. */
+  key: string;
+}
+
+/** What watches runs from outside: event mails, the retro and the janitor (see post.ts). */
+export interface Observer {
+  event(run: Run, e: RunEvent): void;
+  finished(run: Run): void;
+  retroEnded?(agentId: string): void;
+  tick?(): void;
 }
 
 const APPROVAL = [
@@ -108,10 +142,26 @@ export class Engine {
   private readonly chains = new Map<string, Promise<unknown>>();
   private readonly aborts = new Map<string, AbortController>();
 
+  readonly observer: Observer;
+
   constructor(
     readonly store: RunStore,
     private readonly ports: Ports,
-  ) {}
+  ) {
+    this.observer = new PostRun(store, ports);
+  }
+
+  private notify(run: Run, e: RunEvent): void {
+    try {
+      this.observer.event(run, e);
+    } catch (error) {
+      console.error("blueprints: event failed", error);
+    }
+  }
+
+  private registerAgent(run: Run, agentId: string, role: string, stage: string, workspaceId: string | null | undefined): void {
+    (run.agents ??= {})[agentId] = { role, stage, workspaceId: workspaceId ?? null };
+  }
 
   // ---- serialisation: one operation at a time per run ----
 
@@ -205,6 +255,11 @@ export class Engine {
     return (name: string): string | undefined => {
       if (name === "run.id") return run.id;
       if (name === "blueprint") return run.blueprint;
+      const from = /^from\.(stage|verdict|summary)$/.exec(name);
+      if (from) {
+        const st = run.prev ? run.stages[run.prev] : undefined;
+        return from[1] === "stage" ? (run.prev ?? "") : from[1] === "verdict" ? (st?.verdict ?? "") : (st?.summary ?? "");
+      }
       const stage = /^stage\.([a-z][a-z0-9_-]*)\.(verdict|summary|data\.(.+))$/.exec(name);
       if (stage) {
         const st = run.stages[stage[1]];
@@ -248,6 +303,7 @@ export class Engine {
     this.log(run, "transition", from, `${why} -> ${target}`);
     if (target === "done") return this.finish(run, "done", null);
     if (target === "failed") return this.finish(run, "failed", `stage ${from}: ${why}`);
+    run.prev = from;
     run.stage = target;
     run.stages[target] ??= freshStage();
     run.stages[target].status = "entering";
@@ -257,7 +313,7 @@ export class Engine {
     await this.enter(run, target);
   }
 
-  private finish(run: Run, status: "done" | "failed" | "aborted", error: string | null): void {
+  private finish(run: Run, status: "done" | "failed" | "aborted", error: string | null, opts: { quiet?: boolean } = {}): void {
     const now = this.ports.now();
     run.status = status;
     run.error = error;
@@ -285,7 +341,14 @@ export class Engine {
     }
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
     for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
-    if (this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
+    if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
+    // The janitor (after the retro) replaces the blunt archive-everything switch.
+    if (!this.ports.post?.().janitor.enabled && this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
+    try {
+      this.observer.finished(run);
+    } catch (error) {
+      console.error("blueprints: post-run failed", error);
+    }
   }
 
   private async childFinished(parent: Run, child: Run): Promise<void> {
@@ -346,10 +409,12 @@ export class Engine {
     const def = this.stageDef(run, id);
     const target = def.on.exhausted ?? "failed";
     this.log(run, "exhausted", id, reason);
+    const judged = !!run.pm.judged[id];
+    this.notify(run, { kind: "exhausted", stage: id, reason: `${reason}${target === "pm" && !judged ? "; waiting for the PM's judgement" : ""}`, key: `${run.id}:exhausted:${id}:${run.history.length}` });
     if (target !== "pm") return this.go(run, id, target, `exhausted: ${reason}`);
-    if (run.pm.judged[id]) {
+    if (judged) {
       this.escalate(run, id, `${reason}; the PM already judged this stage once`);
-      return this.finish(run, "failed", `stage ${id} exhausted after the PM's judgement: ${reason}`);
+      return this.finish(run, "failed", `stage ${id} exhausted after the PM's judgement: ${reason}`, { quiet: true });
     }
     run.status = "waiting";
     run.waitingFor = `PM judgement on stage ${id}`;
@@ -384,6 +449,7 @@ export class Engine {
     run.waitingFor = `a person: ${reason}`;
     this.log(run, "paused", id, reason);
     this.store.save();
+    this.notify(run, { kind: "waiting", stage: id, reason: `paused for a person: ${reason}`, key: `${run.id}:paused:${id}:${run.history.length}` });
     this.escalate(run, id, reason, "setup");
   }
 
@@ -425,7 +491,7 @@ export class Engine {
     }
     const role = this.ports.settings().pmRole;
     try {
-      const { agentId } = await this.ports.spawn({
+      const { agentId, workspaceId } = await this.ports.spawn({
         idempotencyKey: `${run.id}:pm:${Object.keys(run.pm.judged).length}`,
         role,
         prompt: text,
@@ -436,6 +502,7 @@ export class Engine {
         env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id },
       });
       run.pmAgentId = agentId;
+      this.registerAgent(run, agentId, role, "pm", workspaceId);
       this.store.save();
     } catch (error) {
       // No PM to ask (no pm role, no working directory...): go straight to the human with the reason.
@@ -606,6 +673,7 @@ export class Engine {
           env: { PASEO_AGENT_ROLE: def.role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: id },
         });
         st.agentId = spawned.agentId;
+        this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
       }
     } catch (error) {
@@ -750,6 +818,7 @@ export class Engine {
     run.waitingFor = `gate ${id} (inbox ${itemId})`;
     this.log(run, "gate_opened", id, itemId);
     this.store.save();
+    this.notify(run, { kind: "waiting", stage: id, reason: `gate: ${clip(this.r(run, def.question), 300)} (inbox ${itemId})`, key: `${run.id}:gate:${itemId}` });
   }
 
   /** The Inbox item of a gate changed state. */
@@ -1030,6 +1099,7 @@ export class Engine {
   /** Poll: PR gates (head moved, merged), idle workers whose turn_ended we missed. */
   async tick(): Promise<void> {
     const now = this.ports.now();
+    this.observer.tick?.();
     for (const run of this.store.active()) {
       const id = run.stage;
       if (!id) continue;
