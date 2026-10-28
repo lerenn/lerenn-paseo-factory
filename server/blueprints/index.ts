@@ -104,7 +104,7 @@ export function startBlueprints(host: FactoryHost) {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
       const role = await host.loadRole(o.role);
-      const { agentId, workspaceId } = await spawnAgent(host.paseo, o.local ? "local" : host.runtime, {
+      const input = {
         idempotencyKey: o.idempotencyKey,
         config: resolveAgentConfig(role, cfg().defaultProvider) as never,
         cwd,
@@ -113,6 +113,13 @@ export function startBlueprints(host: FactoryHost) {
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
+      };
+      const runtime = o.local ? "local" : host.runtime;
+      const { agentId, workspaceId } = await spawnAgent(host.paseo, runtime, { ...input, joinWorkspaceId: o.joinWorkspaceId }).catch((error: Error) => {
+        // The shared pod is gone (archived, evicted): this worker gets a pod of its own and becomes the new shared one.
+        if (!o.joinWorkspaceId) throw error;
+        console.error(`blueprints: joining workspace ${o.joinWorkspaceId} failed (${error.message}); creating a new one`);
+        return spawnAgent(host.paseo, runtime, input);
       });
       return { agentId, workspaceId };
     },
@@ -199,7 +206,7 @@ export function startBlueprints(host: FactoryHost) {
       const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);
       return needsCwd && !cfg().defaultCwd ? "Blueprints setting defaultCwd is not set: workers need a working directory. Set it in Factory > Blueprints > Settings." : null;
     },
-    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish }),
+    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace }),
   };
   const engine = new Engine(store, ports);
   host.engines.blueprints = { engine, store };

@@ -61,6 +61,8 @@ export interface Run {
   escalations?: Record<string, { stage: string; kind: "stuck" | "setup" }>;
   /** The stage whose edge led into the current one (`{{from.*}}` in templates). */
   prev?: string | null;
+  /** The workspace (pod) the stages marked `workspace = "run"` share, once the first of them has created it. */
+  sharedWorkspaceId?: string | null;
   /** Every agent the Factory spawned for this run, with the workspace (pod) it lives in; what the janitor cleans up. */
   agents?: Record<string, SpawnedAgent>;
   /** What happened after the run ended: event mails already sent, the retro, the janitor. */
