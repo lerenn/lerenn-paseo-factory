@@ -59,6 +59,39 @@ export interface Run {
   history: HistoryEvent[];
   /** Inbox items asking a person about a stuck or paused run: item id -> the stage and what was asked. */
   escalations?: Record<string, { stage: string; kind: "stuck" | "setup" }>;
+  /** The stage whose edge led into the current one (`{{from.*}}` in templates). */
+  prev?: string | null;
+  /** Every agent the Factory spawned for this run, with the workspace (pod) it lives in; what the janitor cleans up. */
+  agents?: Record<string, SpawnedAgent>;
+  /** What happened after the run ended: event mails already sent, the retro, the janitor. */
+  post?: PostState;
+}
+
+export interface SpawnedAgent {
+  role: string;
+  stage: string;
+  workspaceId: string | null;
+}
+
+export interface PostState {
+  /** Dedupe keys of the event mails sent. */
+  mailed: string[];
+  phase: "new" | "retro" | "archive" | "done";
+  retro?: { agentId: string | null; startedAt: number } | null;
+  /** The janitor's plan, made before the retro so the retro can report it. */
+  plan?: JanitorPlan | null;
+  archived?: string[];
+}
+
+export interface JanitorTarget {
+  workspaceId: string | null;
+  agentIds: string[];
+}
+
+export interface JanitorPlan {
+  archive: JanitorTarget[];
+  keep: (JanitorTarget & { why: string })[];
+  dryRun: boolean;
 }
 
 interface State {

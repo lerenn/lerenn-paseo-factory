@@ -11,4 +11,11 @@ describe("example blueprints", async () => {
     const { blueprint } = parseBlueprint(await readFile(path.join(dir, file), "utf8"));
     expect(blueprint.name).toBe(path.basename(file, ".toml"));
   });
+
+  it("the ticket blueprint's ask-blocked gate quotes the stage that sent the run there", async () => {
+    const { blueprint } = parseBlueprint(await readFile(path.join(dir, "ticket.toml"), "utf8"));
+    const gate = blueprint.stage.find((s) => s.id === "ask-blocked") as { question: string };
+    expect(gate.question).toContain("{{from.summary}}");
+    expect(gate.question).not.toContain("stage.implement");
+  });
 });

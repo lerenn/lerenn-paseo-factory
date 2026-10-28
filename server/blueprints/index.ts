@@ -8,6 +8,7 @@ import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
+import { probeWorktree } from "./worktree";
 import { RunStore } from "./store";
 import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
@@ -63,7 +64,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } } as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
@@ -103,7 +104,7 @@ export function startBlueprints(host: FactoryHost) {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
       const role = await host.loadRole(o.role);
-      const { agentId } = await spawnAgent(host.paseo, host.runtime, {
+      const { agentId, workspaceId } = await spawnAgent(host.paseo, o.local ? "local" : host.runtime, {
         idempotencyKey: o.idempotencyKey,
         config: resolveAgentConfig(role, cfg().defaultProvider) as never,
         cwd,
@@ -113,7 +114,7 @@ export function startBlueprints(host: FactoryHost) {
         labels: o.labels,
         env: o.env,
       });
-      return { agentId };
+      return { agentId, workspaceId };
     },
     async send(agentId, text) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
@@ -130,8 +131,21 @@ export function startBlueprints(host: FactoryHost) {
       }
     },
     async archive(agentId) {
-      await agentRef(agentId).archive();
+      await agentRef(agentId).archive().catch((error: Error) => {
+        if (!/archived|not found|unknown/i.test(error.message)) throw error;
+      });
     },
+    async archiveWorkspace(workspaceId) {
+      const result = await host.paseo.workspaces.archive(workspaceId);
+      if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
+    },
+    worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId),
+    spend(runId) {
+      const total = aggregate(spend.all().filter((r) => r.run === runId)).total;
+      return total.turns ? { costUsd: total.costUsd, turns: total.turns } : null;
+    },
+    spendOfAgent: (agentId) => spend.all().filter((r) => r.agentId === agentId).reduce((n, r) => n + r.costUsd, 0),
+    post: () => ({ eventsMailTo: cfg().events.mailTo, retro: cfg().retro, janitor: cfg().janitor }),
     ask(o) {
       const e = inbox();
       e.store.upsertAgent(`blueprint:${o.runId}`, { title: o.title });
@@ -264,7 +278,7 @@ export function startBlueprints(host: FactoryHost) {
   const removers = [
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
-      void recordSpend(agent.id, turnId);
+      void recordSpend(agent.id, turnId).finally(() => engine.observer.retroEnded?.(agent.id));
       void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];
