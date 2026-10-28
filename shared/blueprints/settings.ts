@@ -46,8 +46,10 @@ export const settingsSchema = z.object({
       enabled: z.boolean().default(false),
       /** Plan and report what would be archived, archive nothing. */
       dryRun: z.boolean().default(true),
+      /** Every 10 minutes, archive workers no stage of an active run refers to, and agentless Factory workspaces. Off: the kill switch. */
+      orphanSweep: z.boolean().default(true),
     })
-    .default({ enabled: false, dryRun: true }),
+    .default({ enabled: false, dryRun: true, orphanSweep: true }),
 });
 export type BlueprintsSettings = z.output<typeof settingsSchema>;
 

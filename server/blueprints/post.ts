@@ -169,7 +169,7 @@ export class PostRun implements Observer {
 
   // ---- janitor ----
 
-  /** Inspect only: which workspaces can go, and which hold work that is not saved anywhere. Nothing is archived here. */
+  /** Inspect only: which workspaces go (all of them, dirty or not: human rule 2026-10-28). Nothing is archived here. */
   async plan(run: Run, dryRun: boolean): Promise<JanitorPlan> {
     const byWorkspace = new Map<string | null, string[]>();
     for (const [agentId, a] of Object.entries(run.agents ?? {})) {
@@ -179,13 +179,11 @@ export class PostRun implements Observer {
     const plan: JanitorPlan = { archive: [], keep: [], dryRun };
     for (const [workspaceId, agentIds] of byWorkspace) {
       const target: JanitorTarget = { workspaceId, agentIds };
-      if (workspaceId === null) {
-        plan.archive.push(target); // local runtime: the workspace is the user's checkout, only the agents go
-        continue;
+      if (workspaceId && this.ports.trace) {
+        const trace = await this.ports.trace(workspaceId).catch(() => "no answer");
+        if (trace !== "clean") this.store.log(run, "janitor_trace", null, `${workspaceId}: ${clip(trace, 200)}`, this.ports.now());
       }
-      const probe = this.ports.worktree ? await this.ports.worktree(workspaceId).catch((e: Error) => ({ state: "unknown" as const, detail: e.message })) : { state: "unknown" as const, detail: "no way to inspect the worktree" };
-      if (probe.state === "clean") plan.archive.push(target);
-      else plan.keep.push({ ...target, why: probe.state === "dirty" ? probe.detail : `could not check (${clip(probe.detail, 120)})` });
+      plan.archive.push(target);
     }
     return plan;
   }

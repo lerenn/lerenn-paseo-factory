@@ -45,8 +45,8 @@ export interface Ports {
   suspendWorkspace?(workspaceId: string, force: boolean): Promise<{ ok: boolean; message?: string }>;
   /** Wake a suspended pod ahead of the prompt that would wake it anyway. */
   wakeWorkspace?(workspaceId: string): Promise<void>;
-  /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
-  worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
+  /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
+  trace?(workspaceId: string): Promise<string>;
   /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
   liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
@@ -813,33 +813,43 @@ export class Engine {
 
   /**
    * Archive the workspace (pod, volume, Sandbox object) of a worker that was just archived, or the Kubernetes quota fills up with
-   * suspended pods. Kept when the run's shared workspace is still in use, another live agent is in it, a stage that is still to run
-   * holds one of the agents in it, or its worktree is not sure to be clean.
+   * suspended pods. Dirty or unpushed work does not keep it (human rule 2026-10-28: "force the archive of workspace after the
+   * deletion of the agent, even if there is still code"); the history records `git status --short` when the pod answers in 5 s.
+   * Only a workspace that is still in use is left (the run's shared workspace while the run goes, an agent of a live stage or
+   * another live agent in it): the orphan sweep archives it once it is not.
    */
   private async archiveWorkspaceOf(run: Run, agentId: string): Promise<void> {
     const ws = run.agents?.[agentId]?.workspaceId;
     if (!ws || run.agents?.[agentId]?.workspaceArchived || !this.ports.archiveWorkspace) return;
-    const keep = (why: string) => this.log(run, "workspace_kept", null, `${ws} of ${agentId}: ${why}`);
     try {
-      if (run.sharedWorkspaceId === ws && run.endedAt === null) return keep("shared by the run's later stages");
+      if (run.sharedWorkspaceId === ws && run.endedAt === null) return;
       const inUse = Object.entries(run.agents ?? {}).some(
         ([id, a]) => id !== agentId && a.workspaceId === ws && (run.pmAgentId === id || Object.values(run.stages).some((st) => st.agentId === id && (st.status === "running" || st.status === "entering" || st.status === "waiting"))),
       );
-      if (inUse) return keep("an agent of a live stage is in it");
+      if (inUse) return;
       if (this.ports.liveAgentsIn) {
         const live = (await this.ports.liveAgentsIn(ws))?.filter((id) => id !== agentId);
-        if (!live) return keep("could not list its agents");
-        if (live.length) return keep(`${live.length} live agent(s) remain`);
+        if (!live || live.length) return;
       }
-      if (this.ports.worktree) {
-        const probe = await this.ports.worktree(ws);
-        if (probe.state !== "clean") return keep(probe.detail);
-      }
+      const trace = await this.traceOf(ws);
       await this.ports.archiveWorkspace(ws);
       for (const a of Object.values(run.agents ?? {})) if (a.workspaceId === ws) a.workspaceArchived = true;
-      this.log(run, "workspace_archived", null, `${ws} of ${agentId}`);
+      this.log(run, "workspace_archived", null, `${ws} of ${agentId} (worktree: ${trace})`);
     } catch (error) {
-      keep(`archive failed: ${(error as Error).message}`);
+      console.error(`blueprints: archiving workspace ${ws} of ${agentId} failed (the orphan sweep retries)`, error);
+    }
+  }
+
+  /** `git status --short` for the history: 5 s at most, whatever the port does. */
+  private async traceOf(ws: string): Promise<string> {
+    if (!this.ports.trace) return "not traced";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([this.ports.trace(ws), new Promise<string>((resolve) => (timer = setTimeout(() => resolve("no answer (5 s)"), 5_000)))]);
+    } catch {
+      return "no answer";
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -858,6 +868,42 @@ export class Engine {
       if (state !== "gone") await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
       await this.archiveWorkspaceOf(run, id);
     }
+  }
+
+  /**
+   * The orphan sweep (every 5 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
+   * run refers to any more (replaced, superseded, or of a run that ended), and their workspaces, dirty or not. The PM, every
+   * active stage's current agent (a later stage may reuse it), a mid-turn worker and a retro still writing are left alone.
+   * Each archive is logged in the run's history. Returns what it archived.
+   */
+  async sweepOrphans(): Promise<string[]> {
+    const done: string[] = [];
+    for (const run of this.store.all()) {
+      const current = new Set<string>();
+      if (run.pmAgentId) current.add(run.pmAgentId);
+      if (run.endedAt === null) for (const st of Object.values(run.stages)) if (st.agentId) current.add(st.agentId);
+      if (run.post?.phase === "retro" && run.post.retro?.agentId) current.add(run.post.retro.agentId);
+      for (const [id, a] of Object.entries(run.agents ?? {})) {
+        if (current.has(id) || a.workspaceArchived || run.retiring?.includes(id)) continue;
+        const state = await this.ports.agentState(id).catch(() => "gone" as const);
+        if (state === "running") continue;
+        if (state !== "gone") {
+          try {
+            await this.ports.archive(id);
+          } catch (error) {
+            console.error(`blueprints: orphan sweep could not archive ${id}`, error);
+            continue;
+          }
+          this.log(run, "orphan_archived", a.stage, `${id} (${a.role}): no stage of the run refers to it`);
+          done.push(id);
+        }
+        if (!a.workspaceId) continue;
+        await this.archiveWorkspaceOf(run, id);
+        if (run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
+      }
+      this.store.save();
+    }
+    return done;
   }
 
   /** Archive the retired workers of `agentId`'s run whose turn is over (`agentId` only, or all of them when absent). */
@@ -1624,3 +1670,4 @@ export class Engine {
 }
 
 export { TERMINALS };
+

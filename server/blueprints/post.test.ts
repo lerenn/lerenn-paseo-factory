@@ -3,7 +3,6 @@ import { Engine, type GateState, type Ports, type PostSettings } from "./engine"
 import { RunStore } from "./store";
 import { parseBlueprint } from "./toml";
 import { buildDigest, flakesOf, isTrivial } from "./digest";
-import { parseProbe } from "./worktree";
 import { settingsSchema } from "../../shared/blueprints/settings";
 
 const flow = `
@@ -60,7 +59,7 @@ function setup(post: PostOverrides = {}) {
   const archivedWs: string[] = [];
   const states = new Map<string, "running" | "idle" | "gone">();
   const items = new Map<string, GateState>();
-  const probes = new Map<string, { state: "clean" | "dirty" | "unknown"; detail: string }>();
+  const probes = new Map<string, string>();
   const behaviour = { spawnRetroFails: false, mailFails: false };
   let agents = 0;
   const store = new RunStore(null);
@@ -88,8 +87,8 @@ function setup(post: PostOverrides = {}) {
     async archiveWorkspace(id) {
       archivedWs.push(id);
     },
-    async worktree(id) {
-      return probes.get(id) ?? { state: "clean", detail: "clean" };
+    async trace(id) {
+      return probes.get(id) ?? "clean";
     },
     ask(o) {
       const itemId = `item-${items.size + 1}`;
@@ -367,49 +366,35 @@ describe("janitor", () => {
     const t = setup({ janitor, retro: { enabled: false } });
     const run = await t.start();
     await t.verdict("agent-1", "ok"); // investigator in ws-1, implementer agent-2 in ws-2
-    t.probes.set("ws-2", { state: "dirty", detail: "3 uncommitted file(s), 1 unpushed commit(s)" });
+    t.probes.set("ws-2", "3 entries: M a.ts");
     await t.verdict("agent-2", "done");
     return { t, run };
   }
 
-  it("archives the agents and workspaces whose worktree is clean, keeps and reports the others", async () => {
+  it("archives every agent and workspace, dirty or not, and traces the dirty one in the history", async () => {
     const { t, run } = await twoPods({ enabled: true, dryRun: false });
-    expect(t.archived).toEqual(["agent-1"]);
-    expect(t.archivedWs).toEqual(["ws-1"]);
-    expect(run.post?.plan?.keep).toMatchObject([{ workspaceId: "ws-2", agentIds: ["agent-2"] }]);
-    const m = t.mails.find((x) => x.to === "@user")!;
-    expect(m.body).toContain("KEPT implementer workspace ws-2: 3 uncommitted file(s), 1 unpushed commit(s)");
+    expect(t.archived.sort()).toEqual(["agent-1", "agent-2"]);
+    expect(t.archivedWs.sort()).toEqual(["ws-1", "ws-2"]);
+    expect(run.post?.plan?.keep).toEqual([]);
+    expect(run.history.some((h) => h.event === "janitor_trace" && /ws-2: 3 entries/.test(h.detail ?? ""))).toBe(true);
   });
 
-  it("never archives a worktree it could not check", async () => {
+  it("archives even when the trace fails", async () => {
     const t = setup({ janitor: { enabled: true, dryRun: false }, retro: { enabled: false } });
-    t.probes.set("ws-1", { state: "unknown", detail: "git-status" });
-    t.ports.worktree = async (id) => {
-      if (id === "ws-2") throw new Error("terminal failed");
-      return t.probes.get(id)!;
+    t.ports.trace = async () => {
+      throw new Error("terminal failed");
     };
     await t.start();
     await t.verdict("agent-1", "ok");
     await t.verdict("agent-2", "done");
-    expect(t.archived).toEqual([]);
-    expect(t.archivedWs).toEqual([]);
-    expect(t.mails.find((x) => x.to === "@user")!.body).toMatch(/could not check \(terminal failed\)/);
-  });
-
-  it("without a way to inspect worktrees it keeps everything", async () => {
-    const t = setup({ janitor: { enabled: true, dryRun: false }, retro: { enabled: false } });
-    t.ports.worktree = undefined;
-    await t.start();
-    await t.verdict("agent-1", "ok");
-    await t.verdict("agent-2", "done");
-    expect(t.archived).toEqual([]);
+    expect(t.archived.sort()).toEqual(["agent-1", "agent-2"]);
   });
 
   it("dry run plans and reports, archives nothing", async () => {
     const { t, run } = await twoPods({ enabled: true, dryRun: true });
     expect(t.archived).toEqual([]);
     expect(t.archivedWs).toEqual([]);
-    expect(run.post?.plan?.archive).toHaveLength(1);
+    expect(run.post?.plan?.archive).toHaveLength(2);
     expect(t.mails.find((x) => x.to === "@user")!.body).toContain("dry run, would archive investigator");
   });
 
@@ -423,12 +408,11 @@ describe("janitor", () => {
 
   it("the janitor's plan reaches the retro", async () => {
     const t = setup({ janitor: { enabled: true, dryRun: false }, retro: { skipTrivial: false } });
-    t.probes.set("ws-2", { state: "dirty", detail: "2 uncommitted file(s)" });
     await t.start();
     await t.verdict("agent-1", "ok");
     await t.verdict("agent-2", "done");
     const retro = t.spawned.find((s) => s.role === "retro")!;
-    expect(retro.prompt).toContain("KEPT implementer workspace ws-2: 2 uncommitted file(s)");
+    expect(retro.prompt).toContain("archiving investigator");
     // nothing is archived before the retro has ended
     expect(t.archived).toEqual([]);
   });
@@ -441,7 +425,7 @@ describe("janitor", () => {
     await t.settle();
     expect(run.post!.phase).toBe("done");
     expect(t.archived).toEqual(before);
-    expect(t.archivedWs).toEqual(["ws-1"]);
+    expect(t.archivedWs.sort()).toEqual(["ws-1", "ws-2"]);
   });
 
   it("a failing archive is logged and does not stop the others", async () => {
@@ -459,23 +443,12 @@ describe("janitor", () => {
   });
 });
 
-describe("worktree probe output", () => {
-  it("reads counts and errors, and never mistakes the echoed script or silence for clean", () => {
-    expect(parseProbe(["FACTORY_PROBE OK 0 0"]).state).toBe("clean");
-    expect(parseProbe(["FACTORY_PROBE OK 2 0"])).toEqual({ state: "dirty", detail: "2 uncommitted file(s)" });
-    expect(parseProbe(["FACTORY_PROBE OK 0 3"])).toEqual({ state: "dirty", detail: "3 unpushed commit(s)" });
-    expect(parseProbe(["FACTORY_PROBE ERR not-a-git-worktree"]).state).toBe("unknown");
-    expect(parseProbe(['echo "FACTORY_PROBE OK $(printf %s "$d" | grep -c .) $(printf %s "$u" | grep -c .)"']).state).toBe("unknown");
-    expect(parseProbe([]).state).toBe("unknown");
-  });
-});
-
 describe("settings", () => {
   it("default to events on, retro on, janitor off and in dry run", () => {
     const s = settingsSchema.parse({});
     expect(s.events.mailTo).toBe("@assistant");
     expect(s.retro).toMatchObject({ enabled: true, mailTo: "@user", role: "retro", skipTrivial: true });
-    expect(s.janitor).toEqual({ enabled: false, dryRun: true });
+    expect(s.janitor).toEqual({ enabled: false, dryRun: true, orphanSweep: true });
     expect(settingsSchema.parse({ janitor: { enabled: true } }).janitor.dryRun).toBe(true);
   });
 });

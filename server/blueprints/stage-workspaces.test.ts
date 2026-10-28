@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Engine, type Ports } from "./engine";
 import { isBusyError, isQuotaError, MAX_BUSY_RETRIES, quotaBackoffMs } from "./flake";
 import { RunStore } from "./store";
@@ -31,7 +31,7 @@ done = "check"
 
 const QUOTA = "exceeded quota: agents, requested: count/sandboxes.agents.x-k8s.io=1, used: count/sandboxes.agents.x-k8s.io=24, limited: count/sandboxes.agents.x-k8s.io=24";
 
-function setup(over: { janitor?: boolean; probe?: "clean" | "dirty" } = {}) {
+function setup(over: { janitor?: boolean; trace?: string | "hang" } = {}) {
   let now = 1_000_000;
   let n = 0;
   const spawned: string[] = [];
@@ -61,8 +61,8 @@ function setup(over: { janitor?: boolean; probe?: "clean" | "dirty" } = {}) {
     async archiveWorkspace(id) {
       archivedWs.push(id);
     },
-    async worktree() {
-      return { state: over.probe ?? "clean", detail: "1 uncommitted file(s)" };
+    async trace() {
+      return over.trace === "hang" ? new Promise<string>(() => undefined) : (over.trace ?? "clean");
     },
     ask: (o) => {
       asked.push(o.question);
@@ -123,15 +123,20 @@ describe("workspaces of finished stage workers", () => {
     expect(t.archivedWs).toEqual(["ws-2"]);
   });
 
-  it("keeps the workspace when its worktree is dirty or another live agent is in it", async () => {
-    const dirty = setup({ probe: "dirty" });
-    dirty.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+  it("archives a dirty workspace too, and records what was in it", async () => {
+    const dirty = setup({ trace: "2 entries: M a.ts; ?? b.ts" });
+    const dirtyRun = dirty.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
     await dirty.settle();
     await dirty.verdict("agent-1", "done");
     await dirty.verdict("agent-2", "fail");
     expect(dirty.archived).toEqual(["agent-2"]);
-    expect(dirty.archivedWs).toEqual([]);
+    expect(dirty.archivedWs).toEqual(["ws-2"]);
+    const entry = dirty.engine.require(dirtyRun.id).history.find((h) => h.event === "workspace_archived");
+    expect(entry?.detail).toContain("M a.ts");
+    expect(dirty.engine.require(dirtyRun.id).history.some((h) => h.event === "workspace_kept")).toBe(false);
+  });
 
+  it("leaves a workspace another live agent is in (the sweep takes it later)", async () => {
     const busy = setup();
     busy.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
     await busy.settle();
@@ -215,5 +220,77 @@ describe("quota refusals", () => {
     r = t.engine.require(run.id);
     expect(r.status).toBe("paused");
     expect(r.stages.build.attempts).toBe(0);
+  });
+});
+
+describe("orphan sweep", () => {
+  it("archives a worker no stage refers to, keeps the current one, and leaves a dirty workspace alone for hours", async () => {
+    const t = setup();
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    (live.agents ??= {})["old-1"] = { role: "implementer", stage: "build", workspaceId: "ws-old" };
+    t.states.set("old-1", "idle");
+    expect(await t.engine.sweepOrphans()).toEqual(["old-1", "ws-old"]);
+    expect(t.archived).toEqual(["old-1"]);
+    expect(t.archivedWs).toEqual(["ws-old"]);
+    expect(t.engine.require(run.id).history.some((h) => h.event === "orphan_archived")).toBe(true);
+    expect(await t.engine.sweepOrphans()).toEqual([]); // the current worker (agent-1) stays
+  });
+
+  it("keeps a mid-turn orphan, archives a dirty one at once, and never touches the PM", async () => {
+    const t = setup({ trace: "1 entries: M a.ts" });
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    live.pmAgentId = "pm-1";
+    live.agents!["pm-1"] = { role: "pm", stage: "pm", workspaceId: "ws-pm" };
+    live.agents!["busy"] = { role: "qa", stage: "check", workspaceId: "ws-busy" };
+    live.agents!["dirty"] = { role: "qa", stage: "check", workspaceId: "ws-dirty" };
+    t.states.set("pm-1", "idle");
+    t.states.set("busy", "running");
+    t.states.set("dirty", "idle");
+    await t.engine.sweepOrphans();
+    expect(t.archived).toEqual(["dirty"]);
+    expect(t.archivedWs).toEqual(["ws-dirty"]);
+    expect(t.engine.require(run.id).history.some((h) => h.event === "workspace_kept")).toBe(false);
+  });
+
+  it("archives the workers of an ended run at once, and not a retro that is still writing", async () => {
+    const t = setup();
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    live.agents!["old"] = { role: "qa", stage: "check", workspaceId: "ws-old" };
+    live.agents!["retro-1"] = { role: "retro", stage: "retro", workspaceId: "ws-retro" };
+    live.endedAt = 1_000_000;
+    live.post = { phase: "retro", retro: { agentId: "retro-1", startedAt: 1_000_000 } } as never;
+    t.states.set("old", "idle");
+    t.states.set("retro-1", "idle");
+    await t.engine.sweepOrphans();
+    expect(t.archivedWs).toEqual(["ws-1", "ws-old"]);
+    live.post = { phase: "done" } as never;
+    await t.engine.sweepOrphans();
+    expect(t.archivedWs).toEqual(["ws-1", "ws-old", "ws-retro"]);
+  });
+});
+
+describe("worktree trace of a retired worker", () => {
+  it("never blocks the archive: a pod that does not answer is archived anyway", async () => {
+    const t = setup({ trace: "hang" });
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    t.engine.require(run.id).agents!["old"] = { role: "qa", stage: "check", workspaceId: "ws-old" };
+    t.states.set("old", "idle");
+    vi.useFakeTimers();
+    try {
+      const swept = t.engine.sweepOrphans();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await swept;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(t.archivedWs).toEqual(["ws-old"]);
+    expect(t.engine.require(run.id).history.find((h) => h.event === "workspace_archived")?.detail).toContain("no answer");
   });
 });
