@@ -67,7 +67,7 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
   const allRuns = runs.data?.runs ?? [];
   const active = allRuns.filter((r) => r.endedAt === null);
   // A run suspended with a reason is held on purpose: shown as "suspended", never as a warning (human decision f45ab3ba).
-  const bad = (r: (typeof active)[number]) => r.status !== "suspended" && (r.pmPending !== null || r.status === "paused" || (r.status === "running" && now - r.updatedAt > STALLED_MS));
+  const bad = (r: (typeof active)[number]) => r.status !== "suspended" && (r.pmPending !== null || r.status === "paused" || (r.status === "running" && !r.waitingFor && now - r.updatedAt > STALLED_MS));
   const pending = (inbox.data?.items ?? []).filter((i) => i.status === "pending");
   const held = (leases.data?.leases ?? []).filter((l) => l.holder);
   const queued = (leases.data?.leases ?? []).reduce((n, l) => n + l.queue.length, 0);

@@ -32,6 +32,7 @@ describe("attentionPoints", () => {
           run({ id: "s", status: "suspended", suspended: { reason: "waiting for review", at: now, by: "x", prevStatus: "paused", pods: [] } }),
           run({ id: "f", status: "failed", endedAt: now - 2 * 24 * 3600_000 }),
           run({ id: "p", status: "paused", escalations: { "item-2": { stage: "implement", kind: "setup" } } }),
+          run({ id: "w", updatedAt: now - STALLED_MS - 1, waitingFor: "waiting for sjourdan's review" }),
         ],
         [],
         now,

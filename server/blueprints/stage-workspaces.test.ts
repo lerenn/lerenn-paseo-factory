@@ -296,3 +296,21 @@ describe("worktree trace of a retired worker", () => {
     expect(t.engine.require(run.id).history.find((h) => h.event === "workspace_archived")?.detail).toContain("no answer");
   });
 });
+
+describe("a worker that waits", () => {
+  it("marks the run as waiting until its verdict, and refuses a non-worker", async () => {
+    const t = setup();
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    expect(() => t.engine.workerWaiting("nobody", "waiting for a review")).toThrow(/not the worker/);
+    t.engine.workerWaiting("agent-1", "waiting for sjourdan's review on o/r#1");
+    let r = t.engine.require(run.id);
+    expect(r.waitingFor).toBe("waiting for sjourdan's review on o/r#1");
+    expect(r.history.filter((h) => h.event === "worker_waiting")).toHaveLength(1);
+    t.engine.workerWaiting("agent-1", "waiting for sjourdan's review on o/r#1"); // same reason: logged once
+    expect(t.engine.require(run.id).history.filter((h) => h.event === "worker_waiting")).toHaveLength(1);
+    await t.verdict("agent-1", "done");
+    r = t.engine.require(run.id);
+    expect(r.waitingFor).toBeNull();
+  });
+});

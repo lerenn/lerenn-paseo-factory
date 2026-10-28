@@ -37,7 +37,7 @@ export function attentionPoints(runs: Run[], pending: PendingItem[], now: number
     } else if (run.endedAt !== null) continue;
     else if (run.pm.pending) point("pm", "waits for a PM judgement");
     else if (run.status === "paused" && !escalated) point("paused", "is paused");
-    else if (run.status === "running" && now - run.updatedAt > STALLED_MS) point("stalled", `has not moved for ${Math.round((now - run.updatedAt) / 60_000)} min`);
+    else if (run.status === "running" && !run.waitingFor && now - run.updatedAt > STALLED_MS) point("stalled", `has not moved for ${Math.round((now - run.updatedAt) / 60_000)} min`);
   }
   for (const item of pending) {
     out.push({ key: `inbox:${item.id}`, subject: `Factory: Inbox item ${item.id.slice(0, 8)} waits for an answer`, body: `${item.question}\nAsked by ${item.agentId}. Answer it in the Inbox (inbox_pending / inbox_answer).` });
