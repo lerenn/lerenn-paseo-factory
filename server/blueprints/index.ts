@@ -1,3 +1,4 @@
+import { AttentionNotifier, attentionPoints } from "./attention";
 import path from "node:path";
 import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
@@ -329,12 +330,23 @@ export function startBlueprints(host: FactoryHost) {
   });
   host.whenPaseo(() => void ready.then(() => engine.resumeAll()).catch((e) => console.error("blueprints: resume failed", e)));
 
+  // One mail per new attention point to the events address (human decision f45ab3ba).
+  const attention = new AttentionNotifier((process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "attention.json"), (p) =>
+    host.report(cfg().events.mailTo, { subject: p.subject, body: p.body, kind: "info" }),
+  );
+  const notify = async () => {
+    if (!cfg().events.mailTo?.trim() || store.suspended()) return;
+    const pending = host.enabled("inbox") && host.engines.inbox ? (host.engines.inbox as import("../inbox/engine").Engine).store.pending() : [];
+    await attention.tick(attentionPoints(store.all(), pending, Date.now()));
+  };
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   const loop = async () => {
     try {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
+      if (host.enabled("blueprints") && host.hasPaseo()) await notify();
     } catch (error) {
       console.error("blueprints: tick failed", error);
     }
