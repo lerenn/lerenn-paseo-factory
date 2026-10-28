@@ -1,3 +1,4 @@
+import { buildTimeline } from "../../shared/blueprints/timeline";
 import { flakeReason } from "./flake";
 import type { HistoryEvent, Run } from "./store";
 
@@ -72,11 +73,14 @@ export function buildDigest(run: Run, o: DigestOptions): string {
   const all = spans(run, o.now);
   const kind = (stage: string) => run.def.stage.find((s) => s.id === stage)?.kind ?? "agent";
   const total = (pred: (stage: string) => boolean) => all.filter((s) => pred(s.stage)).reduce((n, s) => n + (s.to - s.from), 0);
-  const human = total((s) => kind(s) === "gate");
+  // Only time a gate actually waited on a person: a gate the Assistant answered within minutes is not (human decision d82771ac).
+  const gateSegs = buildTimeline(run.history, o.now, run.endedAt).filter((g) => kind(g.stage) === "gate");
+  const human = gateSegs.reduce((n, g) => n + g.waitingMs, 0);
+  const quick = gateSegs.reduce((n, g) => n + g.assistantMs, 0);
   const agent = total((s) => kind(s) === "agent");
   const lines: string[] = [];
   lines.push(`Run ${run.id} · blueprint ${run.blueprint} · ${run.vars.ticket || run.vars.incident_id || ""} · ${run.status}${run.error ? ` (${clip(run.error, 200)})` : ""}`);
-  lines.push(`Total ${fmtDuration(end - run.createdAt)}; agent stages ${fmtDuration(agent)}, human gates ${fmtDuration(human)}, other ${fmtDuration(Math.max(0, end - run.createdAt - agent - human))}${o.spend ? `; ${o.spend.turns} turns, $${o.spend.costUsd.toFixed(2)}` : ""}`);
+  lines.push(`Total ${fmtDuration(end - run.createdAt)}; agent stages ${fmtDuration(agent)}, human gates ${fmtDuration(human)}${quick ? `, gates the Assistant answered at once ${fmtDuration(quick)}` : ""}, other ${fmtDuration(Math.max(0, end - run.createdAt - agent - human - quick))}${o.spend ? `; ${o.spend.turns} turns, $${o.spend.costUsd.toFixed(2)}` : ""}`);
 
   lines.push("", "Stages (entries / attempts of the last entry / flakes / verdict / time):");
   for (const [id, st] of Object.entries(run.stages)) {
@@ -84,8 +88,7 @@ export function buildDigest(run: Run, o: DigestOptions): string {
     lines.push(`- ${id} [${kind(id)}] ${st.runs}× / ${st.attempts} / ${st.flakes} / ${st.verdict ?? st.status} / ${fmtDuration(t)}${st.extra ? ` (+${st.extra} granted)` : ""}`);
   }
 
-  const gates = all.filter((s) => kind(s.stage) === "gate");
-  if (gates.length) lines.push("", "Gate waits: " + gates.map((g) => `${g.stage} ${fmtDuration(g.to - g.from)}`).join(", "));
+  if (gateSegs.length) lines.push("", "Gate waits (on a person): " + gateSegs.map((g) => `${g.stage} ${fmtDuration(g.waitingMs)}${g.assistantMs ? ` (+${fmtDuration(g.assistantMs)} answered by the Assistant)` : ""}`).join(", "));
   const pm = Object.entries(run.pm.judged);
   if (pm.length) lines.push(`PM judgements: ${pm.map(([s, j]) => `${s} (${clip(j.decision, 80)})`).join("; ")}`);
 
@@ -121,9 +124,9 @@ export function buildDigest(run: Run, o: DigestOptions): string {
 export function trivialMail(run: Run, o: { now: number; janitor: string[] }): { subject: string; body: string } {
   const label = run.vars.ticket || run.vars.incident_id || run.blueprint;
   const took = fmtDuration((run.endedAt ?? o.now) - run.createdAt);
-  const human = spans(run, o.now)
-    .filter((s) => (run.def.stage.find((d) => d.id === s.stage)?.kind ?? "agent") === "gate")
-    .reduce((n, s) => n + (s.to - s.from), 0);
+  const human = buildTimeline(run.history, o.now, run.endedAt)
+    .filter((g) => (run.def.stage.find((d) => d.id === g.stage)?.kind ?? "agent") === "gate")
+    .reduce((n, g) => n + g.waitingMs, 0);
   return {
     subject: `Factory retro ${run.id} · ${label}: done in ${took}, no retries`,
     body: [`Run ${run.id} (${run.blueprint} ${label}) went straight through in ${took}; ${fmtDuration(human)} of it waiting for people.`, "Nothing retried, nobody judged, no loop: no improvement to suggest.", ...o.janitor.map((l) => `Janitor: ${l}`)].join("\n"),

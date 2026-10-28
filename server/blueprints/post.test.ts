@@ -352,7 +352,7 @@ describe("retro", () => {
     t.advance(30 * 60_000);
     expect(t.questions).toHaveLength(1);
     const digest = buildDigest(t.engine.require(run.id), { now: 1_000_000 + 31 * 60_000, spend: { costUsd: 0.5, turns: 9 }, janitor: [] });
-    expect(digest).toMatch(/Gate waits: ask-blocked 30m/);
+    expect(digest).toMatch(/Gate waits \(on a person\): ask-blocked 30m/);
     expect(digest).toMatch(/human gates 30m/);
     expect(digest).toMatch(/Review\/QA rounds: think blocked ×1/);
     expect(digest).toMatch(/Flakes:.*OOMKilled/);

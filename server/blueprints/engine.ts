@@ -20,6 +20,8 @@ export interface PrFacts {
   mergeable: boolean | null;
   draft: boolean;
   review: string;
+  /** Auto-merge is on: with a merge queue, the PR is queued and merges by itself (absent: unknown). */
+  queued?: boolean;
 }
 
 export type GateState = {
@@ -1013,6 +1015,20 @@ export class Engine {
         return;
       }
       const flake = flakeReason((error as Error).message);
+      // Two pod starts in a row that failed: alert instead of spending more retries (human decision d82771ac).
+      if (flake && POD_START_FLAKES.has(flake)) {
+        st.podStartFailures = (st.podStartFailures ?? 0) + 1;
+        if (st.podStartFailures >= MAX_POD_START_FAILURES) {
+          const message = (error as Error).message;
+          st.attempts = Math.max(0, st.attempts - 1);
+          st.summary = `the worker's pod failed to start ${st.podStartFailures} times in a row (${flake}): ${clip(message, 300)}`;
+          this.log(run, "pod_start_failed", id, st.summary);
+          st.podStartFailures = 0;
+          const mailTo = this.ports.post?.().eventsMailTo?.trim();
+          if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)}: pod start failed twice at ${id}`, body: `${st.summary}\nThe run is paused; resume it once the cluster is healthy.\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
+          return this.pause(run, id, st.summary);
+        }
+      }
       if (flake && this.takeFlake(run, id, flake, (error as Error).message)) {
         // A nudge or wake-up that never reached a worker whose session is gone costs nothing: the fresh worker is the same attempt.
         if (flake === SESSION_GONE && !opts.free && (why === "nudge" || why === "wake")) st.attempts = Math.max(0, st.attempts - 1);
@@ -1028,6 +1044,7 @@ export class Engine {
     }
     st.status = "running";
     st.quotaRetry = null;
+    st.podStartFailures = 0;
     if (st.wardenTask) this.ports.wardenDone(st.wardenTask, "redispatched");
     st.wardenTask = st.agentId ? this.ports.wardenRegister({ agentId: st.agentId, task: `blueprint ${run.blueprint} run ${run.id} stage ${id}: call blueprint_verdict when done` }) : null;
     this.store.save();
@@ -1309,6 +1326,16 @@ export class Engine {
     const heads = st.gate!.heads;
     for (const [url, head] of Object.entries(heads)) {
       const f = await this.ports.prFacts(url);
+      if (answer === "merged" && f.state === "open" && f.queued) {
+        // In the merge queue: wait for the merge on GitHub instead of asking "merged?" again (human decision d82771ac).
+        this.log(run, "merge_queued", id, `${url} is in the merge queue: waiting for the merge, no new question`);
+        st.gate = { ...st.gate!, itemId: "", passive: true, queued: true, openedAt: this.ports.now() };
+        st.status = "waiting";
+        run.status = "waiting";
+        run.waitingFor = `merge queue (${url})`;
+        this.store.save();
+        return "refused";
+      }
       if (answer === "merged" && f.state !== "merged") {
         this.log(run, "merge_not_seen", id, `${url} is ${f.state} on GitHub`);
         st.status = "entering";
@@ -1556,7 +1583,18 @@ export class Engine {
     for (const [url, head] of Object.entries(heads)) {
       const f = await this.ports.prFacts(url);
       if (f.state === "merged") merged += 1;
-      else if (f.state === "open" && f.head !== head) {
+      else if (st.gate?.queued && (f.state !== "open" || f.queued === false)) {
+        // left the merge queue without merging: ask the person again
+        await this.exclusive(run.id, async () => {
+          if (run.stage !== id || st.status !== "waiting" || !st.gate?.queued) return;
+          this.log(run, "merge_not_seen", id, `${url} left the merge queue (${f.state})`);
+          st.gate = null;
+          st.status = "entering";
+          run.status = "running";
+          await this.openGate(run, id, def);
+        });
+        return;
+      } else if (f.state === "open" && f.head !== head) {
         await this.exclusive(run.id, async () => {
           if (run.stage !== id || st.status !== "waiting" || !st.gate) return;
           if (st.gate.itemId) this.ports.withdraw(st.gate.itemId, `head of ${url} moved to ${f.head.slice(0, 12)}`);
@@ -1671,3 +1709,6 @@ export class Engine {
 
 export { TERMINALS };
 
+/** Flake reasons that mean the worker's pod never came up. */
+const POD_START_FLAKES = new Set(["pod did not start", "pod not ready", "bridge.mjs not written", "container not found"]);
+const MAX_POD_START_FAILURES = 2;

@@ -223,7 +223,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
                   {seg.verdict ? ` → ${seg.verdict}` : seg.endedAt === null ? " · running" : ""}
                 </Text>
                 <Text style={s.muted} selectable>
-                  working {formatDuration(seg.workingMs)} · waiting {formatDuration(seg.waitingMs)} · {seg.attempts} dispatch{seg.attempts === 1 ? "" : "es"}
+                  working {formatDuration(seg.workingMs)} · waiting {formatDuration(seg.waitingMs)}{seg.assistantMs ? ` · answered by the Assistant in ${formatDuration(seg.assistantMs)}` : ""} · {seg.attempts} dispatch{seg.attempts === 1 ? "" : "es"}
                   {seg.retries ? ` · ${seg.retries} retr${seg.retries === 1 ? "y" : "ies"}` : ""}
                   {seg.gateOpenedAt !== null ? ` · gate opened ${ago(now, seg.gateOpenedAt)}${seg.gateClosedAt !== null ? `, closed ${ago(now, seg.gateClosedAt)}` : ", still open"}` : ""}
                 </Text>

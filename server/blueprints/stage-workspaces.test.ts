@@ -204,6 +204,8 @@ describe("quota refusals", () => {
   it("a start that timed out on a busy daemon is retried with back-off, then pauses after MAX_BUSY_RETRIES", async () => {
     const BUSY = "Plugin kubernetes-runtime workspace.create.before failed: Plugin RPC timed out: kubernetes-runtime.hook";
     expect(isBusyError(BUSY)).toBe(true);
+    expect(isBusyError("Git command timed out after 90000ms: git rev-parse --show-toplevel")).toBe(true);
+    expect(isBusyError("exceeded quota")).toBe(false);
     const t = setup();
     for (let i = 0; i <= MAX_BUSY_RETRIES; i++) t.failures.push(BUSY);
     const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });

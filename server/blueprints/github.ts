@@ -54,11 +54,11 @@ export async function ghFacts(url: string): Promise<PrFacts> {
   let rolledUp = true;
   try {
     try {
-      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,statusCheckRollup,reviewDecision,isDraft"]);
+      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,statusCheckRollup,reviewDecision,isDraft,autoMergeRequest"]);
     } catch (error) {
       if (!/403|Resource not accessible/i.test((error as Error).message)) throw error;
       rolledUp = false;
-      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,reviewDecision,isDraft"]);
+      out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,reviewDecision,isDraft,autoMergeRequest"]);
     }
   } catch (error) {
     if (/Could not resolve|not found|404/i.test((error as Error).message)) {
@@ -76,6 +76,7 @@ export async function ghFacts(url: string): Promise<PrFacts> {
     mergeable: j.mergeable === "MERGEABLE" ? true : j.mergeable === "CONFLICTING" ? false : null,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
+    queued: j.autoMergeRequest !== null && j.autoMergeRequest !== undefined,
   };
 }
 

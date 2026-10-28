@@ -11,6 +11,8 @@ export interface StageState {
   /** Tries within the current entry. */
   attempts: number;
   /** A start refused for cluster quota, retried by the tick at `at` (1, 2, 4, 8 min back-off), replaying the same dispatch; no attempt is used. */
+  /** Pod starts of this stage that failed in a row (reset by a start that works). */
+  podStartFailures?: number;
   quotaRetry?: { n: number; at: number; why: "start" | "nudge" | "retry" | "wake"; opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } } | null;
   /** Extra attempts and runs granted by the PM. */
   extra: number;
@@ -35,6 +37,8 @@ export interface StageState {
     remindedAt?: number;
     /** A wait for a merge (`wait = "merge"`): no Inbox item, `itemId` is empty. */
     passive?: boolean;
+    /** A "merged" answer found the PR in the merge queue: the gate waits for the merge (passive) instead of asking again. */
+    queued?: boolean;
   } | null;
   childRunId: string | null;
   startedAt: number | null;
