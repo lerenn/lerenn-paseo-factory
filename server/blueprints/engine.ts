@@ -71,7 +71,7 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number };
 }
 
 export interface PostSettings {
@@ -104,6 +104,9 @@ const APPROVAL = [
   { id: "approve", label: "Approve" },
   { id: "deny", label: "Deny" },
 ];
+
+/** An approval gate nobody answers is reminded this many times at most. */
+const MAX_REMINDERS = 3;
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -334,7 +337,7 @@ export class Engine {
         st.wardenTask = null;
       }
       if (st.gate && st.status === "waiting") {
-        this.ports.withdraw(st.gate.itemId, `run ${status}`);
+        if (st.gate.itemId) this.ports.withdraw(st.gate.itemId, `run ${status}`);
         st.status = "failed";
       }
     }
@@ -850,6 +853,7 @@ export class Engine {
         facts += `\n- ${url} @ ${f.head.slice(0, 12)}: ${f.state}, CI ${f.ci}`;
       }
     }
+    if (def.wait === "merge") return this.openMergeWait(run, id, def, heads);
     const options = def.options ?? (def.free_text ? [] : APPROVAL);
     const context = [def.context ? this.r(run, def.context) : "", facts ? `PRs this gate is tied to:${facts}` : "", criteriaSha ? `Criteria sha: ${criteriaSha.slice(0, 12)}` : ""].filter(Boolean).join("\n\n");
     const { itemId } = this.ports.ask({
@@ -863,13 +867,26 @@ export class Engine {
       expiresInMinutes: def.expires_in_minutes,
       kind: !def.free_text && !def.options ? "approval" : "question",
     });
-    st.gate = { itemId, heads, criteriaSha, reused: false };
+    st.gate = { itemId, heads, criteriaSha, reused: false, openedAt: this.ports.now() };
     st.status = "waiting";
     run.status = "waiting";
     run.waitingFor = `gate ${id} (inbox ${itemId})`;
     this.log(run, "gate_opened", id, itemId);
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `gate: ${clip(this.r(run, def.question), 300)} (inbox ${itemId})`, key: `${run.id}:gate:${itemId}` });
+  }
+
+  /** `wait = "merge"`: nothing is asked; `tick` completes the gate when the PRs are merged, or on its timeout. */
+  private openMergeWait(run: Run, id: string, def: GateStage, heads: Record<string, string>): void {
+    const st = run.stages[id];
+    const why = def.context ? this.r(run, def.context) : "";
+    st.gate = { itemId: "", heads, criteriaSha: null, reused: false, openedAt: this.ports.now(), passive: true };
+    st.status = "waiting";
+    run.status = "waiting";
+    run.waitingFor = `merge of ${Object.keys(heads).join(", ")}`;
+    this.log(run, "gate_opened", id, "waiting for the merge");
+    this.store.save();
+    this.notify(run, { kind: "waiting", stage: id, reason: `waiting for the merge of ${Object.keys(heads).join(", ")}${why ? `: ${clip(why, 200)}` : ""}`, key: `${run.id}:merge-wait:${id}:${st.runs}` });
   }
 
   /** The Inbox item of a gate changed state. */
@@ -1167,7 +1184,10 @@ export class Engine {
             run.waitingFor = null;
             await this.openGate(run, id, this.stageDef(run, id) as GateStage);
           });
-        } else if (st.status === "waiting" && st.gate?.itemId && Object.keys(st.gate.heads).length) await this.pollPrGate(run, id);
+        } else if (st.status === "waiting" && st.gate && (st.gate.itemId || st.gate.passive) && Object.keys(st.gate.heads).length) {
+          await this.pollPrGate(run, id);
+          if (st.gate?.passive) await this.expireMergeWait(run, id);
+        } else if (st.status === "waiting" && st.gate?.itemId) this.remindGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
           const grace = this.ports.settings().idleGraceSeconds * 1000;
           if (now - (st.lastNudgeAt ?? st.startedAt ?? now) < grace) continue;
@@ -1199,7 +1219,7 @@ export class Engine {
       else if (f.state === "open" && f.head !== head) {
         await this.exclusive(run.id, async () => {
           if (run.stage !== id || st.status !== "waiting" || !st.gate) return;
-          this.ports.withdraw(st.gate.itemId, `head of ${url} moved to ${f.head.slice(0, 12)}`);
+          if (st.gate.itemId) this.ports.withdraw(st.gate.itemId, `head of ${url} moved to ${f.head.slice(0, 12)}`);
           st.status = "done";
           st.verdict = "head_moved";
           st.gate = null;
@@ -1213,7 +1233,7 @@ export class Engine {
     if (merged === Object.keys(heads).length && def.on.merged) {
       await this.exclusive(run.id, async () => {
         if (run.stage !== id || st.status !== "waiting" || !st.gate) return;
-        this.ports.withdraw(st.gate.itemId, "merged on GitHub");
+        if (st.gate.itemId) this.ports.withdraw(st.gate.itemId, "merged on GitHub");
         st.status = "done";
         st.verdict = "merged";
         st.summary = "merged on GitHub";
@@ -1223,6 +1243,42 @@ export class Engine {
         await this.go(run, id, def.on.merged, "merged on GitHub");
       });
     }
+  }
+
+  /** A wait for a merge that lasted `expires_in_minutes`: follow the `expired` edge. */
+  private async expireMergeWait(run: Run, id: string): Promise<void> {
+    const st = run.stages[id];
+    const def = this.stageDef(run, id) as GateStage;
+    if (!st.gate?.passive || !def.expires_in_minutes || this.ports.now() - (st.gate.openedAt ?? this.ports.now()) < def.expires_in_minutes * 60_000) return;
+    await this.exclusive(run.id, async () => {
+      if (run.stage !== id || st.status !== "waiting" || !st.gate?.passive) return;
+      const why = def.context ? this.r(run, def.context) : "";
+      st.status = "done";
+      st.verdict = "expired";
+      st.summary = `not merged after ${def.expires_in_minutes} min${why ? `. ${why}` : ""}`;
+      st.endedAt = this.ports.now();
+      st.gate = null;
+      run.status = "running";
+      run.waitingFor = null;
+      this.log(run, "gate_answered", id, `expired after ${def.expires_in_minutes} min`);
+      await this.go(run, id, def.on.expired, "merge wait expired");
+    });
+  }
+
+  /** An approval gate (criteria) nobody answered: one more mail through the run's event mails, at most MAX_REMINDERS. */
+  private remindGate(run: Run, id: string): void {
+    const st = run.stages[id];
+    const def = this.stageDef(run, id) as GateStage;
+    const gate = st.gate;
+    const every = (this.ports.settings().criteriaReminderMinutes ?? 0) * 60_000;
+    if (!gate || !def.criteria || !gate.itemId || !gate.openedAt || every <= 0 || (gate.reminders ?? 0) >= MAX_REMINDERS) return;
+    const now = this.ports.now();
+    if (now - (gate.remindedAt ?? gate.openedAt) < every) return;
+    gate.reminders = (gate.reminders ?? 0) + 1;
+    gate.remindedAt = now;
+    this.log(run, "gate_reminder", id, `${gate.reminders}/${MAX_REMINDERS}`);
+    this.store.save();
+    this.notify(run, { kind: "waiting", stage: id, reason: `reminder ${gate.reminders}/${MAX_REMINDERS}: still waiting ${Math.round((now - gate.openedAt) / 60_000)} min for your answer: ${clip(this.r(run, def.question), 200)} (inbox ${gate.itemId})`, key: `${run.id}:gate:${gate.itemId}:reminder:${gate.reminders}` });
   }
 
   // ---- views ----
