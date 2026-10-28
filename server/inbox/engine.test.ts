@@ -215,3 +215,67 @@ describe("counts and restart", () => {
     expect(new Engine(new Store(file), actions, settings).store.events().map((e) => e.type)).toEqual(["asked", "answered", "delivered"]);
   });
 });
+
+describe("new item mail", () => {
+  const settingsOf = (to: string) => settingsSchema.parse({ globalGapSeconds: 0, notifyMailTo: to });
+
+  it("is off by default", () => {
+    expect(settingsSchema.parse({}).notifyMailTo).toBe("");
+  });
+
+  it("is a short mail: id, asker, kind, options with the recommended one, the question clipped, never the context", async () => {
+    const { newItemMail } = await import("./notify");
+    const { engine } = setup();
+    const { item } = engine.ask({ agentId: "a1", question: `Which?\n${"x".repeat(500)}`, options: [{ id: "a", label: "A" }, { id: "b", label: "B", recommended: true }], context: "SECRET CONTEXT" });
+    const m = newItemMail(item, "Worker (a1)");
+    expect(m.subject).toBe(`Inbox ${item.id} new: Which? ${"x".repeat(80 - 8)}…`);
+    expect(m.body.split("\n").length).toBeLessThanOrEqual(5);
+    expect(m.body).toContain("Asked by: Worker (a1)");
+    expect(m.body).toContain("Options: B (recommended), A");
+    expect(m.body).not.toContain("SECRET");
+  });
+
+  it("is sent once per new item, not for a deduped ask, and survives a restart", async () => {
+    const { notifyNewItem } = await import("./notify");
+    const dir = (await import("node:fs")).mkdtempSync((await import("node:os")).tmpdir() + "/inbox-");
+    const file = `${dir}/state.json`;
+    const actions: Actions = { send: async () => {}, isArchived: async () => false };
+    const mails: { to: string; subject: string }[] = [];
+    const wire = (engine: Engine, eventsMailTo = "") =>
+      engine.onAsked((item) => notifyNewItem(item, { to: "@assistant", eventsMailTo, askedBy: "w", send: async (to, m) => void mails.push({ to, subject: m.subject }), save: () => engine.store.save() }));
+    const first = new Engine(new Store(file), actions, () => settingsOf("@assistant"));
+    wire(first);
+    const a = first.ask({ agentId: "a", question: "q" });
+    first.ask({ agentId: "a", question: "q" });
+    expect(mails).toHaveLength(1);
+    expect(mails[0].to).toBe("@assistant");
+    const second = new Engine(new Store(file), actions, () => settingsOf("@assistant"));
+    wire(second);
+    expect(second.store.get(a.item.id)?.notified).toBe(true);
+    second.ask({ agentId: "a", question: "q" });
+    expect(mails).toHaveLength(1);
+    second.ask({ agentId: "b", question: "q" });
+    expect(mails).toHaveLength(2);
+  });
+
+  it("a blueprint gate is skipped while events.mailTo is set (its gate mail covers it), mailed otherwise", async () => {
+    const { notifyNewItem } = await import("./notify");
+    const { engine } = setup();
+    const mails: string[] = [];
+    const send = async (_to: string, m: { subject: string }) => void mails.push(m.subject);
+    const covered = engine.ask({ agentId: "blueprint:r1", question: "Gate?", internal: true }).item;
+    notifyNewItem(covered, { to: "@assistant", eventsMailTo: "@assistant", askedBy: "x", send, save() {} });
+    expect(mails).toHaveLength(0);
+    const alone = engine.ask({ agentId: "blueprint:r1", question: "Gate 2?", internal: true }).item;
+    notifyNewItem(alone, { to: "@assistant", eventsMailTo: "", askedBy: "x", send, save() {} });
+    expect(mails).toHaveLength(1);
+  });
+
+  it("a failing mailbox is logged and never blocks the ask", async () => {
+    const { notifyNewItem } = await import("./notify");
+    const { engine } = setup();
+    engine.onAsked((item) => notifyNewItem(item, { to: "@assistant", eventsMailTo: "", askedBy: "x", send: () => Promise.reject(new Error("down")), save() {} }));
+    expect(engine.ask({ agentId: "a", question: "q" }).deduped).toBe(false);
+    await new Promise((r) => setImmediate(r));
+  });
+});

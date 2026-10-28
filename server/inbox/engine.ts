@@ -39,6 +39,7 @@ export function fingerprint(kind: string, question: string, options: InboxOption
 export class Engine {
   private lastSendAt = Number.NEGATIVE_INFINITY;
   private readonly listeners = new Set<(item: Item, how: Resolution) => void>();
+  private readonly askedListeners = new Set<(item: Item) => void>();
   private busy = false;
   private readonly permissions = new Set<string>();
 
@@ -53,6 +54,12 @@ export class Engine {
   onResolved(listener: (item: Item, how: Resolution) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Told when a NEW item is created (not when an ask is deduped). */
+  onAsked(listener: (item: Item) => void): () => void {
+    this.askedListeners.add(listener);
+    return () => this.askedListeners.delete(listener);
   }
 
   private resolved(item: Item, how: Resolution): void {
@@ -118,6 +125,13 @@ export class Engine {
     );
     this.store.log({ itemId: item.id, type: "asked", actor: input.agentId, detail: item.kind }, now);
     this.store.save();
+    for (const l of this.askedListeners) {
+      try {
+        l(item);
+      } catch (error) {
+        console.error("inbox: listener failed", error);
+      }
+    }
     return { item, deduped: false };
   }
 
