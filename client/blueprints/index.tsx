@@ -1,6 +1,6 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
-import { needsAttention } from "./screen";
+import { needsAttentionBadge } from "./attention";
 import { listRunsRpc } from "../../shared/blueprints/rpc";
 
 export { BlueprintsScreen } from "./screen";
@@ -13,5 +13,5 @@ export function useRunsNeedingAttention(): number {
     queryFn: () => list({ includeFinished: false }).catch(() => null),
     refetchInterval: 10_000,
   });
-  return query.data?.runs.filter(needsAttention).length ?? 0;
+  return query.data?.runs.filter(needsAttentionBadge).length ?? 0;
 }

@@ -40,9 +40,8 @@ function ago(now: number, at: number): string {
 }
 
 /** Runs that need a person or the PM: waiting on a PM judgement, failed, or paused. */
-export function needsAttention(run: RunView): boolean {
-  return run.pmPending !== null || run.status === "failed" || run.status === "paused";
-}
+export { needsAttention } from "./attention";
+import { needsAttention } from "./attention";
 
 /** PRs of a run with their diff summary; fetched only once the card is open. */
 function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }) {
