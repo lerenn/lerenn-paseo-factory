@@ -13,6 +13,9 @@ describe("run attention", () => {
     expect(needsAttention(r)).toBe(true);
     expect(needsAttentionBadge(r)).toBe(false);
   });
+  it("ignores a suspended run, even with a PM judgement pending", () => {
+    expect(needsAttention(run({ status: "suspended", pmPending: { stage: "qa", reason: "x" } }))).toBe(false);
+  });
   it("ignores a running run", () => {
     expect(needsAttentionBadge(run({}))).toBe(false);
   });
