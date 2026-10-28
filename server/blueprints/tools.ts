@@ -31,12 +31,13 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
   }
 
   /** Whole-Factory operations (`all`) are for the Assistant and the Supervisor, not for a run's PM. */
-  async function everything(ctx: CallContext): Promise<void> {
+  async function assistantOnly(ctx: CallContext, message: string): Promise<void> {
     if (ctx.callerId === "factory") return;
     const labels = await ctx.labels();
     if (labels["paseo.assistant"] === "1" || labels["paseo.factory.supervisor"] === "1") return;
-    throw new UsageError("all=true is for the Assistant and the Supervisor.");
+    throw new UsageError(message);
   }
+  const everything = (ctx: CallContext) => assistantOnly(ctx, "all=true is for the Assistant and the Supervisor.");
 
   return [
     {
@@ -136,7 +137,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
       name: "blueprint_resume",
       description:
         "Continue a suspended run at the same stage and attempt count (its worker is woken, or replaced with a note if gone). Also continues a failed, paused or PM-waiting run at a stage after a person decided; extra_attempts adds attempts beyond the caps. " +
-        "all=true (Assistant and Supervisor) lifts the Factory-wide suspension and resumes every suspended run, at most `concurrency` (default 2) starting at once.",
+        "attach_agent (Assistant and Supervisor) resumes the stage onto a live worker of the run instead of spawning one. all=true (Assistant and Supervisor) lifts the Factory-wide suspension and resumes every suspended run, at most `concurrency` (default 2) starting at once.",
       input: z.object({
         run: runArg.optional(),
         all: z.boolean().optional(),
@@ -144,8 +145,9 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
         stage: z.string().optional(),
         extra_attempts: z.number().int().min(0).max(20).optional(),
         note: z.string().max(2000).optional(),
+        attach_agent: z.string().optional().describe("Assistant only: resume the stage onto this live worker of the run (same role) instead of spawning a new one."),
       }),
-      async run({ run, all, concurrency, stage, extra_attempts, note }, ctx) {
+      async run({ run, all, concurrency, stage, extra_attempts, note, attach_agent }, ctx) {
         if (!!run === !!all) throw new UsageError("Give either run or all=true.");
         if (all) {
           await everything(ctx);
@@ -154,7 +156,8 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
           return { factory_suspended: false, resuming: out.runs, concurrency: concurrency ?? 2 };
         }
         await steer(engine.require(run!), ctx);
-        const out = await engine.resume(run!, { stage, extraAttempts: extra_attempts, note });
+        if (attach_agent) await assistantOnly(ctx, "attach_agent is for the Assistant and the Supervisor.");
+        const out = await engine.resume(run!, { stage, extraAttempts: extra_attempts, note, attachAgent: attach_agent });
         return { run_id: out.id, status: out.status, stage: out.stage };
       },
     },

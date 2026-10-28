@@ -47,4 +47,11 @@ describe("blueprint_suspend / blueprint_resume tools", () => {
     await tool("blueprint_resume").run({ run: "bp-1", note: "go" }, ctx("anyone"));
     expect(calls).toEqual([["suspend", "bp-1", { reason: "freeze", by: "anyone", force: undefined }], ["resume", "bp-1", { stage: undefined, extraAttempts: undefined, note: "go" }]]);
   });
+
+  it("attach_agent is for the Assistant and the Supervisor", async () => {
+    const { tool, ctx, calls } = fake();
+    await expect(tool("blueprint_resume").run({ run: "bp-1", stage: "x", attach_agent: "a-1" }, ctx("pm"))).rejects.toThrow(/attach_agent is for the Assistant/);
+    await tool("blueprint_resume").run({ run: "bp-1", stage: "x", attach_agent: "a-1" }, ctx("assistant", { "paseo.assistant": "1" }));
+    expect(calls.at(-1)).toEqual(["resume", "bp-1", { stage: "x", extraAttempts: undefined, note: undefined, attachAgent: "a-1" }]);
+  });
 });

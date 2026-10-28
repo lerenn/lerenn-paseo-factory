@@ -79,6 +79,8 @@ export interface Run {
   sharedWorkspaceId?: string | null;
   /** Every agent the Factory spawned for this run, with the workspace (pod) it lives in; what the janitor cleans up. */
   agents?: Record<string, SpawnedAgent>;
+  /** Workers replaced while mid-turn: archived when their turn ends. */
+  retiring?: string[];
   /** Why and since when the run is suspended (status "suspended"), the status to go back to, and what happened to its worker's pod. */
   suspended?: { reason: string; at: number; by: string; prevStatus: RunStatus; pods: string[] } | null;
   /** What happened after the run ended: event mails already sent, the retro, the janitor. */

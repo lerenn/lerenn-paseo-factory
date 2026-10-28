@@ -1070,3 +1070,134 @@ describe("a worker whose provider session is gone", () => {
     expect(spawned).toHaveLength(2);
   });
 });
+
+describe("superseded workers", () => {
+  it("archives the previous worker of a stage that spawns a new one, once its turn is over", async () => {
+    const { start, engine, spawned, states, archived, settle } = setup();
+    const run = await start();
+    states.set("agent-1", "idle");
+    await engine.resume(run.id, { stage: "think" });
+    await settle();
+    expect(spawned).toHaveLength(2);
+    expect(archived).toEqual(["agent-1"]);
+  });
+
+  it("waits for a mid-turn previous worker to end its turn before archiving it", async () => {
+    const { start, engine, spawned, states, archived, settle, store } = setup();
+    const run = await start();
+    await engine.resume(run.id, { stage: "think" }); // agent-1 is still running
+    await settle();
+    expect(spawned).toHaveLength(2);
+    expect(archived).toEqual([]);
+    expect(store.get(run.id)!.retiring).toEqual(["agent-1"]);
+    states.set("agent-1", "idle");
+    await engine.turnEnded("agent-1", { kind: "completed" });
+    expect(archived).toEqual(["agent-1"]);
+    expect(store.get(run.id)!.retiring).toEqual([]);
+    // the new worker is still nudged normally
+    await engine.turnEnded("agent-2", { kind: "completed" });
+    expect(archived).toEqual(["agent-1"]);
+  });
+
+  it("archives the previous worker after a flake retry that is not a gone session", async () => {
+    const { start, spawned, states, archived, settle, engine, store } = setup();
+    const run = await start();
+    states.set("agent-1", "idle");
+    await engine.turnEnded("agent-1", { kind: "failed", message: "OOMKilled: exit 137" });
+    await settle();
+    expect(spawned).toHaveLength(2);
+    expect(archived).toContain("agent-1");
+    expect(store.get(run.id)!.stages.think.agentId).toBe("agent-2");
+  });
+
+  it("does not count an agent no active stage refers to, but keeps unknown agents and the current worker", async () => {
+    const { start, engine, states, settle } = setup();
+    const run = await start();
+    await engine.resume(run.id, { stage: "think" });
+    await settle();
+    states.set("agent-1", "running");
+    expect(engine.isSuperseded("agent-1")).toBe(true);
+    expect(engine.isSuperseded("agent-2")).toBe(false);
+    expect(engine.isSuperseded("somebody-else")).toBe(false);
+    await engine.abort(run.id, "stop");
+    expect(engine.isSuperseded("agent-2")).toBe(true);
+  });
+});
+
+describe("a worker that finished while its stage was paused", () => {
+  it("is accepted when it is the stage's latest worker, and recorded in the history", async () => {
+    const { start, engine, spawnErrors, verdict, store, settle } = setup();
+    const run = await start();
+    spawnErrors.push("working directory does not exist");
+    await engine.resume(run.id, { stage: "think" });
+    await settle();
+    expect(store.get(run.id)!.status).toBe("paused");
+    expect(store.get(run.id)!.stages.think.agentId).toBe("agent-1");
+    expect(store.get(run.id)!.stages.think.status).toBe("entering");
+    const out = await verdict("agent-1", "nothing", {}, "done anyway");
+    expect(out.next).toBe("done");
+    const after = store.get(run.id)!;
+    expect(after.status).toBe("done");
+    expect(after.history.some((h) => h.event === "late_verdict" && h.detail?.includes("agent-1"))).toBe(true);
+  });
+
+  it("is refused when a newer worker exists", async () => {
+    const { start, engine, states } = setup();
+    const run = await start();
+    states.set("agent-1", "idle");
+    await engine.resume(run.id, { stage: "think" });
+    await expect(engine.verdict("agent-1", { verdict: "nothing" })).rejects.toThrow(/not the worker/);
+  });
+
+  it("is refused once the stage is done", async () => {
+    const { start, verdict, engine } = setup();
+    await start();
+    await verdict("agent-1", "nothing");
+    await expect(engine.verdict("agent-1", { verdict: "nothing" })).rejects.toThrow(UsageError);
+  });
+});
+
+describe("blueprint_resume attach_agent", () => {
+  it("resumes a paused stage onto its live worker without spawning", async () => {
+    const { start, engine, spawnErrors, spawned, sent, store, settle } = setup();
+    const run = await start();
+    spawnErrors.push("working directory does not exist");
+    await engine.resume(run.id, { stage: "think" });
+    await settle();
+    await engine.resume(run.id, { stage: "think", attachAgent: "agent-1", note: "carry on" });
+    await settle();
+    expect(spawned).toHaveLength(1);
+    const after = store.get(run.id)!;
+    expect(after.status).toBe("running");
+    expect(after.stages.think.status).toBe("running");
+    expect(after.stages.think.agentId).toBe("agent-1");
+    expect(sent.at(-1)).toMatchObject({ to: "agent-1" });
+    expect(sent.at(-1)!.text).toContain("carry on");
+    expect(after.history.some((h) => h.event === "attached")).toBe(true);
+  });
+
+  it("moves a stage from its current worker to another live worker of the role, and retires the old one", async () => {
+    const { start, engine, states, archived, store, settle, verdict } = setup();
+    const run = await start();
+    await engine.resume(run.id, { stage: "think" }); // agent-2 replaces the still running agent-1
+    await settle();
+    await engine.resume(run.id, { stage: "think", attachAgent: "agent-1" });
+    await settle();
+    expect(store.get(run.id)!.stages.think.agentId).toBe("agent-1");
+    states.set("agent-2", "idle");
+    await engine.turnEnded("agent-2", { kind: "completed" }); // not the stage's worker any more: nothing happens
+    await settle();
+    expect(archived).toContain("agent-2");
+    await verdict("agent-1", "nothing");
+    expect(store.get(run.id)!.status).toBe("done");
+  });
+
+  it("refuses an agent that is gone, not of the run, or of another role", async () => {
+    const { start, engine, states } = setup();
+    const run = await start();
+    await expect(engine.resume(run.id, { stage: "think", attachAgent: "stranger" })).rejects.toThrow(/not a worker of run/);
+    await expect(engine.resume(run.id, { stage: "build", attachAgent: "agent-1" })).rejects.toThrow(/runs as investigator/);
+    states.set("agent-1", "gone");
+    await expect(engine.resume(run.id, { stage: "think", attachAgent: "agent-1" })).rejects.toThrow(/is gone/);
+  });
+});

@@ -382,7 +382,7 @@ export class Engine {
 
   // ---- entering a stage ----
 
-  private async enter(run: Run, id: string): Promise<void> {
+  private async enter(run: Run, id: string, opts: { attach?: string } = {}): Promise<void> {
     if (run.status === "done" || run.status === "failed" || run.status === "aborted" || run.status === "suspended") return;
     const def = this.stageDef(run, id);
     const st = (run.stages[id] ??= freshStage());
@@ -407,7 +407,7 @@ export class Engine {
     this.store.save();
     switch (kind) {
       case "agent":
-        return this.dispatch(run, id, "start");
+        return this.dispatch(run, id, "start", opts.attach ? { attach: opts.attach } : {});
       case "gate":
         return this.openGate(run, id, def as GateStage);
       case "call":
@@ -690,17 +690,27 @@ export class Engine {
   }
 
   /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
-  async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
+  async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string; attachAgent?: string }): Promise<Run> {
     const run = this.require(runId);
     return this.exclusive(run.id, () => (run.status === "suspended" ? this.doUnsuspend(run, { note: input.note }) : this.doResume(run, input)));
   }
 
-  private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
+  private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string; attachAgent?: string }): Promise<Run> {
     {
       if (run.status === "done" || run.status === "aborted") throw new UsageError(`Run ${run.id} is ${run.status}; start a new one.`);
       const stage = input.stage ?? run.pm.pending?.stage ?? run.stage;
       if (!stage) throw new UsageError("Name the stage to resume at.");
-      this.stageDef(run, stage);
+      const def = this.stageDef(run, stage);
+      const attach = input.attachAgent;
+      if (attach) {
+        if ((def.kind ?? "agent") !== "agent") throw new UsageError(`Stage ${stage} is not an agent stage: there is no worker to attach.`);
+        const known = run.agents?.[attach];
+        if (!known) throw new UsageError(`Agent ${attach} is not a worker of run ${run.id}.`);
+        if (known.role !== (def as AgentStage).role) throw new UsageError(`Agent ${attach} runs as ${known.role}, stage ${stage} needs ${(def as AgentStage).role}.`);
+        if ((await this.ports.agentState(attach)) === "gone") throw new UsageError(`Agent ${attach} is gone; resume without attach_agent to get a new worker.`);
+        const busy = this.store.active().find((r) => Object.entries(r.stages).some(([sid, other]) => (r.id !== run.id || sid !== stage) && other.agentId === attach && (other.status === "running" || other.status === "entering")));
+        if (busy) throw new UsageError(`Agent ${attach} is the worker of another running stage (run ${busy.id}).`);
+      }
       const st = (run.stages[stage] ??= freshStage());
       st.extra += Math.max(0, input.extraAttempts ?? 0);
       if (input.note) st.notes.push(input.note);
@@ -714,7 +724,7 @@ export class Engine {
       st.status = "entering";
       st.attempts = 0;
       this.store.save();
-      await this.enter(run, stage);
+      await this.enter(run, stage, attach ? { attach } : {});
       return run;
     }
   }
@@ -776,7 +786,51 @@ export class Engine {
     return [...out];
   }
 
-  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean } = {}): Promise<void> {
+  /**
+   * Archive the worker a stage no longer uses, unless another stage still holds it. One that is mid-turn is archived when
+   * its turn ends (`turnEnded`), not cut off.
+   */
+  private async retire(run: Run, stage: string, agentId: string): Promise<void> {
+    if (Object.entries(run.stages).some(([sid, other]) => sid !== stage && other.agentId === agentId && (other.status === "running" || other.status === "entering" || other.status === "waiting"))) return;
+    if (run.pmAgentId === agentId) return;
+    const state = await this.ports.agentState(agentId).catch(() => "gone" as const);
+    if (state === "running") {
+      const list = (run.retiring ??= []);
+      if (!list.includes(agentId)) list.push(agentId);
+      this.log(run, "retiring", stage, `${agentId} is mid-turn: archived when its turn ends`);
+      this.store.save();
+      return;
+    }
+    await this.ports.archive(agentId).catch((e) => console.error(`blueprints: archiving ${agentId} failed`, e));
+  }
+
+  /** Archive the retired workers of `agentId`'s run whose turn is over (`agentId` only, or all of them when absent). */
+  private async flushRetired(agentId?: string): Promise<void> {
+    for (const run of this.store.all()) {
+      if (!run.retiring?.length) continue;
+      for (const id of [...run.retiring]) {
+        if (agentId && id !== agentId) continue;
+        if (!agentId && (await this.ports.agentState(id).catch(() => "gone" as const)) === "running") continue;
+        run.retiring = run.retiring.filter((x) => x !== id);
+        this.store.save();
+        await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
+      }
+    }
+  }
+
+  /**
+   * Is this a worker the Factory spawned that no live stage of its run refers to any more? Such an agent does not count
+   * against its role's `maxConcurrent`. An agent the Factory does not know is never superseded.
+   */
+  isSuperseded(agentId: string): boolean {
+    const run = this.store.all().find((r) => r.agents?.[agentId]);
+    if (!run) return false;
+    if (run.endedAt !== null) return true;
+    if (run.pmAgentId === agentId) return false;
+    return !Object.values(run.stages).some((st) => st.agentId === agentId && (st.status === "running" || st.status === "entering" || st.status === "waiting"));
+  }
+
+  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } = {}): Promise<void> {
     if (run.status === "suspended") return;
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
@@ -793,6 +847,7 @@ export class Engine {
     let target: string | null = why === "start" ? null : st.agentId;
     if (reuse) target = run.stages[reuse]?.agentId ?? null;
     if (opts.fresh) target = null; // an infrastructure flake: the worker's pod is not to be trusted
+    if (opts.attach) target = opts.attach; // the Assistant chose a live worker for this stage
     if (target && (await this.ports.agentState(target)) === "gone") target = null;
     if (why === "wake") {
       // Wake the pod ahead of the prompt; a worker that is gone gets a fresh start with the original prompt instead.
@@ -802,7 +857,13 @@ export class Engine {
 
     try {
       if (target) {
+        const previous = st.agentId;
         st.agentId = target;
+        if (opts.attach) {
+          this.registerAgent(run, target, def.role, id, run.agents?.[target]?.workspaceId);
+          this.log(run, "attached", id, `${target}${previous && previous !== target ? ` (instead of ${previous})` : ""}`);
+          if (previous && previous !== target) await this.retire(run, id, previous);
+        }
         await this.ports.send(target, prompt);
         this.log(run, "sent", id, `to ${target}${reuse ? ` (reuse of ${reuse})` : ""}`);
       } else {
@@ -830,7 +891,8 @@ export class Engine {
         this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
         if (share && spawned.workspaceId) run.sharedWorkspaceId = spawned.workspaceId;
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
-        if (opts.archiveOld && old && old !== spawned.agentId) await this.ports.archive(old).catch((e) => console.error(`blueprints: archiving ${old} failed`, e));
+        // The worker this one replaces is of no use any more (and counts against the role's limit while it lives).
+        if (old && old !== spawned.agentId && (!reuse || opts.archiveOld)) await this.retire(run, id, old);
       }
     } catch (error) {
       const flake = flakeReason((error as Error).message);
@@ -886,6 +948,7 @@ export class Engine {
 
   /** The stage's worker ended a turn. A verdict already given makes this a no-op. */
   turnEnded(agentId: string, outcome: { kind: "completed" | "failed" | "canceled"; message?: string }): Promise<void> {
+    if (this.store.all().some((r) => r.retiring?.includes(agentId))) return this.flushRetired(agentId);
     const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === agentId && r.stages[r.stage].status === "running");
     if (!run) return Promise.resolve();
     return this.exclusive(run.id, async () => {
@@ -911,11 +974,24 @@ export class Engine {
       const id = run.stage!;
       const st = run.stages[id];
       const def = this.stageDef(run, id);
-      if (st.status !== "running" || st.agentId !== callerId) throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      if (st.agentId !== callerId) throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      if (st.status !== "running") {
+        // A stage that was paused or exhausted while its (latest) worker is still alive: that worker finished after all.
+        if (st.status !== "entering" && st.status !== "exhausted") throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      }
+      const late = st.status !== "running";
       const allowed = stageVerdicts(def);
       if (!allowed.includes(input.verdict)) throw new UsageError(`Verdict "${input.verdict}" is not one of [${allowed.join(", ")}].`);
       const data = input.data ?? {};
       await this.verifyFacts(run, def as AgentStage, input.verdict, data);
+      if (late) {
+        this.log(run, "late_verdict", id, `accepted from ${callerId}, the latest worker of a stage that was ${st.status}`);
+        this.withdrawEscalations(run, "the stage's worker gave its verdict");
+        run.pm.pending = null;
+        run.status = "running";
+        run.error = null;
+        run.waitingFor = null;
+      }
       st.verdict = input.verdict;
       st.summary = input.summary ? clip(input.summary, 2000) : null;
       st.data = data;
@@ -1262,6 +1338,7 @@ export class Engine {
 
   /** Replays what a restart interrupted. */
   async resumeAll(): Promise<void> {
+    await this.flushRetired().catch((e) => console.error("blueprints: archiving retired workers failed", e));
     for (const run of this.store.active()) {
       await this.exclusive(run.id, async () => {
         const id = run.stage;
