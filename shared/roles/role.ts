@@ -73,6 +73,15 @@ export const roleSchema = z.strictObject({
    */
   maxConcurrent: z.number().int().min(1).optional(),
   /**
+   * Kubernetes Runtime pod profile for this role's workspaces (same name as the Runtime's profile),
+   * passed as the runtime option `profile`, which wins over its `projectProfiles`. Ignored on the
+   * `local` runtime and when a worker joins an existing shared workspace. Omit for the default.
+   */
+  runtimeProfile: z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,31}$/, "a Kubernetes Runtime profile name: lowercase letters, digits and '-', starting with a letter, 32 characters at most")
+    .optional(),
+  /**
    * Defaults for other plugins, passed as the environment those plugins read. Each is optional and
    * harmless when its plugin is not installed. Values given at creation take precedence.
    */

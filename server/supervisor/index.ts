@@ -32,6 +32,7 @@ export function startSupervisor(host: FactoryHost) {
         idempotencyKey,
         config: resolveAgentConfig(role, current.defaultProvider) as never,
         cwd,
+        profile: role?.runtimeProfile,
         title: "Factory Supervisor",
         workspaceTitle: workspaceTitle(current.role),
         prompt,

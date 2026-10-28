@@ -115,6 +115,7 @@ export function startBlueprints(host: FactoryHost) {
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
+        profile: role?.runtimeProfile,
       };
       const runtime = o.local ? "local" : host.runtime;
       const { agentId, workspaceId } = await spawnAgent(host.paseo, runtime, { ...input, joinWorkspaceId: o.joinWorkspaceId }).catch((error: Error) => {
