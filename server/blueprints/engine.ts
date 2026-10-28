@@ -71,7 +71,7 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string };
 }
 
 export interface PostSettings {
@@ -344,7 +344,9 @@ export class Engine {
       if (parent) void this.exclusive(parent.id, () => this.childFinished(parent, run)).catch((e) => this.crash(parent, e));
     }
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
-    for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
+    const mailTo = this.ports.settings().runsMailTo?.trim();
+    if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} ${status}`, body: `${text}\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
+    else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
     if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
     // The janitor (after the retro) replaces the blunt archive-everything switch.
     if (!this.ports.post?.().janitor.enabled && this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
@@ -490,7 +492,23 @@ export class Engine {
     }
   }
 
+  private runLabel(run: Run): string {
+    return run.vars.ticket || run.vars.incident_id || run.blueprint;
+  }
+
+  /** Run id, blueprint and a short summary of its vars (not the internal *_confirmed flags). */
+  private runFacts(run: Run): string {
+    const vars = Object.entries(run.vars).filter(([k]) => !k.endsWith("_confirmed")).map(([k, v]) => `${k}=${clip(String(v), 80)}`).join(", ");
+    return `Run: ${run.id}\nBlueprint: ${run.blueprint}${vars ? `\nVars: ${clip(vars, 300)}` : ""}`;
+  }
+
   private async notifyPm(run: Run, text: string): Promise<void> {
+    // With runs.notifyMailTo set, a judgement request is mailed there (queued) instead of interrupting the starter or spawning a PM.
+    const mailTo = this.ports.settings().runsMailTo?.trim();
+    if (mailTo && this.ports.report) {
+      await this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} needs PM`, body: `${this.runFacts(run)}\n${text}`, kind: "run" }).catch((e) => console.error("blueprints: PM mail failed", e));
+      return;
+    }
     if (run.pmAgentId && (await this.ports.agentState(run.pmAgentId)) !== "gone") {
       await this.ports.send(run.pmAgentId, text).catch((e) => console.error("blueprints: PM notice failed", e));
       return;

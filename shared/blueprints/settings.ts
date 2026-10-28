@@ -18,6 +18,8 @@ export const settingsSchema = z.object({
   shareWorkspace: z.boolean().default(false),
   /** Infrastructure failures of a worker (exit 137/143, pod did not start, container not found, evicted...) retried per stage entry with a fresh pod, without using an attempt. A stage's own `flake_retries` raises it. */
   flakeRetries: z.number().int().min(0).default(3),
+  /** Notices of a run that ended or needs a PM judgement. Empty: a message to the agent that started the run (as before). An address or alias (e.g. @assistant): one mail there instead, no live message. */
+  runs: z.object({ notifyMailTo: z.string().default("") }).default({ notifyMailTo: "" }),
   /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. */
   events: z.object({ mailTo: z.string().default("@assistant") }).default({ mailTo: "@assistant" }),
   /** After a run ends (done, failed or aborted), a small separate agent mails one short retrospective. */

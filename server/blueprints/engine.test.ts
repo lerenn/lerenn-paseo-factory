@@ -78,7 +78,7 @@ merged = "done"
 head_moved = "check"
 `;
 
-function setup(source = flow, over: { flakeRetries?: number } = {}) {
+function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string } = {}, withReport = false) {
   let time = 1_000_000;
   const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string }[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -90,6 +90,7 @@ function setup(source = flow, over: { flakeRetries?: number } = {}) {
   const store = new RunStore(null);
   let agents = 0;
   const spawnErrors: string[] = [];
+  const reports: { to: string; subject: string; body: string; kind: string }[] = [];
   const ports: Ports = {
     now: () => time,
     async spawn(o) {
@@ -126,6 +127,7 @@ function setup(source = flow, over: { flakeRetries?: number } = {}) {
     async prFacts(url) {
       return pr[url] ?? { url, exists: false, state: "closed", head: "", ci: "none", mergeable: null, draft: false, review: "" };
     },
+    ...(withReport ? { report: async (to: string, r: { subject: string; body: string; kind: string }) => void reports.push({ to, ...r }) } : {}),
     tool: () => null,
     stageKind: () => null,
     blueprint: (name) => (name === "flow" ? parseBlueprint(source) : undefined),
@@ -151,7 +153,7 @@ function setup(source = flow, over: { flakeRetries?: number } = {}) {
     return out;
   };
   states.set("pm-agent", "idle");
-  return { engine, store, spawned, sent, states, spawnErrors, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
+  return { engine, store, spawned, sent, states, spawnErrors, reports, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
 }
 
 const okPr = (url: string, head = "abc123"): PrFacts => ({ url, exists: true, state: "open", head, ci: "green", mergeable: true, draft: false, review: "" });
@@ -760,5 +762,52 @@ describe("infrastructure flakes", () => {
     await engine.turnEnded("agent-1", { kind: "failed", message: "503" });
     await settle();
     expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, flakes: 1 });
+  });
+});
+
+describe("runs.notifyMailTo", () => {
+  const NOTHING = { ticket: "ANY-1", ticket_confirmed: "true" };
+
+  it("unset: the starter gets the live message, as before", async () => {
+    const { start, verdict, sent, reports } = setup(flow, {}, true);
+    await start(NOTHING, { ownerAgentId: "pm-agent" });
+    await verdict("agent-1", "nothing");
+    expect(reports.map((r) => r.to)).toEqual(["pm-agent"]);
+    expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
+  });
+
+  it("set: one mail with run, blueprint and vars to the address, nothing to the starter", async () => {
+    const { start, verdict, sent, reports, engine } = setup(flow, { runsMailTo: "@assistant" }, true);
+    const run = await start(NOTHING, { ownerAgentId: "pm-agent" });
+    await verdict("agent-1", "nothing");
+    expect(engine.require(run.id).status).toBe("done");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({ to: "@assistant", subject: `Run ${run.id} ANY-1 done`, kind: "run" });
+    expect(reports[0].body).toContain(`Run: ${run.id}`);
+    expect(reports[0].body).toContain("Blueprint: flow");
+    expect(reports[0].body).toContain("ticket=ANY-1");
+    expect(reports[0].body).not.toContain("_confirmed");
+    expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
+  });
+
+  it("set: a failed run is mailed as failed", async () => {
+    const { start, engine, reports } = setup(flow, { runsMailTo: "@assistant" }, true);
+    const run = await start(NOTHING, { ownerAgentId: "pm-agent" });
+    await engine.abort(run.id, "stop");
+    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ANY-1 aborted`]);
+  });
+
+  it("set: a stage that needs the PM is mailed, and the PM is neither messaged nor spawned", async () => {
+    const { start, engine, reports, sent, spawned, settle } = setup(flow, { runsMailTo: "@assistant" }, true);
+    const run = await start(NOTHING, { ownerAgentId: "pm-agent" });
+    await engine.turnEnded("agent-1", { kind: "completed" });
+    await settle();
+    await engine.turnEnded("agent-1", { kind: "completed" });
+    await settle();
+    expect(engine.require(run.id).status).toBe("waiting");
+    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ANY-1 needs PM`]);
+    expect(reports[0].body).toContain("blueprint_retry");
+    expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
+    expect(spawned.filter((s) => s.role === "pm")).toHaveLength(0);
   });
 });
