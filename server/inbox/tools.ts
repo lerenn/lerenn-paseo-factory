@@ -152,10 +152,12 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "inbox_withdraw",
-    description: "Take back one of your pending questions that no longer matters.",
+    description:
+      "Take back one of your pending questions that no longer matters. The Assistant (paseo.assistant=1) may also withdraw the Factory's own items (asker `blueprint:<run>`), such as an escalation of a run that is running again.",
     input: z.object({ item_id: z.string(), reason: z.string().max(500).optional() }),
-    run({ item_id, reason }, ctx) {
-      const item = own(item_id, ctx);
+    async run({ item_id, reason }, ctx) {
+      const found = ctx.engine.store.get(item_id);
+      const item = found?.agentId.startsWith("blueprint:") && (await isAssistant(ctx)) ? found : own(item_id, ctx);
       ctx.engine.withdraw(item, ctx.callerId, reason ?? null);
       return summary(item);
     },

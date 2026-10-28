@@ -4,7 +4,7 @@ import { TranscriptPeek } from "../transcript-peek";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
 import type { RunView, StageView } from "../../shared/blueprints/run";
 import { buildTimeline, formatDuration } from "../../shared/blueprints/timeline";
 import { blueprintsSettings } from "../../shared/blueprints/settings";
@@ -24,6 +24,7 @@ function statusColor(status: string, c: Colors): string {
       return c.statusDanger;
     case "waiting":
     case "paused":
+    case "suspended":
       return c.statusWarning;
     case "running":
     case "entering":
@@ -68,6 +69,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   const startCall = useRpc(startRunRpc);
   const abortCall = useRpc(abortRunRpc);
   const resumeCall = useRpc(retryRunRpc);
+  const suspendCall = useRpc(suspendRunsRpc);
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [showFinished, setShowFinished] = useState(true);
@@ -102,6 +104,14 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   const resume = useMutation({
     mutationFn: (run: RunView) =>
       resumeCall({ runId: run.id, stage: resumeStage[run.id]?.trim() || run.pmPending?.stage || undefined, extraAttempts: Number(resumeExtra[run.id] ?? "1") || 0 }),
+    onSuccess: (r) => {
+      setMessage(r.ok ? null : r.message);
+      refresh();
+    },
+  });
+
+  const suspend = useMutation({
+    mutationFn: (o: { runId?: string; all?: boolean; resume?: boolean }) => suspendCall(o),
     onSuccess: (r) => {
       setMessage(r.ok ? null : r.message);
       refresh();
@@ -152,7 +162,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   };
 
   const renderRun = (run: RunView) => {
-    const active = run.status === "running" || run.status === "waiting";
+    const active = run.status === "running" || run.status === "waiting" || run.status === "paused" || run.status === "suspended";
     const canResume = run.status === "failed" || run.status === "paused" || run.pmPending !== null;
     const varEntries = Object.entries(run.vars).filter(([, v]) => v !== "").sort(([a], [b]) => (a === "ticket" ? -1 : b === "ticket" ? 1 : 0));
     const open = expanded[run.id];
@@ -174,6 +184,12 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         <View style={s.line}>{run.stages.map((st) => stageChip(st, st.id === run.stage))}</View>
         {run.stage ? <Text style={s.text}>Stage: {run.stage}</Text> : null}
         {run.waitingFor ? <Text style={s.muted}>Waiting for {run.waitingFor}</Text> : null}
+        {run.suspended ? (
+          <>
+            <Text style={[s.text, { color: c.statusWarning }]} selectable>Suspended {ago(now, run.suspended.since)} by {run.suspended.by}: {run.suspended.reason}</Text>
+            {run.suspended.pods.map((p) => <Text key={p} style={s.muted} selectable>{p}</Text>)}
+          </>
+        ) : null}
         {run.pmPending ? <Text style={[s.text, { color: c.statusWarning }]}>PM judgement pending on {run.pmPending.stage}: {run.pmPending.reason}</Text> : null}
         {run.error ? <Text style={[s.text, { color: c.statusDanger }]} selectable>{run.error}</Text> : null}
         {run.parent ? <Text style={s.muted}>Child of {run.parent.runId} (stage {run.parent.stageId})</Text> : null}
@@ -252,6 +268,15 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         ) : null}
         {active ? (
           <View style={s.line}>
+            {run.status === "suspended" ? (
+              <Pressable style={s.button} onPress={() => suspend.mutate({ runId: run.id, resume: true })}>
+                <Text style={s.text}>Resume</Text>
+              </Pressable>
+            ) : (
+              <Pressable style={s.button} onPress={() => suspend.mutate({ runId: run.id })}>
+                <Text style={s.text}>Suspend</Text>
+              </Pressable>
+            )}
             <Pressable style={s.button} onPress={() => abort.mutate(run.id)}>
               <Text style={[s.text, { color: c.statusDanger }]}>Abort</Text>
             </Pressable>
@@ -320,6 +345,17 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
       {query.isError ? <Text style={s.muted}>Could not load: {String(query.error)}</Text> : null}
       {message ? <Text style={s.text}>{message}</Text> : null}
+      {data?.factorySuspended ? (
+        <View style={s.warn}>
+          <Text style={[s.text, { fontWeight: "700" }]}>The Factory is suspended</Text>
+          <Text style={s.muted} selectable>{data.factorySuspended.reason} · {ago(now, data.factorySuspended.since)} by {data.factorySuspended.by}. No run starts and nothing is respawned until it is resumed.</Text>
+          <View style={s.line}>
+            <Pressable style={s.button} onPress={() => suspend.mutate({ all: true, resume: true })}>
+              <Text style={s.text}>Resume all</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
       <View style={s.line}>
         <Pressable style={s.button} onPress={() => setStartOpen((v) => !v)}>
           <Text style={s.text}>{startOpen ? "Close" : "Start a run"}</Text>
@@ -327,6 +363,11 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         <Pressable style={s.button} onPress={() => setShowFinished((v) => !v)}>
           <Text style={s.muted}>{showFinished ? "Hide finished" : "Show finished"}</Text>
         </Pressable>
+        {data?.factorySuspended ? null : (
+          <Pressable style={s.button} onPress={() => suspend.mutate({ all: true })}>
+            <Text style={s.muted}>Suspend all</Text>
+          </Pressable>
+        )}
         {errors.length > 0 ? <Text style={[s.muted, { color: c.statusWarning }]}>{errors.length} blueprint file{errors.length > 1 ? "s" : ""} with errors (see Templates)</Text> : null}
       </View>
       {startOpen ? startForm : null}

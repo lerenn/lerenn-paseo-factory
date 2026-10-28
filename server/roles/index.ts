@@ -44,7 +44,7 @@ export function startRoles(host: FactoryHost) {
   });
 
   const limits = new RoleLimits();
-  const createHook = agentCreateHook(async () => (await configured()).map((s) => gitSources.rolesDir(s)), limits);
+  const createHook = agentCreateHook(async () => (await configured()).map((s) => gitSources.rolesDir(s)), limits, (id) => host.engines.blueprints?.engine.isSuperseded(id) ?? false);
   host.beforeCreate(async (request, ctx) => (host.enabled("roles") ? ((await createHook({ request }, ctx)) ?? undefined) : undefined));
   const removeSessionHook = server.before("agent.session_open", (input, ctx) => (host.enabled("roles") ? sessionOpenHook(limits)(input) : undefined));
 

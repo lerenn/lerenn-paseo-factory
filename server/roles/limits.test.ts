@@ -54,4 +54,13 @@ describe("RoleLimits", () => {
     const third = new RoleLimits(f);
     await third.reserve("qa", 2, states({ a1: "active" }));
   });
+
+  it("does not count a superseded agent even while it is working", async () => {
+    const limits = new RoleLimits(await file());
+    limits.register("old", "implementer", true);
+    limits.register("new", "implementer", true);
+    const superseded = (id: string) => id === "old";
+    await limits.reserve("implementer", 2, states({ old: "active", new: "active" }), superseded);
+    await expect(limits.reserve("implementer", 2, states({ old: "active", new: "active" }))).rejects.toThrow(/limit of 2/);
+  });
 });

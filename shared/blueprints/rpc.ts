@@ -49,7 +49,16 @@ export const listRunsRpc = defineRpc({
     blueprints: z.array(blueprintInfoSchema),
     errors: z.array(z.object({ file: z.string(), message: z.string() })),
     settings: settingsSchema.nullable(),
+    /** Set while the whole Factory is suspended (no run starts, nothing is respawned). */
+    factorySuspended: z.object({ reason: z.string(), since: z.number(), by: z.string() }).nullable().default(null),
   }),
+});
+
+/** Suspend or resume one run (`runId`) or all of them and the Factory itself (`all`). */
+export const suspendRunsRpc = defineRpc({
+  name: "blueprints.suspend",
+  input: z.object({ runId: z.string().optional(), all: z.boolean().optional(), resume: z.boolean().optional(), reason: z.string().optional() }),
+  output: z.object({ ok: z.boolean(), message: z.string().nullable() }),
 });
 
 export const startRunRpc = defineRpc({

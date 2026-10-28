@@ -79,6 +79,10 @@ export interface Run {
   sharedWorkspaceId?: string | null;
   /** Every agent the Factory spawned for this run, with the workspace (pod) it lives in; what the janitor cleans up. */
   agents?: Record<string, SpawnedAgent>;
+  /** Workers replaced while mid-turn: archived when their turn ends. */
+  retiring?: string[];
+  /** Why and since when the run is suspended (status "suspended"), the status to go back to, and what happened to its worker's pod. */
+  suspended?: { reason: string; at: number; by: string; prevStatus: RunStatus; pods: string[] } | null;
   /** What happened after the run ended: event mails already sent, the retro, the janitor. */
   post?: PostState;
 }
@@ -114,6 +118,8 @@ interface State {
   runs: Run[];
   /** Approvals reusable by wording: key (ticket, stage, criteria sha) -> the option chosen. */
   approvals: Record<string, { optionId: string; by: string; at: number }>;
+  /** The whole Factory is suspended: no run starts and nothing is respawned, across plugin reloads. */
+  suspended: { reason: string; at: number; by: string } | null;
 }
 
 const MAX_HISTORY = 400;
@@ -121,15 +127,15 @@ const FINISHED_KEEP_MS = 30 * 24 * 3600 * 1000;
 
 /** Runs as JSON, written before every transition so a daemon restart loses nothing. */
 export class RunStore {
-  private state: State = { runs: [], approvals: {} };
+  private state: State = { runs: [], approvals: {}, suspended: null };
 
   constructor(private readonly file: string | null) {
     if (file) {
       try {
         const s = JSON.parse(readFileSync(file, "utf8"));
-        this.state = { runs: s.runs ?? [], approvals: s.approvals ?? {} };
+        this.state = { runs: s.runs ?? [], approvals: s.approvals ?? {}, suspended: s.suspended ?? null };
       } catch {
-        this.state = { runs: [], approvals: {} };
+        this.state = { runs: [], approvals: {}, suspended: null };
       }
     }
   }
@@ -141,6 +147,16 @@ export class RunStore {
     writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 });
     chmodSync(tmp, 0o600);
     renameSync(tmp, this.file);
+  }
+
+  /** Set while the whole Factory is suspended. */
+  suspended(): State["suspended"] {
+    return this.state.suspended;
+  }
+
+  setSuspended(value: State["suspended"]): void {
+    this.state.suspended = value;
+    this.save();
   }
 
   newId(): string {

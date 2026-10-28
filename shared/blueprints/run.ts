@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const runStatusSchema = z.enum(["running", "waiting", "paused", "done", "failed", "aborted"]);
+export const runStatusSchema = z.enum(["running", "waiting", "paused", "suspended", "done", "failed", "aborted"]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 
 export const stageStatusSchema = z.enum(["pending", "entering", "running", "waiting", "done", "exhausted", "skipped", "failed"]);
@@ -33,6 +33,8 @@ export const runViewSchema = z.object({
   endedAt: z.number().nullable(),
   error: z.string().nullable(),
   waitingFor: z.string().nullable(),
+  /** Set while the run is suspended (see blueprint_suspend). */
+  suspended: z.object({ reason: z.string(), since: z.number(), by: z.string(), pods: z.array(z.string()) }).nullable(),
   pmPending: z.object({ stage: z.string(), reason: z.string() }).nullable(),
   parent: z.object({ runId: z.string(), stageId: z.string() }).nullable(),
   stages: z.array(stageViewSchema),
