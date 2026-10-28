@@ -30,7 +30,7 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; local?: boolean }): Promise<{ agentId: string; workspaceId?: string | null }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; local?: boolean; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
@@ -70,7 +70,7 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean };
 }
 
 export interface PostSettings {
@@ -656,6 +656,7 @@ export class Engine {
         this.log(run, "sent", id, `to ${target}${reuse ? ` (reuse of ${reuse})` : ""}`);
       } else {
         const replaced = !!(reuse ? run.stages[reuse]?.agentId : st.agentId);
+        const share = !!this.ports.settings().shareWorkspace && def.workspace === "run";
         const spawned = await this.ports.spawn({
           idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}`,
           role: def.role,
@@ -663,6 +664,7 @@ export class Engine {
           title: `${run.blueprint} · ${id} · ${run.vars.ticket || run.id}`,
           workspaceTitle: workspaceTitle(def.role, run.vars, `${run.blueprint} ${run.id}`),
           cwd: def.cwd ? this.r(run, def.cwd) : this.ports.settings().defaultCwd,
+          joinWorkspaceId: share ? (run.sharedWorkspaceId ?? undefined) : undefined,
           labels: {
             "paseo.factory": "1",
             "paseo.factory.blueprint": run.blueprint,
@@ -674,6 +676,7 @@ export class Engine {
         });
         st.agentId = spawned.agentId;
         this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
+        if (share && spawned.workspaceId) run.sharedWorkspaceId = spawned.workspaceId;
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
       }
     } catch (error) {
@@ -996,6 +999,7 @@ export class Engine {
       kind: "agent",
       role: def.role,
       agent: "new",
+      workspace: "new",
       prompt: `Call the MCP tool \`${def.tool}\` exactly once with these arguments, and nothing else:\n${JSON.stringify(args, null, 2)}\nThen call blueprint_verdict with verdict "ok" (summary: the tool's answer) or "error" (summary: the error).`,
       verdicts: ["ok", "error"],
       max_attempts: 2,

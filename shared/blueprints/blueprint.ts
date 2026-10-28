@@ -42,6 +42,11 @@ export const agentStageSchema = z.strictObject({
   /** Failed turns (provider or infrastructure errors) retried without using an attempt. */
   flake_retries: z.number().int().min(0).default(0),
   cwd: z.string().optional(),
+  /**
+   * "run": with the Blueprints setting `shareWorkspace` on, the worker joins the run's shared workspace (pod) instead of getting its own.
+   * For the stages that own the code one after the other (investigate, implement, babysit); QA stays "new" for an independent checkout.
+   */
+  workspace: z.enum(["new", "run"]).default("new"),
   /** "pr": give the worker the GitHub facts of the PRs in `pr_urls_from`, and check its verdicts against them. */
   facts: z.enum(["pr"]).optional(),
   /** The stage whose `data.pr_urls` is the PR set. */
