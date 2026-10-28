@@ -10,6 +10,9 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 | Warden | Warden | Pings agents that go quiet; supervises subagents | `warden_register`, `_register_subagent`, `_update`, `_done`, `_list` |
 | Inbox | Inbox | Multiple-choice questions and approvals for the human (2 to 4 options, an open "Other" always added) | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
 
+Inbox setting `notifyMailTo` (default empty = off; e.g. `@assistant`): one short mail per NEW item of any asker (id, asker, kind, option labels, first 300 chars of the question; never the context), once per item, persisted. Blueprint-gate items are skipped while blueprints `events.mailTo` is set (the run's "waiting" mail already names the item).
+
+
 There is no data migration. Setting `importLegacyState` (off by default) copies the state file of the old stand-alone plugin (`agents-leases`, `agents-warden`, `agents-inbox`) once, for a module that has no Factory state yet.
 
 ## Supervisor
