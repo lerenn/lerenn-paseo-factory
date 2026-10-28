@@ -84,6 +84,15 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
       },
     },
     {
+      name: "blueprint_waiting",
+      description:
+        "Say your stage waits on a person or an outside system (for example \"waiting for sjourdan's review on org/repo#12\") while you keep watching it with events_subscribe. The run shows it as waiting, not stalled, with no warning and no Inbox item. Then end your turn; give the verdict when it is over.",
+      input: z.object({ reason: z.string().min(3).max(300) }),
+      run(input, ctx) {
+        return { ok: true, ...engine.workerWaiting(ctx.callerId, input.reason) };
+      },
+    },
+    {
       name: "blueprint_verdict",
       description:
         "Give the verdict of your stage; it picks the next stage. For a stage that produced pull requests, put them in data.pr_urls (checked on GitHub). Call it once, then stop.",
@@ -176,6 +185,6 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
 
 export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume", "blueprint_suspend"];
 /** What a stage worker needs. */
-export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status"];
+export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status", "blueprint_waiting"];
 
 export { stageVerdicts };

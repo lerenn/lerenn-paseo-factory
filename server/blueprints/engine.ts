@@ -1099,6 +1099,22 @@ export class Engine {
   }
 
   /** A worker's verdict. The caller must be the stage's current worker. */
+  /**
+   * A worker says its stage is waiting on a person or an outside system (a review, a merge queue) and that it watches for it:
+   * the run shows `waitingFor` and is not "stalled" while it waits. Cleared by the next verdict or transition. Human decision c11d3b3e.
+   */
+  workerWaiting(callerId: string, reason: string): { stage: string } {
+    const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === callerId && r.stages[r.stage].status === "running");
+    if (!run) throw new UsageError("You are not the worker of a running stage.");
+    const text = clip(reason.trim() || "waiting", 300);
+    if (run.waitingFor !== text) {
+      run.waitingFor = text;
+      this.log(run, "worker_waiting", run.stage, text);
+      this.store.save();
+    }
+    return { stage: run.stage! };
+  }
+
   async verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {
     const held = this.store.all().find((r) => r.status === "suspended" && (!input.run || r.id === input.run) && r.stage && r.stages[r.stage]?.agentId === callerId);
     if (held) throw new UsageError(`Run ${held.id} is suspended${held.suspended ? ` (${held.suspended.reason})` : ""}: your verdict is not taken until it is resumed. Stop now; you are woken on resume.`);
