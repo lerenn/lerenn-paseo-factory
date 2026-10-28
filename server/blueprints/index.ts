@@ -1,3 +1,4 @@
+import { agentlessWorkspaces } from "./orphans";
 import path from "node:path";
 import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
@@ -58,6 +59,8 @@ function describe({ blueprint, text, source }: { blueprint: Blueprint; text: str
   };
 }
 
+const ORPHAN_SWEEP_MS = 10 * 60_000;
+
 export function startBlueprints(host: FactoryHost) {
   const { server } = host;
   const settings = server.registerSettings(blueprintsSettings);
@@ -67,7 +70,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true, orphanSweep: true } } as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
@@ -329,12 +332,46 @@ export function startBlueprints(host: FactoryHost) {
   });
   host.whenPaseo(() => void ready.then(() => engine.resumeAll()).catch((e) => console.error("blueprints: resume failed", e)));
 
+  // The orphan sweep (every 10 minutes): workers no live stage refers to, then agentless Factory workspaces.
+  let sweptAt = 0;
+  let agentless = new Set<string>();
+  const sweep = async () => {
+    if (cfg().janitor.orphanSweep === false || store.suspended() || Date.now() - sweptAt < ORPHAN_SWEEP_MS) return;
+    sweptAt = Date.now();
+    const archived = await engine.sweepOrphans();
+    const [{ entries: agents }, { entries: workspaces }] = await Promise.all([listAgents(host.paseo), host.paseo.workspaces.list()]);
+    const live = new Set((agents as { agent: { workspaceId?: string | null; archivedAt?: string | null; status?: string } }[]).filter(({ agent: a }) => !a.archivedAt && a.status !== "closed" && a.workspaceId).map(({ agent: a }) => a.workspaceId!));
+    // never the PM: it may live in a local checkout, which is the user's
+    const roles = [...new Set(store.all().flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.role)))].filter((r) => r !== cfg().pmRole && r !== "pm");
+    const found = agentlessWorkspaces(workspaces as never, live, roles, agentless);
+    agentless = found.seen;
+    for (const w of found.archive) {
+      const title = (w.title || w.name || "").trim();
+      try {
+        await ports.archiveWorkspace!(w.id);
+      } catch (error) {
+        console.error(`blueprints: orphan sweep could not archive workspace ${w.id}`, error);
+        continue;
+      }
+      agentless.delete(w.id);
+      archived.push(w.id);
+      const run = store.all().find((r) => r.vars.ticket && title.includes(r.vars.ticket));
+      if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
+      console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
+    }
+    if (archived.length) {
+      store.save();
+      console.log(`blueprints: orphan sweep archived ${archived.length}: ${archived.join(", ")}`);
+    }
+  };
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   const loop = async () => {
     try {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
+      if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
     }

@@ -816,10 +816,10 @@ export class Engine {
    * suspended pods. Kept when the run's shared workspace is still in use, another live agent is in it, a stage that is still to run
    * holds one of the agents in it, or its worktree is not sure to be clean.
    */
-  private async archiveWorkspaceOf(run: Run, agentId: string): Promise<void> {
+  private async archiveWorkspaceOf(run: Run, agentId: string, onKeep?: (ws: string, why: string) => void): Promise<void> {
     const ws = run.agents?.[agentId]?.workspaceId;
     if (!ws || run.agents?.[agentId]?.workspaceArchived || !this.ports.archiveWorkspace) return;
-    const keep = (why: string) => this.log(run, "workspace_kept", null, `${ws} of ${agentId}: ${why}`);
+    const keep = (why: string) => (onKeep ? onKeep(ws, why) : this.log(run, "workspace_kept", null, `${ws} of ${agentId}: ${why}`));
     try {
       if (run.sharedWorkspaceId === ws && run.endedAt === null) return keep("shared by the run's later stages");
       const inUse = Object.entries(run.agents ?? {}).some(
@@ -858,6 +858,52 @@ export class Engine {
       if (state !== "gone") await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
       await this.archiveWorkspaceOf(run, id);
     }
+  }
+
+  /** Workspaces the orphan sweep kept, and until when it leaves them alone (a worktree probe can wake a pod). */
+  private orphanKept = new Map<string, number>();
+
+  /**
+   * The orphan sweep (every 10 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
+   * run refers to any more (replaced, superseded, or of a run that ended more than an hour ago), and their workspaces. The
+   * PM, every stage's current agent (a later stage may reuse it) and a mid-turn worker are kept; so is a workspace with
+   * work that is not pushed. Each archive is logged in the run's history. Returns what it archived.
+   */
+  async sweepOrphans(): Promise<string[]> {
+    const now = this.ports.now();
+    const done: string[] = [];
+    for (const run of this.store.all()) {
+      if (run.endedAt !== null && now - run.endedAt < ORPHAN_ENDED_GRACE_MS) continue; // the retro and the post janitor go first
+      const current = new Set<string>();
+      if (run.pmAgentId) current.add(run.pmAgentId);
+      if (run.endedAt === null) for (const st of Object.values(run.stages)) if (st.agentId) current.add(st.agentId);
+      for (const [id, a] of Object.entries(run.agents ?? {})) {
+        if (current.has(id) || a.workspaceArchived || run.retiring?.includes(id)) continue;
+        if (a.workspaceId && (this.orphanKept.get(a.workspaceId) ?? 0) > now) continue;
+        const state = await this.ports.agentState(id).catch(() => "gone" as const);
+        if (state === "running") continue;
+        if (state !== "gone") {
+          try {
+            await this.ports.archive(id);
+          } catch (error) {
+            console.error(`blueprints: orphan sweep could not archive ${id}`, error);
+            continue;
+          }
+          this.log(run, "orphan_archived", a.stage, `${id} (${a.role}): no stage of the run refers to it`);
+          done.push(id);
+        }
+        if (!a.workspaceId) continue;
+        let kept = false;
+        await this.archiveWorkspaceOf(run, id, (ws, why) => {
+          kept = true;
+          this.orphanKept.set(ws, now + ORPHAN_KEEP_MS);
+          this.log(run, "workspace_kept", null, `${ws} of ${id}: ${why} (orphan sweep; looked at again in ${ORPHAN_KEEP_MS / 3_600_000} h)`);
+        });
+        if (!kept && run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
+      }
+      this.store.save();
+    }
+    return done;
   }
 
   /** Archive the retired workers of `agentId`'s run whose turn is over (`agentId` only, or all of them when absent). */
@@ -1621,3 +1667,6 @@ export class Engine {
 }
 
 export { TERMINALS };
+
+const ORPHAN_ENDED_GRACE_MS = 3_600_000;
+const ORPHAN_KEEP_MS = 6 * 3_600_000;

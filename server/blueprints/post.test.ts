@@ -475,7 +475,7 @@ describe("settings", () => {
     const s = settingsSchema.parse({});
     expect(s.events.mailTo).toBe("@assistant");
     expect(s.retro).toMatchObject({ enabled: true, mailTo: "@user", role: "retro", skipTrivial: true });
-    expect(s.janitor).toEqual({ enabled: false, dryRun: true });
+    expect(s.janitor).toEqual({ enabled: false, dryRun: true, orphanSweep: true });
     expect(settingsSchema.parse({ janitor: { enabled: true } }).janitor.dryRun).toBe(true);
   });
 });

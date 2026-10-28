@@ -196,3 +196,37 @@ describe("quota refusals", () => {
     expect(t.asked).toEqual([]);
   });
 });
+
+describe("orphan sweep", () => {
+  it("archives a worker no stage refers to, keeps the current one, and leaves a dirty workspace alone for hours", async () => {
+    const t = setup();
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    (live.agents ??= {})["old-1"] = { role: "implementer", stage: "build", workspaceId: "ws-old" };
+    t.states.set("old-1", "idle");
+    expect(await t.engine.sweepOrphans()).toEqual(["old-1", "ws-old"]);
+    expect(t.archived).toEqual(["old-1"]);
+    expect(t.archivedWs).toEqual(["ws-old"]);
+    expect(t.engine.require(run.id).history.some((h) => h.event === "orphan_archived")).toBe(true);
+    expect(await t.engine.sweepOrphans()).toEqual([]); // the current worker (agent-1) stays
+  });
+
+  it("keeps a mid-turn orphan and a workspace with unpushed work, without probing it again on every sweep", async () => {
+    const t = setup({ probe: "dirty" });
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    live.agents!["busy"] = { role: "qa", stage: "check", workspaceId: "ws-busy" };
+    live.agents!["dirty"] = { role: "qa", stage: "check", workspaceId: "ws-dirty" };
+    t.states.set("busy", "running");
+    t.states.set("dirty", "idle");
+    await t.engine.sweepOrphans();
+    expect(t.archived).toEqual(["dirty"]);
+    expect(t.archivedWs).toEqual([]);
+    const kept = () => t.engine.require(run.id).history.filter((h) => h.event === "workspace_kept").length;
+    const before = kept();
+    await t.engine.sweepOrphans();
+    expect(kept()).toBe(before);
+  });
+});
