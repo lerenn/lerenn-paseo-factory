@@ -1,11 +1,13 @@
 import { z } from "zod";
 import type { HostTool } from "../tools";
 import { UsageError } from "../tools";
-import { SUPERVISOR_LABEL, type Supervisor } from "./manager";
+import { DISABLED_NOTE, SUPERVISOR_LABEL, type Supervisor } from "./manager";
 
 const supervisorOnly = { key: SUPERVISOR_LABEL, value: "1" };
 
 export const INSTRUCTIONS = `The Factory Supervisor is the agent that watches the Factory itself (stuck runs with no PM, spawn failures, leases, extensions, config errors).
+
+If it is disabled (setting supervisor.enabled=false) supervisor_ask and supervisor_status say so and the Assistant (@assistant) watches the Factory.
 
 It runs on demand: it is archived when the Factory is idle and created again when something needs it (the first answer then takes longer). Anyone can reach it: supervisor_ask(question) relays your question and returns its answer (or a queued/pending request id to poll with supervisor_ask_status); supervisor_status shows its state and stable agent id, which you can also steer directly with a normal agent message.
 
@@ -39,6 +41,7 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
       input: z.object({}),
       async run() {
         const s = await supervisor.status();
+        if (s.state === "disabled") return { state: "disabled", note: DISABLED_NOTE };
         return { agent_id: s.agentId, state: s.state, error: s.error, started_at: s.startedAt, watching: s.issues.map((i) => i.text), last_digest_at: s.lastDigestAt, extension_restarts: s.restarts, flags: s.flags.map((f) => f.text), queued: s.queued, busy: s.busy.reasons };
       },
     },

@@ -1,5 +1,6 @@
 export function supervisorStateLabel(state: string | undefined, hasIncarnations: boolean): string {
   if (!state) return "…";
+  if (state === "disabled") return "Disabled (the Assistant watches the Factory)";
   if (state === "waking") return "Waking…";
   if (state === "archived" || (state === "not-started" && hasIncarnations)) return "Archived (idle)";
   if (state === "running" || state === "idle") return "Running";

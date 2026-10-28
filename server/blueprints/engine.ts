@@ -95,6 +95,8 @@ export interface Observer {
   finished(run: Run): void;
   retroEnded?(agentId: string): void;
   tick?(): void;
+  /** A Factory-level notice (not tied to a run) mailed to events.mailTo; the caller dedupes. */
+  notice?(subject: string, body: string): void;
 }
 
 const APPROVAL = [
