@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary, isQuotaError, quotaBackoffMs, SESSION_GONE } from "./flake";
+import { flakeReason, flakeSummary, isBusyError, isQuotaError, MAX_BUSY_RETRIES, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -45,8 +45,8 @@ export interface Ports {
   suspendWorkspace?(workspaceId: string, force: boolean): Promise<{ ok: boolean; message?: string }>;
   /** Wake a suspended pod ahead of the prompt that would wake it anyway. */
   wakeWorkspace?(workspaceId: string): Promise<void>;
-  /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
-  worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
+  /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
+  trace?(workspaceId: string): Promise<string>;
   /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
   liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
@@ -813,38 +813,43 @@ export class Engine {
 
   /**
    * Archive the workspace (pod, volume, Sandbox object) of a worker that was just archived, or the Kubernetes quota fills up with
-   * suspended pods. Kept when the run's shared workspace is still in use, another live agent is in it, a stage that is still to run
-   * holds one of the agents in it, or its worktree is not sure to be clean.
+   * suspended pods. Dirty or unpushed work does not keep it (human rule 2026-10-28: "force the archive of workspace after the
+   * deletion of the agent, even if there is still code"); the history records `git status --short` when the pod answers in 5 s.
+   * Only a workspace that is still in use is left (the run's shared workspace while the run goes, an agent of a live stage or
+   * another live agent in it): the orphan sweep archives it once it is not.
    */
-  private async archiveWorkspaceOf(run: Run, agentId: string, onKeep?: (ws: string, why: string) => void): Promise<void> {
+  private async archiveWorkspaceOf(run: Run, agentId: string): Promise<void> {
     const ws = run.agents?.[agentId]?.workspaceId;
     if (!ws || run.agents?.[agentId]?.workspaceArchived || !this.ports.archiveWorkspace) return;
-    const keep = (why: string) => (onKeep ? onKeep(ws, why) : this.log(run, "workspace_kept", null, `${ws} of ${agentId}: ${why}`));
     try {
-      if (run.sharedWorkspaceId === ws && run.endedAt === null) return keep("shared by the run's later stages");
+      if (run.sharedWorkspaceId === ws && run.endedAt === null) return;
       const inUse = Object.entries(run.agents ?? {}).some(
         ([id, a]) => id !== agentId && a.workspaceId === ws && (run.pmAgentId === id || Object.values(run.stages).some((st) => st.agentId === id && (st.status === "running" || st.status === "entering" || st.status === "waiting"))),
       );
-      if (inUse) return keep("an agent of a live stage is in it");
+      if (inUse) return;
       if (this.ports.liveAgentsIn) {
         const live = (await this.ports.liveAgentsIn(ws))?.filter((id) => id !== agentId);
-        if (!live) return keep("could not list its agents");
-        if (live.length) return keep(`${live.length} live agent(s) remain`);
+        if (!live || live.length) return;
       }
-      if (this.ports.worktree) {
-        let probe = await this.ports.worktree(ws);
-        // A retired worker's pod is often suspended by the time its turn ends, so the check gets no answer: wake it and look again.
-        if (probe.state === "unknown" && this.ports.wakeWorkspace) {
-          await this.ports.wakeWorkspace(ws).catch((e) => console.error(`blueprints: waking ${ws} for its worktree check failed`, e));
-          probe = await this.ports.worktree(ws);
-        }
-        if (probe.state !== "clean") return keep(probe.state === "unknown" ? `${probe.detail} (checked again by the orphan sweep)` : probe.detail);
-      }
+      const trace = await this.traceOf(ws);
       await this.ports.archiveWorkspace(ws);
       for (const a of Object.values(run.agents ?? {})) if (a.workspaceId === ws) a.workspaceArchived = true;
-      this.log(run, "workspace_archived", null, `${ws} of ${agentId}`);
+      this.log(run, "workspace_archived", null, `${ws} of ${agentId} (worktree: ${trace})`);
     } catch (error) {
-      keep(`archive failed: ${(error as Error).message}`);
+      console.error(`blueprints: archiving workspace ${ws} of ${agentId} failed (the orphan sweep retries)`, error);
+    }
+  }
+
+  /** `git status --short` for the history: 5 s at most, whatever the port does. */
+  private async traceOf(ws: string): Promise<string> {
+    if (!this.ports.trace) return "not traced";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([this.ports.trace(ws), new Promise<string>((resolve) => (timer = setTimeout(() => resolve("no answer (5 s)"), 5_000)))]);
+    } catch {
+      return "no answer";
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -865,28 +870,21 @@ export class Engine {
     }
   }
 
-  /** Workspaces the orphan sweep kept, and until when it leaves them alone (a worktree probe can wake a pod). */
-  private orphanKept = new Map<string, number>();
-  /** How many sweeps found no answer from a workspace's worktree; after 3 it is looked at again in hours, like real work. */
-  private orphanNoAnswer = new Map<string, number>();
-
   /**
-   * The orphan sweep (every 10 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
-   * run refers to any more (replaced, superseded, or of a run that ended more than an hour ago), and their workspaces. The
-   * PM, every stage's current agent (a later stage may reuse it) and a mid-turn worker are kept; so is a workspace with
-   * work that is not pushed. Each archive is logged in the run's history. Returns what it archived.
+   * The orphan sweep (every 5 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
+   * run refers to any more (replaced, superseded, or of a run that ended), and their workspaces, dirty or not. The PM, every
+   * active stage's current agent (a later stage may reuse it), a mid-turn worker and a retro still writing are left alone.
+   * Each archive is logged in the run's history. Returns what it archived.
    */
   async sweepOrphans(): Promise<string[]> {
-    const now = this.ports.now();
     const done: string[] = [];
     for (const run of this.store.all()) {
-      if (run.endedAt !== null && now - run.endedAt < ORPHAN_ENDED_GRACE_MS) continue; // the retro and the post janitor go first
       const current = new Set<string>();
       if (run.pmAgentId) current.add(run.pmAgentId);
       if (run.endedAt === null) for (const st of Object.values(run.stages)) if (st.agentId) current.add(st.agentId);
+      if (run.post?.phase === "retro" && run.post.retro?.agentId) current.add(run.post.retro.agentId);
       for (const [id, a] of Object.entries(run.agents ?? {})) {
         if (current.has(id) || a.workspaceArchived || run.retiring?.includes(id)) continue;
-        if (a.workspaceId && (this.orphanKept.get(a.workspaceId) ?? 0) > now) continue;
         const state = await this.ports.agentState(id).catch(() => "gone" as const);
         if (state === "running") continue;
         if (state !== "gone") {
@@ -900,17 +898,8 @@ export class Engine {
           done.push(id);
         }
         if (!a.workspaceId) continue;
-        let kept = false;
-        await this.archiveWorkspaceOf(run, id, (ws, why) => {
-          kept = true;
-          // real unpushed work is looked at again in hours; a check that got no answer at the next sweeps
-          const tries = /checked again by the orphan sweep|could not list/.test(why) ? (this.orphanNoAnswer.get(ws) ?? 0) + 1 : Infinity;
-          if (Number.isFinite(tries)) this.orphanNoAnswer.set(ws, tries);
-          const wait = tries < 3 ? 0 : ORPHAN_KEEP_MS;
-          this.orphanKept.set(ws, now + wait);
-          this.log(run, "workspace_kept", null, `${ws} of ${id}: ${why}${wait ? ` (orphan sweep; looked at again in ${ORPHAN_KEEP_MS / 3_600_000} h)` : ""}`);
-        });
-        if (!kept && run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
+        await this.archiveWorkspaceOf(run, id);
+        if (run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
       }
       this.store.save();
     }
@@ -1009,14 +998,17 @@ export class Engine {
         if (old && old !== spawned.agentId && (!reuse || opts.archiveOld)) await this.retire(run, id, old);
       }
     } catch (error) {
-      // No room in the namespace (quota on pods, sandboxes...): nothing is wrong with the stage, so no attempt is used and nobody is asked.
-      if (isQuotaError((error as Error).message)) {
+      // No room in the namespace (quota on pods, sandboxes...), or a daemon too loaded to answer a plugin hook in time: nothing is
+      // wrong with the stage, so no attempt is used and nobody is asked (a busy daemon only up to MAX_BUSY_RETRIES times).
+      const quota = isQuotaError((error as Error).message);
+      const busy = !quota && isBusyError((error as Error).message) && (st.quotaRetry?.n ?? 0) < MAX_BUSY_RETRIES;
+      if (quota || busy) {
         const n = (st.quotaRetry?.n ?? 0) + 1;
         const wait = quotaBackoffMs(n);
         if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
         st.quotaRetry = { n, at: this.ports.now() + wait, why, opts: { free: opts.free, fresh: opts.fresh, archiveOld: opts.archiveOld, attach: opts.attach } };
-        st.summary = `waiting for cluster quota (retry ${n} in ${Math.round(wait / 60_000)} min)`;
-        this.log(run, "quota_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
+        st.summary = `${quota ? "waiting for cluster quota" : "the daemon is busy"} (retry ${n} in ${Math.round(wait / 60_000)} min)`;
+        this.log(run, quota ? "quota_wait" : "busy_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
         this.store.save();
         return;
       }
@@ -1679,5 +1671,3 @@ export class Engine {
 
 export { TERMINALS };
 
-const ORPHAN_ENDED_GRACE_MS = 3_600_000;
-const ORPHAN_KEEP_MS = 6 * 3_600_000;

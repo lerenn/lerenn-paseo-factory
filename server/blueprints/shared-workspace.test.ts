@@ -71,9 +71,9 @@ function setup(share: boolean, probe: "clean" | "dirty" = "clean") {
     async archiveWorkspace(id) {
       archivedWs.push(id);
     },
-    async worktree(id) {
+    async trace(id) {
       probes.push(id);
-      return { state: probe, detail: "1 uncommitted file(s)" };
+      return probe === "dirty" ? "1 entries: M a.ts" : "clean";
     },
     ask: () => ({ itemId: "i" }),
     gate: () => null,
@@ -141,13 +141,12 @@ describe("shared workspace per run", () => {
     expect(t.archivedWs.sort()).toEqual(["ws-1", "ws-3", "ws-4"]);
   });
 
-  it("a dirty shared pod is kept with all its agents while QA's clean pod goes", async () => {
+  it("a dirty shared pod is archived with all its agents too", async () => {
     const t = setup(true);
-    t.ports.worktree = async (id) => (id === "ws-1" ? { state: "dirty", detail: "2 uncommitted file(s)" } : { state: "clean", detail: "clean" });
     await walk(t);
     await t.verdict("agent-5", "ready");
-    expect(t.archivedWs.sort()).toEqual(["ws-3", "ws-4"]);
-    expect(t.archived.sort()).toEqual(["agent-3", "agent-4"]);
+    expect(t.archivedWs.sort()).toEqual(["ws-1", "ws-3", "ws-4"]);
+    expect(t.archived.sort()).toEqual(["agent-1", "agent-2", "agent-3", "agent-4", "agent-5"]);
   });
 });
 

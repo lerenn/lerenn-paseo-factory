@@ -1,4 +1,5 @@
-import { agentlessWorkspaces } from "./orphans";
+import { AttentionNotifier, attentionPoints } from "./attention";
+import { agentlessWorkspaces, type ListedAgent, type ListedWorkspace } from "./orphans";
 import path from "node:path";
 import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
@@ -9,7 +10,7 @@ import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
-import { probeWorktree } from "./worktree";
+import { statusTrace } from "./worktree";
 import { suspendPod, wakePod } from "./pod-control";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
@@ -59,7 +60,7 @@ function describe({ blueprint, text, source }: { blueprint: Blueprint; text: str
   };
 }
 
-const ORPHAN_SWEEP_MS = 10 * 60_000;
+const ORPHAN_SWEEP_MS = 5 * 60_000;
 
 export function startBlueprints(host: FactoryHost) {
   const { server } = host;
@@ -115,9 +116,13 @@ export function startBlueprints(host: FactoryHost) {
     }
   };
 
+  /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
+  let spawning = 0;
   const ports: Ports = {
     now: Date.now,
     async spawn(o) {
+      spawning++;
+      try {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
       const role = await host.loadRole(o.role);
@@ -139,6 +144,9 @@ export function startBlueprints(host: FactoryHost) {
         return spawnAgent(host.paseo, runtime, input);
       });
       return { agentId, workspaceId };
+      } finally {
+        spawning--;
+      }
     },
     async send(agentId, text) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
@@ -163,7 +171,7 @@ export function startBlueprints(host: FactoryHost) {
       const result = await host.paseo.workspaces.archive(workspaceId);
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
-    worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId),
+    trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
     liveAgentsIn,
     suspendWorkspace: suspendPod,
     wakeWorkspace: wakePod,
@@ -309,7 +317,7 @@ export function startBlueprints(host: FactoryHost) {
         {
           workspaceOf: (id) => store.all().find((run) => run.agents?.[id])?.agents?.[id]?.workspaceId ?? null,
           liveAgentsIn,
-          worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId).catch((e: Error) => ({ state: "unknown" as const, detail: e.message })),
+          trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
           archiveWorkspace: ports.archiveWorkspace!,
           log: (line) => console.log(line),
         },
@@ -332,36 +340,57 @@ export function startBlueprints(host: FactoryHost) {
   });
   host.whenPaseo(() => void ready.then(() => engine.resumeAll()).catch((e) => console.error("blueprints: resume failed", e)));
 
-  // The orphan sweep (every 10 minutes): workers no live stage refers to, then agentless Factory workspaces.
+  // One mail per new attention point to the events address (human decision f45ab3ba).
+  const attention = new AttentionNotifier((process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "attention.json"), (p) =>
+    host.report(cfg().events.mailTo, { subject: p.subject, body: p.body, kind: "info" }),
+  );
+  const notify = async () => {
+    if (!cfg().events.mailTo?.trim() || store.suspended()) return;
+    const pending = host.enabled("inbox") && host.engines.inbox ? (host.engines.inbox as import("../inbox/engine").Engine).store.pending() : [];
+    await attention.tick(attentionPoints(store.all(), pending, Date.now()));
+  };
+
+  // The orphan sweep (every 5 minutes, human rule 2026-10-28): workers no live stage refers to, then agentless workspaces.
   let sweptAt = 0;
-  let agentless = new Set<string>();
+  let sweeping = false;
   const sweep = async () => {
-    if (cfg().janitor.orphanSweep === false || store.suspended() || Date.now() - sweptAt < ORPHAN_SWEEP_MS) return;
+    if (cfg().janitor.orphanSweep === false || store.suspended() || sweeping || spawning > 0 || Date.now() - sweptAt < ORPHAN_SWEEP_MS) return;
+    sweeping = true;
     sweptAt = Date.now();
-    const archived = await engine.sweepOrphans();
-    const [{ entries: agents }, { entries: workspaces }] = await Promise.all([listAgents(host.paseo), host.paseo.workspaces.list()]);
-    const live = new Set((agents as { agent: { workspaceId?: string | null; archivedAt?: string | null; status?: string } }[]).filter(({ agent: a }) => !a.archivedAt && a.status !== "closed" && a.workspaceId).map(({ agent: a }) => a.workspaceId!));
-    // never the PM: it may live in a local checkout, which is the user's
-    const roles = [...new Set(store.all().flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.role)))].filter((r) => r !== cfg().pmRole && r !== "pm");
-    const found = agentlessWorkspaces(workspaces as never, live, roles, agentless);
-    agentless = found.seen;
-    for (const w of found.archive) {
-      const title = (w.title || w.name || "").trim();
-      try {
-        await ports.archiveWorkspace!(w.id);
-      } catch (error) {
-        console.error(`blueprints: orphan sweep could not archive workspace ${w.id}`, error);
-        continue;
+    try {
+      const archived = await engine.sweepOrphans();
+      const [{ entries: agents }, { entries: workspaces }] = await Promise.all([
+        host.paseo.agents.list({ filter: { includeArchived: false, includeBackground: true } } as never) as unknown as Promise<{ entries: { agent: ListedAgent }[] }>,
+        host.paseo.workspaces.list() as unknown as Promise<{ entries: ListedWorkspace[] }>,
+      ]);
+      const runs = store.all();
+      const known = new Set(runs.flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.workspaceId).filter((id): id is string => !!id)));
+      const defaultRoot = cfg().defaultCwd ? path.resolve(cfg().defaultCwd!) : null;
+      const found = agentlessWorkspaces(workspaces, agents.map((e) => e.agent), {
+        projects: new Set(workspaces.filter((w) => known.has(w.id) && w.projectId).map((w) => w.projectId!)),
+        roots: new Set(defaultRoot ? [defaultRoot] : []),
+        pmAgentIds: new Set(runs.map((r) => r.pmAgentId).filter((id): id is string => !!id)),
+        protect: new Set(runs.filter((r) => r.endedAt === null && r.sharedWorkspaceId).map((r) => r.sharedWorkspaceId!)),
+      });
+      for (const w of found) {
+        const title = (w.title || w.name || "").trim();
+        try {
+          await ports.archiveWorkspace!(w.id);
+        } catch (error) {
+          console.error(`blueprints: orphan sweep could not archive workspace ${w.id}`, error);
+          continue;
+        }
+        archived.push(w.id);
+        const run = runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => r.vars.ticket && title.includes(r.vars.ticket));
+        if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
+        console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
       }
-      agentless.delete(w.id);
-      archived.push(w.id);
-      const run = store.all().find((r) => r.vars.ticket && title.includes(r.vars.ticket));
-      if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
-      console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
-    }
-    if (archived.length) {
-      store.save();
-      console.log(`blueprints: orphan sweep archived ${archived.length}: ${archived.join(", ")}`);
+      if (archived.length) {
+        store.save();
+        console.log(`blueprints: orphan sweep archived ${archived.length}: ${archived.join(", ")}`);
+      }
+    } finally {
+      sweeping = false;
     }
   };
 
@@ -371,6 +400,7 @@ export function startBlueprints(host: FactoryHost) {
     try {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
+      if (host.enabled("blueprints") && host.hasPaseo()) await notify();
       if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
