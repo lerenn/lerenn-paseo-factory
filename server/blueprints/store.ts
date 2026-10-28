@@ -13,6 +13,8 @@ export interface StageState {
   /** Extra attempts and runs granted by the PM. */
   extra: number;
   flakes: number;
+  /** Reasons of every infrastructure failure of the current entry (retried or not). Absent in older saved runs. */
+  flakeReasons?: string[];
   agentId: string | null;
   wardenTask: string | null;
   verdict: string | null;

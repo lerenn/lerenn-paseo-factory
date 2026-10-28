@@ -52,7 +52,7 @@ role = "implementer"            # PASEO_AGENT_ROLE of the worker
 prompt = "Implement {{ticket}} ... {{stage.investigate.summary}}"
 max_attempts = 3                # tries per entry; a turn that ends without a verdict uses one
 max_runs = 50                   # entries over the run (loops)
-flake_retries = 1               # failed turns retried for free
+flake_retries = 1               # free retries; also raises the infra-flake bound (setting `flakeRetries`, default 3); any failed turn is retried for free up to it
 facts = "pr"                    # show GitHub facts; data.pr_urls is checked on GitHub
 [stage.on]
 done = "qa"                     # verdict -> next stage ("done" and "failed" end the run)
@@ -151,6 +151,10 @@ Settings of the Blueprints module (`events`, `retro`, `janitor`):
 - **Retro** (`retro.*`): when any run ends (done, failed or aborted) the Factory computes a digest of its history (timeline, attempts and retries, gate waits, human versus agent time, review rounds, flakes such as exit 137 or pod start timeouts, spend) and starts a small separate agent (role `retro`, default Haiku, runs on the daemon, no repository) that mails `retro.mailTo` (default `@user`) one short retrospective. A run that went straight through (nothing retried, nobody judged, under 15 minutes or a dependency bump) gets a three-line mail built without an agent (`retro.skipTrivial`). If the agent cannot start, the digest itself is mailed. `retro.maxUsd` flags a retro that cost more (it cannot cut a turn short); `retro.timeoutMinutes` gives up on a retro that never ends.
 - **Janitor** (`janitor.enabled`, `janitor.dryRun`): after the retro, archive the run's workers (every agent the Factory spawned for it) and their workspaces (pods). Each workspace is first inspected with a short terminal running `git status --porcelain` and `git log HEAD --branches --not --remotes`; a workspace with uncommitted files, unpushed commits, or whose check did not answer is KEPT and reported in the retro. With `dryRun` (the default) nothing is archived and the retro says what would be. Replaces `archiveOnFinish` when enabled.
 - `{{from.stage}}`, `{{from.verdict}}`, `{{from.summary}}` in blueprint templates are the stage whose edge led to the current one (the `ask-blocked` gate uses them).
+
+## Infrastructure flakes (`flakeRetries`)
+
+A worker that dies of infrastructure (exit 137/143, OOMKilled, "could not start the pod", "could not write bridge.mjs", "container not found", "channel ended", pod not ready, pod evicted/replaced, worker gone) is not a failed attempt: the Factory starts a fresh worker and pod without using `max_attempts`, up to `flakeRetries` times per stage entry (Blueprints setting, default 3; a stage's own `flake_retries` raises it). Each one is a `flake_retry` event with the matched reason. Past the bound they count as attempts again; when the stage then exhausts, the reason ends with `infra flakes ×N: <reasons>` (PM message, `exhausted` event mail), and the retro digest has an `Infra flakes retried for free` line. A turn that ends without a verdict, a test failure or a normal verdict is never a flake.
 
 ## One workspace per run (`shareWorkspace`)
 

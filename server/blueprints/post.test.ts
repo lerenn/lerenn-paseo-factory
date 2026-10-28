@@ -172,6 +172,20 @@ describe("event mails", () => {
     expect(t.engine.require(run.id).status).toBe("failed");
   });
 
+  it("an exhausted stage mail and the digest carry the infra flakes", async () => {
+    const t = setup();
+    const run = await t.start();
+    for (const i of [1, 2, 3, 4]) {
+      await t.engine.turnEnded(`agent-${i}`, { kind: "failed", message: "Claude Code process exited with code 137" });
+      await t.settle();
+    }
+    const events = t.mails.filter((m) => m.to === "@assistant");
+    expect(events.map((m) => m.subject)).toEqual([`Factory ${run.id} exhausted · think`]);
+    expect(events[0].body).toContain("infra flakes ×4: OOMKilled / exit 137");
+    const digest = buildDigest(t.engine.require(run.id), { now: 1_000_000, spend: { costUsd: 0, turns: 0 }, janitor: [] });
+    expect(digest).toMatch(/Infra flakes retried for free: 3 \(OOMKilled \/ exit 137 ×3\)/);
+  });
+
   it("an aborted run sends one aborted mail; a second abort does not repeat it", async () => {
     const t = setup();
     const run = await t.start();

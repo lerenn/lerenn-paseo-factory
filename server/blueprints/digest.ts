@@ -1,3 +1,4 @@
+import { flakeReason } from "./flake";
 import type { HistoryEvent, Run } from "./store";
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -96,6 +97,15 @@ export function buildDigest(run: Run, o: DigestOptions): string {
   if (rounds.size) lines.push("Review/QA rounds: " + [...rounds].map(([k, n]) => `${k} ×${n}`).join(", "));
   const retries = run.history.filter((h) => h.event === "turn_ended" || h.event === "flake_retry").length;
   if (retries) lines.push(`Retries: ${retries} (nudges after a turn without a verdict, flake retries)`);
+  const infra = run.history.filter((h) => h.event === "flake_retry");
+  if (infra.length) {
+    const byReason = new Map<string, number>();
+    for (const h of infra) {
+      const r = flakeReason(h.detail) ?? "other";
+      byReason.set(r, (byReason.get(r) ?? 0) + 1);
+    }
+    lines.push(`Infra flakes retried for free: ${infra.length} (${[...byReason].map(([r, n]) => `${r} ×${n}`).join(", ")})`);
+  }
   const flakes = flakesOf(run);
   if (flakes.length) lines.push("Flakes: " + flakes.slice(0, 8).join("; "));
   if (o.janitor.length) lines.push("", "Janitor:", ...o.janitor.map((l) => `- ${l}`));
