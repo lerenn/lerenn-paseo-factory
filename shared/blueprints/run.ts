@@ -36,6 +36,8 @@ export const runViewSchema = z.object({
   /** Set while the run is suspended (see blueprint_suspend). */
   suspended: z.object({ reason: z.string(), since: z.number(), by: z.string(), pods: z.array(z.string()) }).nullable(),
   pmPending: z.object({ stage: z.string(), reason: z.string() }).nullable(),
+  /** Open inbox items escalating this run to the human (stuck or setup); the sidebar badge counts those items, not the run. */
+  escalations: z.array(z.string()).default([]),
   parent: z.object({ runId: z.string(), stageId: z.string() }).nullable(),
   stages: z.array(stageViewSchema),
   history: z.array(z.object({ at: z.number(), stage: z.string().nullable(), event: z.string(), detail: z.string().nullable() })).max(200),

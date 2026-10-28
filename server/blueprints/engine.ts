@@ -1612,6 +1612,7 @@ export class Engine {
       waitingFor: run.waitingFor,
       suspended: run.suspended ? { reason: run.suspended.reason, since: run.suspended.at, by: run.suspended.by, pods: run.suspended.pods } : null,
       pmPending: run.pm.pending,
+      escalations: Object.keys(run.escalations ?? {}),
       parent: run.parent,
       stages,
       history: run.history.slice(-200),
