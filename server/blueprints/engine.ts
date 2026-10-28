@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary, SESSION_GONE } from "./flake";
+import { flakeReason, flakeSummary, isQuotaError, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -47,6 +47,8 @@ export interface Ports {
   wakeWorkspace?(workspaceId: string): Promise<void>;
   /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
   worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
+  /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
+  liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
   spend?(runId: string): { costUsd: number; turns: number } | null;
   spendOfAgent?(agentId: string): number;
@@ -317,12 +319,15 @@ export class Engine {
     if (target === "done") return this.finish(run, "done", null);
     if (target === "failed") return this.finish(run, "failed", `stage ${from}: ${why}`);
     run.prev = from;
+    const left = run.stages[from]?.agentId;
     run.stage = target;
     run.stages[target] ??= freshStage();
     run.stages[target].status = "entering";
     run.status = "running";
     run.waitingFor = null;
     this.store.save();
+    // The stage is done and the run moved on: its worker (and workspace) go, unless a stage that may still run reuses it.
+    if (left && from !== target && (this.stageDef(run, from).kind ?? "agent") === "agent" && !run.def.stage.some((s) => "agent" in s && s.agent === `reuse:${from}`)) await this.retire(run, from, left);
     await this.enter(run, target);
   }
 
@@ -360,6 +365,7 @@ export class Engine {
     if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
     // The janitor (after the retro) replaces the blunt archive-everything switch.
     if (!this.ports.post?.().janitor.enabled && this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
+    if (!this.ports.post?.().janitor.enabled) void this.retireWorkers(run).catch((e) => console.error(`blueprints: retiring workers of ${run.id} failed`, e));
     try {
       this.observer.finished(run);
     } catch (error) {
@@ -801,7 +807,57 @@ export class Engine {
       this.store.save();
       return;
     }
-    await this.ports.archive(agentId).catch((e) => console.error(`blueprints: archiving ${agentId} failed`, e));
+    if (state !== "gone") await this.ports.archive(agentId).catch((e) => console.error(`blueprints: archiving ${agentId} failed`, e));
+    await this.archiveWorkspaceOf(run, agentId);
+  }
+
+  /**
+   * Archive the workspace (pod, volume, Sandbox object) of a worker that was just archived, or the Kubernetes quota fills up with
+   * suspended pods. Kept when the run's shared workspace is still in use, another live agent is in it, a stage that is still to run
+   * holds one of the agents in it, or its worktree is not sure to be clean.
+   */
+  private async archiveWorkspaceOf(run: Run, agentId: string): Promise<void> {
+    const ws = run.agents?.[agentId]?.workspaceId;
+    if (!ws || run.agents?.[agentId]?.workspaceArchived || !this.ports.archiveWorkspace) return;
+    const keep = (why: string) => this.log(run, "workspace_kept", null, `${ws} of ${agentId}: ${why}`);
+    try {
+      if (run.sharedWorkspaceId === ws && run.endedAt === null) return keep("shared by the run's later stages");
+      const inUse = Object.entries(run.agents ?? {}).some(
+        ([id, a]) => id !== agentId && a.workspaceId === ws && (run.pmAgentId === id || Object.values(run.stages).some((st) => st.agentId === id && (st.status === "running" || st.status === "entering" || st.status === "waiting"))),
+      );
+      if (inUse) return keep("an agent of a live stage is in it");
+      if (this.ports.liveAgentsIn) {
+        const live = (await this.ports.liveAgentsIn(ws))?.filter((id) => id !== agentId);
+        if (!live) return keep("could not list its agents");
+        if (live.length) return keep(`${live.length} live agent(s) remain`);
+      }
+      if (this.ports.worktree) {
+        const probe = await this.ports.worktree(ws);
+        if (probe.state !== "clean") return keep(probe.detail);
+      }
+      await this.ports.archiveWorkspace(ws);
+      for (const a of Object.values(run.agents ?? {})) if (a.workspaceId === ws) a.workspaceArchived = true;
+      this.log(run, "workspace_archived", null, `${ws} of ${agentId}`);
+    } catch (error) {
+      keep(`archive failed: ${(error as Error).message}`);
+    }
+  }
+
+  /** The run ended: its workers (not the PM) and their workspaces are of no use any more. The janitor does this after the retro when it is on. */
+  private async retireWorkers(run: Run): Promise<void> {
+    for (const id of Object.keys(run.agents ?? {})) {
+      if (id === run.pmAgentId) continue;
+      const state = await this.ports.agentState(id).catch(() => "gone" as const);
+      if (state === "running") {
+        const list = (run.retiring ??= []);
+        if (!list.includes(id)) list.push(id);
+        this.log(run, "retiring", null, `${id} is mid-turn: archived when its turn ends`);
+        this.store.save();
+        continue;
+      }
+      if (state !== "gone") await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
+      await this.archiveWorkspaceOf(run, id);
+    }
   }
 
   /** Archive the retired workers of `agentId`'s run whose turn is over (`agentId` only, or all of them when absent). */
@@ -814,6 +870,7 @@ export class Engine {
         run.retiring = run.retiring.filter((x) => x !== id);
         this.store.save();
         await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
+        await this.archiveWorkspaceOf(run, id);
       }
     }
   }
@@ -895,6 +952,17 @@ export class Engine {
         if (old && old !== spawned.agentId && (!reuse || opts.archiveOld)) await this.retire(run, id, old);
       }
     } catch (error) {
+      // No room in the namespace (quota on pods, sandboxes...): nothing is wrong with the stage, so no attempt is used and nobody is asked.
+      if (isQuotaError((error as Error).message)) {
+        const n = (st.quotaRetry?.n ?? 0) + 1;
+        const wait = quotaBackoffMs(n);
+        if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
+        st.quotaRetry = { n, at: this.ports.now() + wait, why, opts: { free: opts.free, fresh: opts.fresh, archiveOld: opts.archiveOld, attach: opts.attach } };
+        st.summary = `waiting for cluster quota (retry ${n} in ${Math.round(wait / 60_000)} min)`;
+        this.log(run, "quota_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
+        this.store.save();
+        return;
+      }
       const flake = flakeReason((error as Error).message);
       if (flake && this.takeFlake(run, id, flake, (error as Error).message)) {
         // A nudge or wake-up that never reached a worker whose session is gone costs nothing: the fresh worker is the same attempt.
@@ -910,6 +978,7 @@ export class Engine {
       return this.pause(run, id, st.summary);
     }
     st.status = "running";
+    st.quotaRetry = null;
     if (st.wardenTask) this.ports.wardenDone(st.wardenTask, "redispatched");
     st.wardenTask = st.agentId ? this.ports.wardenRegister({ agentId: st.agentId, task: `blueprint ${run.blueprint} run ${run.id} stage ${id}: call blueprint_verdict when done` }) : null;
     this.store.save();
@@ -1390,7 +1459,14 @@ export class Engine {
       const st = run.stages[id];
       if (!st) continue;
       try {
-        if (st.status === "waiting" && !st.gate && st.reopenAt && now >= st.reopenAt) {
+        if (st.status === "entering" && st.quotaRetry && now >= st.quotaRetry.at && run.status === "running") {
+          await this.exclusive(run.id, async () => {
+            const q = st.quotaRetry;
+            if (run.stage !== id || st.status !== "entering" || !q || now < q.at) return;
+            this.log(run, "quota_retry", id, `retry ${q.n}`);
+            await this.dispatch(run, id, q.why, q.opts);
+          });
+        } else if (st.status === "waiting" && !st.gate && st.reopenAt && now >= st.reopenAt) {
           await this.exclusive(run.id, async () => {
             if (run.stage !== id || st.status !== "waiting" || st.gate || !st.reopenAt) return;
             st.reopenAt = null;

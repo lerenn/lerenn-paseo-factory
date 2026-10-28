@@ -25,3 +25,13 @@ export function flakeReason(text: string | null | undefined): string | null {
 export function flakeSummary(reasons: string[]): string {
   return `infra flakes ×${reasons.length}: ${[...new Set(reasons)].join(", ")}`;
 }
+
+/** The cluster refused a pod or sandbox for lack of quota (`exceeded quota: ... count/sandboxes ... used 24 limited 24`): it clears when an old workspace goes. */
+export function isQuotaError(text: string | null | undefined): boolean {
+  return !!text && /exceeded quota/i.test(text);
+}
+
+/** Wait before the n-th (1-based) retry of a start refused for quota: 1, 2, 4, 8 minutes, then 8 minutes each. */
+export function quotaBackoffMs(n: number): number {
+  return Math.min(8, 2 ** Math.max(0, n - 1)) * 60_000;
+}
