@@ -14,6 +14,8 @@ export const settingsSchema = z.object({
   idleGraceSeconds: z.number().int().min(10).default(90),
   /** Archive the workers of a finished run. */
   archiveOnFinish: z.boolean().default(false),
+  /** When an agent the Factory spawned is archived (by anyone), archive its workspace (pod) too, if it has no other live agent and its worktree is clean. */
+  archiveWorkspaceWithAgent: z.boolean().default(true),
   /** Stages marked `workspace = "run"` share one workspace (pod) per run. Off: every worker gets its own, as before. */
   shareWorkspace: z.boolean().default(false),
   /** Infrastructure failures of a worker (exit 137/143, pod did not start, container not found, evicted...) retried per stage entry with a fresh pod, without using an attempt. A stage's own `flake_retries` raises it. */
