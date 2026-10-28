@@ -18,7 +18,7 @@ export type SupervisorRequest = z.infer<typeof supervisorRequestSchema>;
 export const supervisorStatusSchema = z.object({
   /** The stable agent id to steer it by. */
   agentId: z.string().nullable(),
-  state: z.enum(["running", "idle", "stopped", "not-started", "error", "archived", "waking"]),
+  state: z.enum(["running", "idle", "stopped", "not-started", "error", "archived", "waking", "disabled"]),
   error: z.string().nullable(),
   startedAt: z.number().nullable(),
   issues: z.array(z.object({ key: z.string(), text: z.string() })),

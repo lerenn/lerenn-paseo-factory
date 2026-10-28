@@ -93,7 +93,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
         <ScrollView style={{ position: "absolute", top: layout.compact ? 44 : 52, right: layout.compact ? 8 : 12, width: 360, maxWidth: "95%", maxHeight: "80%", borderRadius: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1 }} contentContainerStyle={{ padding: 12, gap: 14 }}>
       <View style={{ gap: 4 }}>
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <Text style={[body, { fontWeight: "700" }]}>{!s ? "…" : waking ? "waking up…" : archived ? "Archived (idle)" : s.state}</Text>
+          <Text style={[body, { fontWeight: "700" }]}>{!s ? "…" : s.state === "disabled" ? "disabled" : waking ? "waking up…" : archived ? "Archived (idle)" : s.state}</Text>
           {s?.agentId ? <Text style={muted} selectable>agent {s.agentId}</Text> : null}
           {s?.startedAt ? <Text style={muted}>started {ago(now, s.startedAt)}</Text> : null}
           {s?.agentId && navigation ? (
@@ -101,7 +101,7 @@ export function SupervisorScreen({ theme, layout, navigation }: Pick<PluginScree
               <Text style={body}>Open agent</Text>
             </Pressable>
           ) : null}
-          <Pressable style={button} onPress={() => start.mutate(running)} disabled={waking}>
+          <Pressable style={button} onPress={() => start.mutate(running)} disabled={waking || s?.state === "disabled"}>
             <Text style={body}>{running ? "Restart" : archived ? "Wake now" : "Start"}</Text>
           </Pressable>
         </View>

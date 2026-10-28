@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { settingsSchema } from "../../shared/supervisor/settings";
-import { busyReasons, Supervisor, type FactoryActivity, type SupervisorPorts } from "./manager";
+import { DISABLED_NOTE, busyReasons, Supervisor, type FactoryActivity, type SupervisorPorts } from "./manager";
 import { SupervisorState } from "./state";
 
 function setup(over: Partial<SupervisorPorts> = {}, settings: object = {}) {
@@ -253,7 +253,7 @@ describe("on-demand requests", () => {
   it("answers queued when the Supervisor cannot be woken", async () => {
     const { supervisor } = setup({ settings: () => settingsSchema.parse({ askTimeoutSeconds: 5 }) });
     const out = await supervisor.ask({ id: "a", name: "A" }, "q");
-    expect(out.status).toBe("queued");
+    if (out.status !== "queued") throw new Error(`unexpected ${out.status}`);
     expect(supervisor.requestStatus(out.request)).toBe("queued");
   });
 
@@ -370,5 +370,67 @@ describe("watcher while archived", () => {
     await s.supervisor.digest();
     expect(s.created).toHaveLength(1);
     expect(s.supervisor.state.data.told).toEqual({});
+  });
+});
+
+describe("supervisor.enabled", () => {
+  it("is on by default", () => {
+    expect(settingsSchema.parse({}).enabled).toBe(true);
+  });
+
+  it("disabled: nothing starts, status and ask say so, and no restart", async () => {
+    const s = setup({}, { enabled: false });
+    await s.supervisor.ensure();
+    s.supervisor.wake();
+    await s.supervisor.tick();
+    expect(s.created).toHaveLength(0);
+    expect((await s.supervisor.status()).state).toBe("disabled");
+    expect(await s.supervisor.ask({ id: "a", name: "worker" }, "why?")).toEqual({ status: "disabled", note: DISABLED_NOTE });
+    expect(s.supervisor.state.data.requests).toHaveLength(0);
+    await expect(s.supervisor.restartExtension("x")).rejects.toThrow(/disabled/);
+    expect((await s.supervisor.sendUser("hi")).ok).toBe(false);
+  });
+
+  it("disabled: an agent that still runs is archived", async () => {
+    const on = setup();
+    await on.supervisor.ensure();
+    const off = setup({}, { enabled: false });
+    off.supervisor.state.data.agentId = "old";
+    off.states.set("old", "idle");
+    await off.supervisor.disable();
+    expect(off.archived.map((a) => a.id)).toEqual(["old"]);
+    expect((await off.supervisor.status()).agentId).toBeNull();
+  });
+
+  it("disabled: an expired lease and a dropped extension are mailed once each, and nothing else", async () => {
+    const notices: { subject: string; body: string }[] = [];
+    const s = setup({ notify: (subject, body) => void notices.push({ subject, body }) }, { enabled: false });
+    s.setIssues([
+      { key: "lease:pr:org/repo#1:expired:123", text: "Lease pr:org/repo#1 expired without a release (holder a)." },
+      { key: "ext:releaser:dropped", text: "Extension releaser was dropped." },
+      { key: "ext:releaser:degraded", text: "degraded" },
+      { key: "lease:x:contended", text: "contended" },
+      { key: "run:r1:failed", text: "failed run" },
+    ]);
+    await s.supervisor.digest();
+    await s.supervisor.digest();
+    expect(notices).toHaveLength(2);
+    expect(notices[0].subject).toBe("Factory: Lease pr:org/repo#1 expired without a release");
+    expect(notices[1].subject).toBe("Factory: extension releaser dropped");
+    expect(s.created).toHaveLength(0);
+  });
+
+  it("enabled: no notices (the Supervisor handles them)", async () => {
+    const notices: string[] = [];
+    const s = setup({ notify: (subject) => void notices.push(subject) });
+    s.setIssues([{ key: "lease:x:expired:1", text: "Lease x expired without a release (holder a)." }]);
+    await s.supervisor.digest();
+    expect(notices).toHaveLength(0);
+  });
+
+  it("a failing mailbox never throws", async () => {
+    const s = setup({ notify: () => Promise.reject(new Error("down")) }, { enabled: false });
+    s.setIssues([{ key: "ext:a:dropped", text: "Extension a was dropped." }]);
+    await expect(s.supervisor.digest()).resolves.toBeUndefined();
   });
 });

@@ -54,6 +54,11 @@ export class PostRun implements Observer {
     this.mail(to, `Factory ${run.id} ${e.kind}${e.stage ? ` · ${e.stage}` : ""}`, `Run ${run.id} (${run.blueprint} ${label}) is ${e.kind === "waiting" ? "waiting" : e.kind}.\nStage: ${e.stage ?? "?"}\nReason: ${clip(e.reason.replace(/\s+/g, " "), 300)}`, "run");
   }
 
+  /** Lease and extension notices while the Supervisor is disabled: one short mail, never blocking. */
+  notice(subject: string, body: string): void {
+    this.mail(this.settings().eventsMailTo, subject, body, "info");
+  }
+
   // ---- after the run ----
 
   finished(run: Run): void {

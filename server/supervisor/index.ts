@@ -94,6 +94,11 @@ export function startSupervisor(host: FactoryHost) {
       return { runs, liveStageAgents };
     },
     flag: (report) => host.report("@assistant", report),
+    notify(subject, body) {
+      const observer = host.engines.blueprints?.engine?.observer as { notice?(s: string, b: string): void } | undefined;
+      if (observer?.notice) observer.notice(subject, body);
+      else void host.report("@assistant", { subject, body, kind: "info" }).catch(() => undefined);
+    },
     async issues() {
       const out: Issue[] = [];
       for (const source of host.issueSources) {
@@ -130,7 +135,10 @@ export function startSupervisor(host: FactoryHost) {
   const loop = async () => {
     try {
       await ready;
-      if (host.enabled("supervisor") && host.hasPaseo()) {
+      if (host.enabled("supervisor") && !current.enabled) {
+        await supervisor.disable();
+        await supervisor.digest();
+      } else if (host.enabled("supervisor") && host.hasPaseo()) {
         // Always on (idleArchiveMinutes 0): keep the agent up as before. On demand: it is woken by what needs it.
         if (current.autoStart && current.idleArchiveMinutes === 0 && !started) {
           started = true;

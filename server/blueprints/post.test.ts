@@ -210,6 +210,17 @@ describe("event mails", () => {
   });
 });
 
+describe("factory notices", () => {
+  it("mails events.mailTo with one short mail, and not at all with an empty address", () => {
+    const t = setup();
+    t.engine.observer.notice!("Factory: Lease x expired without a release", "Lease x expired without a release (holder a).");
+    expect(t.mails.filter((m) => m.to === "@assistant" && m.subject.startsWith("Factory: Lease"))).toHaveLength(1);
+    const off = setup({ eventsMailTo: "" });
+    off.engine.observer.notice!("s", "b");
+    expect(off.mails).toHaveLength(0);
+  });
+});
+
 describe("ask-blocked names the stage that blocked", () => {
   it("quotes the verdict summary of the blocker, not of an earlier stage", async () => {
     const t = setup();

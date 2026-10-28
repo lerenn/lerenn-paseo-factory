@@ -30,6 +30,8 @@ export interface SupervisorPorts {
   factory(): Promise<FactoryActivity>;
   /** Tell the Assistant about a problem that did not wake the Supervisor (Agents Mail when installed). */
   flag?(report: { subject: string; body: string; kind: string }): Promise<void>;
+  /** While the Supervisor is disabled: one short mail about an expired lease or a dropped extension (to events.mailTo). */
+  notify?(subject: string, body: string): void | Promise<void>;
   issues(): Promise<Issue[]>;
   nameOf(agentId: string): Promise<string>;
   restartExtension(id: string): Promise<string>;
@@ -73,7 +75,17 @@ export function flagOnly(issue: Issue, alreadyTold: boolean): boolean {
 type AskResult =
   | { status: "answered"; request: string; answer: string }
   | { status: "pending"; request: string; note: string }
-  | { status: "queued"; request: string; note: string };
+  | { status: "queued"; request: string; note: string }
+  | { status: "disabled"; note: string };
+
+export const DISABLED_NOTE = "Supervisor disabled; the Assistant (@assistant) watches the Factory.";
+
+/** Issues mailed while the Supervisor is disabled: a lease that expired without a release, an extension that was dropped. */
+export function noticeOf(issue: Issue): { subject: string; body: string } | null {
+  if (/^lease:.+:expired:/.test(issue.key)) return { subject: `Factory: ${issue.text.split(" (")[0]}`.slice(0, 200), body: issue.text };
+  if (/^ext:.+:dropped$/.test(issue.key)) return { subject: `Factory: extension ${issue.key.slice(4, -8)} dropped`, body: issue.text };
+  return null;
+}
 
 /** The Supervisor agent, on demand: created when the Factory needs it, archived when idle, briefed from the store. */
 export class Supervisor {
@@ -106,6 +118,7 @@ export class Supervisor {
 
   /** Create the agent when there is none or it is gone, then deliver what waits for it. `restart` replaces a live one. */
   ensure(opts: { restart?: boolean } = {}): Promise<void> {
+    if (!this.ports.settings().enabled) return Promise.resolve();
     if (this.archiving) this.wakeDuringHandoff = true;
     if (this.starting) return this.starting;
     this.starting = this.doEnsure(opts).finally(() => (this.starting = null));
@@ -114,7 +127,8 @@ export class Supervisor {
 
   /** An automatic trigger (a run started, a crash): wake the agent unless that is turned off. Never awaits. */
   wake(): void {
-    if (!this.ports.settings().autoStart) return;
+    const s = this.ports.settings();
+    if (!s.enabled || !s.autoStart) return;
     void this.ensure().catch((error) => console.error("supervisor: wake failed", error));
   }
 
@@ -199,6 +213,14 @@ export class Supervisor {
       midTurn,
     });
     return { busy: reasons.length > 0, reasons };
+  }
+
+  /** The Supervisor was switched off: archive an agent that still runs (its notes stay in the store). */
+  async disable(): Promise<void> {
+    if (this.archiving) await this.archiving.catch(() => undefined);
+    if (this.starting) await this.starting.catch(() => undefined);
+    if (this.state.data.agentId) await this.retire("disabled");
+    this.error = null;
   }
 
   /** Each digest tick: forget a vanished agent, retry deliveries, archive after the idle delay. */
@@ -346,6 +368,7 @@ export class Supervisor {
 
   /** A message from the user (Supervisor tab): direct when the agent is up, else queued and the agent is woken. */
   async sendUser(text: string): Promise<{ ok: boolean; message: string | null }> {
+    if (!this.ports.settings().enabled) return { ok: false, message: DISABLED_NOTE };
     const data = this.state.data;
     if (!this.archiving && (await this.isLive())) {
       try {
@@ -370,7 +393,9 @@ export class Supervisor {
     const busy = data.agentId ? await this.isFactoryBusy() : { busy: false, reasons: [] as string[] };
     return {
       agentId: data.agentId,
-      state: this.error
+      state: !this.ports.settings().enabled
+        ? "disabled"
+        : this.error
         ? "error"
         : waking
           ? "waking"
@@ -405,6 +430,7 @@ export class Supervisor {
     const settings = this.ports.settings();
     this.lastIssues = await this.ports.issues();
     const data = this.state.data;
+    if (!settings.enabled) return this.notify();
     const open = new Set(this.lastIssues.map((i) => i.key));
     const kept = data.flags.filter((f) => open.has(f.key) || f.key.startsWith("supervisor:"));
     if (kept.length !== data.flags.length) {
@@ -453,6 +479,27 @@ export class Supervisor {
     }
   }
 
+  /** Disabled: the lease and extension problems the Supervisor would have watched go to events.mailTo, once each. */
+  private notify(): void {
+    const data = this.state.data;
+    const now = this.ports.now();
+    let changed = false;
+    for (const issue of this.lastIssues) {
+      const notice = noticeOf(issue);
+      if (!notice || data.told[issue.key] !== undefined) continue;
+      data.told[issue.key] = now;
+      changed = true;
+      void Promise.resolve(this.ports.notify?.(notice.subject, notice.body)).catch((e) => console.error("supervisor: notice failed", e));
+    }
+    for (const [key, at] of Object.entries(data.told)) {
+      if (now - at > 2 * 3600_000 && !this.lastIssues.some((i) => i.key === key)) {
+        delete data.told[key];
+        changed = true;
+      }
+    }
+    if (changed) this.state.save();
+  }
+
   private addFlag(key: string, text: string): void {
     const data = this.state.data;
     if (data.flags.some((f) => f.key === key)) return;
@@ -469,6 +516,7 @@ export class Supervisor {
    * The answer timer starts once the request reached the agent; a request that could not be delivered stays queued.
    */
   async ask(from: { id: string; name: string }, question: string): Promise<AskResult> {
+    if (!this.ports.settings().enabled) return { status: "disabled", note: DISABLED_NOTE };
     const data = this.state.data;
     const request: SupervisorRequest = { id: `sq-${randomBytes(3).toString("hex")}`, fromId: from.id, fromName: from.name, question, at: this.ports.now(), answer: null, answeredAt: null, deliveredAt: null };
     data.requests.push(request);
@@ -515,6 +563,7 @@ export class Supervisor {
 
   /** At most once an hour per extension; a second request inside the hour tells the Supervisor to ask the user. */
   async restartExtension(id: string): Promise<string> {
+    if (!this.ports.settings().enabled) throw new Error(DISABLED_NOTE);
     const now = this.ports.now();
     const allowed = restartAllowed(this.state.data.restarts, id, now);
     if (!allowed.ok) {
