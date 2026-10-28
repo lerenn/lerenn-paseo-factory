@@ -1,3 +1,4 @@
+import { flakeReason, flakeSummary } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -70,7 +71,7 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number };
 }
 
 export interface PostSettings {
@@ -112,6 +113,7 @@ const freshStage = (): StageState => ({
   attempts: 0,
   extra: 0,
   flakes: 0,
+  flakeReasons: [],
   agentId: null,
   wardenTask: null,
   verdict: null,
@@ -381,6 +383,7 @@ export class Engine {
     st.runs += 1;
     st.attempts = 0;
     st.flakes = 0;
+    st.flakeReasons = [];
     st.startedAt = this.ports.now();
     st.endedAt = null;
     st.verdict = null;
@@ -408,6 +411,7 @@ export class Engine {
   private async exhausted(run: Run, id: string, reason: string): Promise<void> {
     const st = run.stages[id];
     st.status = "exhausted";
+    if (st.flakeReasons?.length) reason = `${reason}; ${flakeSummary(st.flakeReasons)}`;
     const def = this.stageDef(run, id);
     const target = def.on.exhausted ?? "failed";
     this.log(run, "exhausted", id, reason);
@@ -634,7 +638,7 @@ export class Engine {
     return [...out];
   }
 
-  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry", opts: { free?: boolean } = {}): Promise<void> {
+  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry", opts: { free?: boolean; fresh?: boolean } = {}): Promise<void> {
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
     if (!opts.free) st.attempts += 1;
@@ -649,6 +653,7 @@ export class Engine {
     // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
     let target: string | null = why === "start" ? null : st.agentId;
     if (reuse) target = run.stages[reuse]?.agentId ?? null;
+    if (opts.fresh) target = null; // an infrastructure flake: the worker's pod is not to be trusted
     if (target && (await this.ports.agentState(target)) === "gone") target = null;
 
     try {
@@ -660,7 +665,7 @@ export class Engine {
         const replaced = !!(reuse ? run.stages[reuse]?.agentId : st.agentId);
         const share = !!this.ports.settings().shareWorkspace && def.workspace === "run";
         const spawned = await this.ports.spawn({
-          idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}`,
+          idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}`,
           role: def.role,
           prompt: replaced ? `${prompt}\n\nNote: the worker that held this role earlier is gone; you are its replacement. Read the repository and PR state before continuing.` : prompt,
           title: `${run.blueprint} · ${id} · ${run.vars.ticket || run.id}`,
@@ -682,6 +687,10 @@ export class Engine {
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
       }
     } catch (error) {
+      const flake = flakeReason((error as Error).message);
+      if (flake && this.takeFlake(run, id, flake, (error as Error).message)) {
+        return this.dispatch(run, id, "retry", { free: true, fresh: true });
+      }
       // A worker that cannot even be started is a setup problem (working directory, role, provider), not a failed
       // attempt: retrying burns the caps in milliseconds. Pause the run with the reason and tell a person.
       const message = (error as Error).message;
@@ -696,11 +705,30 @@ export class Engine {
     this.store.save();
   }
 
-  /** A turn failed or the worker vanished. Flakes are retried for free up to `flake_retries`, then it is an attempt. */
+  /**
+   * Records an infrastructure failure of the stage's worker and says whether it is retried for free: the stage's `flake_retries`
+   * (or the `flakeRetries` setting, whichever is higher) bounds them; past it they count as attempts, as before.
+   */
+  private takeFlake(run: Run, id: string, reason: string, detail: string): boolean {
+    const def = this.stageDef(run, id) as AgentStage;
+    const st = run.stages[id];
+    (st.flakeReasons ??= []).push(reason);
+    const max = Math.max(def.flake_retries, this.ports.settings().flakeRetries ?? 3);
+    if (st.flakes >= max) return false;
+    st.flakes += 1;
+    this.log(run, "flake_retry", id, `${st.flakes}/${max} ${reason}: ${detail}`);
+    return true;
+  }
+
+  /** A turn failed or the worker vanished. Infrastructure failures are retried for free (see takeFlake), then it is an attempt. */
   private async agentFailed(run: Run, id: string, detail: string): Promise<void> {
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
-    if (st.flakes < def.flake_retries) {
+    const reason = flakeReason(detail);
+    if (reason) {
+      if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true });
+    } else if (st.flakes < def.flake_retries) {
+      // Legacy: a stage that sets flake_retries retries any failed turn (provider errors) for free.
       st.flakes += 1;
       this.log(run, "flake_retry", id, `${st.flakes}/${def.flake_retries}: ${detail}`);
       return this.dispatch(run, id, "retry", { free: true });

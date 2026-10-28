@@ -78,7 +78,7 @@ merged = "done"
 head_moved = "check"
 `;
 
-function setup(source = flow) {
+function setup(source = flow, over: { flakeRetries?: number } = {}) {
   let time = 1_000_000;
   const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string }[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -89,9 +89,12 @@ function setup(source = flow) {
   const archived: string[] = [];
   const store = new RunStore(null);
   let agents = 0;
+  const spawnErrors: string[] = [];
   const ports: Ports = {
     now: () => time,
     async spawn(o) {
+      const failure = spawnErrors.shift();
+      if (failure) throw new Error(failure);
       const agentId = `agent-${++agents}`;
       spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey, workspaceTitle: o.workspaceTitle });
       states.set(agentId, "running");
@@ -126,7 +129,7 @@ function setup(source = flow) {
     tool: () => null,
     stageKind: () => null,
     blueprint: (name) => (name === "flow" ? parseBlueprint(source) : undefined),
-    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false }),
+    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, ...over }),
   };
   const engine = new Engine(store, ports);
   const settle = async () => {
@@ -148,7 +151,7 @@ function setup(source = flow) {
     return out;
   };
   states.set("pm-agent", "idle");
-  return { engine, store, spawned, sent, states, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
+  return { engine, store, spawned, sent, states, spawnErrors, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
 }
 
 const okPr = (url: string, head = "abc123"): PrFacts => ({ url, exists: true, state: "open", head, ci: "green", mergeable: true, draft: false, review: "" });
@@ -655,5 +658,107 @@ merged = "done"
     expect(ctx.items.size).toBe(2);
     await ctx.answer("item-2", "merged");
     expect(ctx.engine.require(run.id).status).toBe("done");
+  });
+});
+
+describe("infrastructure flakes", () => {
+  const noLegacy = flow.replace("flake_retries = 1\n", "");
+  const patterns: Array<[string, string, string]> = [
+    ["Claude Code process exited with code 137", "OOMKilled / exit 137", "exit 137"],
+    ["container OOMKilled", "OOMKilled / exit 137", "OOMKilled"],
+    ["process terminated: exit code 143", "exit 143 (SIGTERM)", "exit 143"],
+    ["kube: could not start the pod: boom", "pod did not start", "pod"],
+    ["kube: could not write bridge.mjs in the pod: x", "bridge.mjs not written", "bridge"],
+    ["container not found", "container not found", "container"],
+    ["channel ended", "channel ended", "channel"],
+    ["pod not ready after 120s", "pod not ready", "ready"],
+    ["pod evicted by the node", "pod failed / evicted / replaced", "evicted"],
+  ];
+
+  it.each(patterns)("%s is a flake: a fresh worker, no attempt used", async (message, reason) => {
+    const { start, engine, spawned, states, settle } = setup(noLegacy);
+    const run = await start();
+    states.set("agent-1", "idle"); // the dead worker still looks alive: it must not be reused
+    await engine.turnEnded("agent-1", { kind: "failed", message });
+    await settle();
+    const r = engine.require(run.id);
+    expect(r.stages.think).toMatchObject({ attempts: 1, flakes: 1, flakeReasons: [reason], status: "running" });
+    expect(spawned).toHaveLength(2);
+    expect(spawned[1].key).not.toBe(spawned[0].key);
+    const h = r.history.find((e) => e.event === "flake_retry")!;
+    expect(h.detail).toContain(`1/3 ${reason}`);
+    expect(h.detail).toContain(message);
+  });
+
+  it("a failure to start the pod at spawn time is retried instead of pausing the run", async () => {
+    const { start, spawnErrors, engine, spawned, settle } = setup(noLegacy);
+    spawnErrors.push("kube: could not start the pod: container not found");
+    const run = await start();
+    const r = engine.require(run.id);
+    expect(r.status).toBe("running");
+    expect(r.stages.think).toMatchObject({ attempts: 1, flakes: 1, status: "running" });
+    expect(spawned).toHaveLength(1);
+    expect(r.history.map((e) => e.event)).toContain("flake_retry");
+  });
+
+  it("flake retries are bounded by the setting; past it they are attempts and the stage exhausts with the reasons", async () => {
+    const { start, engine, settle, spawned } = setup(noLegacy, { flakeRetries: 2 });
+    const run = await start();
+    for (const i of [1, 2, 3, 3]) {
+      // the third failure is an attempt: the nudge goes to the same worker, whose next failure exhausts the stage
+      await engine.turnEnded(`agent-${i}`, { kind: "failed", message: "Claude Code process exited with code 137" });
+      await settle();
+    }
+    const r = engine.require(run.id);
+    expect(r.stages.think.flakes).toBe(2);
+    expect(r.stages.think.status).toBe("exhausted");
+    expect(r.stages.think.attempts).toBe(3); // 1st + two failures counted after the cap
+    expect(r.pm.pending?.reason).toContain("infra flakes ×4: OOMKilled / exit 137");
+    expect(r.history.filter((e) => e.event === "flake_retry")).toHaveLength(2);
+    expect(spawned).toHaveLength(3);
+  });
+
+  it("a stage's flake_retries raises the bound", async () => {
+    const { start, engine, settle } = setup(flow.replace("flake_retries = 1", "flake_retries = 4").replace("max_attempts = 2", "max_attempts = 9"), { flakeRetries: 0 });
+    const run = await start();
+    for (let i = 1; i <= 4; i++) {
+      await engine.turnEnded(`agent-${i}`, { kind: "failed", message: "channel ended" });
+      await settle();
+    }
+    expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, flakes: 4, status: "running" });
+  });
+
+  it("a vanished worker is a flake with a fresh worker", async () => {
+    const { start, engine, states, settle, advance, spawned } = setup(noLegacy);
+    const run = await start();
+    states.set("agent-1", "gone");
+    advance(5 * 60_000);
+    await engine.tick();
+    await settle();
+    expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, flakes: 1, flakeReasons: ["pod failed / evicted / replaced"] });
+    expect(spawned).toHaveLength(2);
+  });
+
+  it("not flakes: a turn without a verdict, a provider error without the legacy setting, a normal verdict", async () => {
+    const a = setup(noLegacy);
+    const run = await a.start();
+    await a.engine.turnEnded("agent-1", { kind: "completed" });
+    await a.settle();
+    expect(a.engine.require(run.id).stages.think).toMatchObject({ attempts: 2, flakes: 0 });
+    expect(a.engine.require(run.id).history.some((e) => e.event === "flake_retry")).toBe(false);
+    const b = setup(noLegacy);
+    const run2 = await b.start();
+    await b.engine.turnEnded("agent-1", { kind: "failed", message: "503 overloaded" });
+    await b.settle();
+    expect(b.engine.require(run2.id).stages.think).toMatchObject({ attempts: 2, flakes: 0 });
+    expect(b.spawned).toHaveLength(1);
+  });
+
+  it("with the legacy flake_retries a provider error is still retried for free", async () => {
+    const { start, engine, settle } = setup(flow);
+    const run = await start();
+    await engine.turnEnded("agent-1", { kind: "failed", message: "503" });
+    await settle();
+    expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, flakes: 1 });
   });
 });

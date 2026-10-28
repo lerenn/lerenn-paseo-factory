@@ -16,6 +16,8 @@ export const settingsSchema = z.object({
   archiveOnFinish: z.boolean().default(false),
   /** Stages marked `workspace = "run"` share one workspace (pod) per run. Off: every worker gets its own, as before. */
   shareWorkspace: z.boolean().default(false),
+  /** Infrastructure failures of a worker (exit 137/143, pod did not start, container not found, evicted...) retried per stage entry with a fresh pod, without using an attempt. A stage's own `flake_retries` raises it. */
+  flakeRetries: z.number().int().min(0).default(3),
   /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. */
   events: z.object({ mailTo: z.string().default("@assistant") }).default({ mailTo: "@assistant" }),
   /** After a run ends (done, failed or aborted), a small separate agent mails one short retrospective. */
