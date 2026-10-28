@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary, isQuotaError, quotaBackoffMs, SESSION_GONE } from "./flake";
+import { flakeReason, flakeSummary, isBusyError, isQuotaError, MAX_BUSY_RETRIES, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -952,14 +952,17 @@ export class Engine {
         if (old && old !== spawned.agentId && (!reuse || opts.archiveOld)) await this.retire(run, id, old);
       }
     } catch (error) {
-      // No room in the namespace (quota on pods, sandboxes...): nothing is wrong with the stage, so no attempt is used and nobody is asked.
-      if (isQuotaError((error as Error).message)) {
+      // No room in the namespace (quota on pods, sandboxes...), or a daemon too loaded to answer a plugin hook in time: nothing is
+      // wrong with the stage, so no attempt is used and nobody is asked (a busy daemon only up to MAX_BUSY_RETRIES times).
+      const quota = isQuotaError((error as Error).message);
+      const busy = !quota && isBusyError((error as Error).message) && (st.quotaRetry?.n ?? 0) < MAX_BUSY_RETRIES;
+      if (quota || busy) {
         const n = (st.quotaRetry?.n ?? 0) + 1;
         const wait = quotaBackoffMs(n);
         if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
         st.quotaRetry = { n, at: this.ports.now() + wait, why, opts: { free: opts.free, fresh: opts.fresh, archiveOld: opts.archiveOld, attach: opts.attach } };
-        st.summary = `waiting for cluster quota (retry ${n} in ${Math.round(wait / 60_000)} min)`;
-        this.log(run, "quota_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
+        st.summary = `${quota ? "waiting for cluster quota" : "the daemon is busy"} (retry ${n} in ${Math.round(wait / 60_000)} min)`;
+        this.log(run, quota ? "quota_wait" : "busy_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
         this.store.save();
         return;
       }

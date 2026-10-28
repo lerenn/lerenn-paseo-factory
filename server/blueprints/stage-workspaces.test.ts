@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Engine, type Ports } from "./engine";
-import { isQuotaError, quotaBackoffMs } from "./flake";
+import { isBusyError, isQuotaError, MAX_BUSY_RETRIES, quotaBackoffMs } from "./flake";
 import { RunStore } from "./store";
 import { parseBlueprint } from "./toml";
 
@@ -194,5 +194,26 @@ describe("quota refusals", () => {
     expect(t.spawned).toEqual(["implementer:agent-1"]);
     expect(r.stages.build).toMatchObject({ status: "running", attempts: 1, quotaRetry: null });
     expect(t.asked).toEqual([]);
+  });
+
+  it("a start that timed out on a busy daemon is retried with back-off, then pauses after MAX_BUSY_RETRIES", async () => {
+    const BUSY = "Plugin kubernetes-runtime workspace.create.before failed: Plugin RPC timed out: kubernetes-runtime.hook";
+    expect(isBusyError(BUSY)).toBe(true);
+    const t = setup();
+    for (let i = 0; i <= MAX_BUSY_RETRIES; i++) t.failures.push(BUSY);
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    let r = t.engine.require(run.id);
+    expect(r.history.some((h) => h.event === "busy_wait")).toBe(true);
+    expect(r.stages.build.summary).toMatch(/daemon is busy/);
+    expect(t.asked).toEqual([]);
+    for (let i = 0; i < MAX_BUSY_RETRIES; i++) {
+      t.advance(8 * 60_000);
+      await t.engine.tick();
+      await t.settle();
+    }
+    r = t.engine.require(run.id);
+    expect(r.status).toBe("paused");
+    expect(r.stages.build.attempts).toBe(0);
   });
 });

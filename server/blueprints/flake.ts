@@ -35,3 +35,11 @@ export function isQuotaError(text: string | null | undefined): boolean {
 export function quotaBackoffMs(n: number): number {
   return Math.min(8, 2 ** Math.max(0, n - 1)) * 60_000;
 }
+
+/** The daemon was too loaded to answer a plugin hook in time (`Plugin RPC timed out: kubernetes-runtime.hook`): it passes once the load drops. */
+export function isBusyError(text: string | null | undefined): boolean {
+  return !!text && /Plugin RPC timed out/i.test(text);
+}
+
+/** Back-off retries of a start that timed out on a busy daemon before the run pauses and asks a person. */
+export const MAX_BUSY_RETRIES = 6;
