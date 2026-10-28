@@ -9,6 +9,8 @@ import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
 import { probeWorktree } from "./worktree";
+import { archiveWorkspaceWithAgent } from "./archive-workspace";
+import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
 import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
@@ -64,7 +66,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } } as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
@@ -283,6 +285,28 @@ export function startBlueprints(host: FactoryHost) {
 
   // ---- events ----
   const removers = [
+    host.on("blueprints", "agent.archived", ({ agent }) => {
+      if (!cfg().archiveWorkspaceWithAgent) return;
+      void archiveWorkspaceWithAgent(
+        {
+          workspaceOf: (id) => store.all().find((run) => run.agents?.[id])?.agents?.[id]?.workspaceId ?? null,
+          async liveAgentsIn(workspaceId) {
+            try {
+              const { entries } = await listAgents(host.paseo);
+              return (entries as { agent: { id: string; workspaceId?: string | null; archivedAt?: string | null; status?: string } }[])
+                .filter(({ agent: a }) => a.workspaceId === workspaceId && !a.archivedAt && a.status !== "closed")
+                .map(({ agent: a }) => a.id);
+            } catch {
+              return null;
+            }
+          },
+          worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId).catch((e: Error) => ({ state: "unknown" as const, detail: e.message })),
+          archiveWorkspace: ports.archiveWorkspace!,
+          log: (line) => console.log(line),
+        },
+        agent.id,
+      ).catch((e) => console.error("blueprints: archive workspace failed", e));
+    }),
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
       void recordSpend(agent.id, turnId).finally(() => engine.observer.retroEnded?.(agent.id));
