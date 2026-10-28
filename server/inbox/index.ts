@@ -6,6 +6,7 @@ import { inboxSettings, type InboxSettings } from "../../shared/inbox/settings";
 import { Engine, type Actions } from "./engine";
 import { NOTE, scopeApplies, SCOPE_ENV, TOOL_NAMES } from "./inject";
 import { INSTRUCTIONS } from "./instructions";
+import { notifyNewItem } from "./notify";
 import { Store } from "./store";
 import { TOOLS } from "./tools";
 
@@ -54,6 +55,19 @@ export function startInbox(host: FactoryHost) {
       await ready;
       return current?.enabled && scopeApplies(current.scope, request.env) ? TOOL_NAMES : null;
     },
+  });
+
+  const removeAsked = engine.onAsked((item) => {
+    const to = current?.notifyMailTo?.trim() ?? "";
+    if (!to) return;
+    const askedBy = store.agent(item.agentId)?.title ?? item.agentId;
+    notifyNewItem(item, {
+      to,
+      eventsMailTo: (host.engines.blueprints?.eventsMailTo?.() as string | undefined) ?? "",
+      askedBy: `${askedBy} (${item.agentId})`,
+      send: (target, mail) => host.report(target, { ...mail, kind: "info" }),
+      save: () => store.save(),
+    });
   });
 
   const known = (agent: HookAgent) => store.upsertAgent(agent.id, { title: agent.title, workspaceId: agent.workspaceId });
@@ -153,6 +167,7 @@ export function startInbox(host: FactoryHost) {
     stopped = true;
     if (timer) clearTimeout(timer);
     for (const remove of removers) remove();
+    removeAsked();
     unsubscribeSettings();
     removeTools();
   };

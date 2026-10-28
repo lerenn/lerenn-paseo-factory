@@ -22,6 +22,8 @@ export interface Item {
   defaultText: string | null;
   /** Asked by the Factory itself (blueprint gate): never messaged back. */
   internal?: boolean;
+  /** A "new item" mail was handled (sent or deliberately skipped): never again, across restarts. */
+  notified?: boolean;
   readAt: number | null;
   answer: Answer | null;
   comment: string | null;

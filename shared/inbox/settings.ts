@@ -17,6 +17,8 @@ export const settingsSchema = z.object({
   maxDeliveryAttempts: z.number().int().min(1).default(8),
   /** Default expiry for items that do not set one; 0 means never. */
   defaultExpiryMinutes: z.number().int().min(0).default(0),
+  /** Mail one short notice per new item (any asker) to this address, for example "@assistant". Empty: off. Items the Factory opens for a blueprint gate are skipped while the blueprints events.mailTo is set (its gate mail already covers them). */
+  notifyMailTo: z.string().default(""),
   retentionDays: z.number().int().min(1).default(30),
   answerTemplate: z.string().default(DEFAULT_ANSWER_TEMPLATE),
   expiredTemplate: z.string().default(DEFAULT_EXPIRED_TEMPLATE),

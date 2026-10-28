@@ -209,7 +209,7 @@ export function startBlueprints(host: FactoryHost) {
     settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace }),
   };
   const engine = new Engine(store, ports);
-  host.engines.blueprints = { engine, store };
+  host.engines.blueprints = { engine, store, eventsMailTo: () => cfg().events.mailTo };
   host.issueSources.push(async () => {
     const out: { key: string; text: string }[] = [];
     const day = Date.now() - 24 * 3600_000;
