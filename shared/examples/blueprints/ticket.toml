@@ -1,4 +1,5 @@
 # Ticket flow: investigate, agree the criteria, implement, QA, babysit the PR, merge gate, join the release.
+# QA that can only verify some criteria once the PRs are merged (or deployed) says pending_merge: the run waits for the merge (no Inbox item) and QA runs again.
 # With the Blueprints setting shareWorkspace, investigate / implement / babysit (and the fix loop, which reuses the implementer) share ONE workspace;
 # QA keeps its own for an independent checkout.
 # Corrections always go back to the same implementer (agent = "reuse:implement").
@@ -127,11 +128,12 @@ pr_urls_from = "implement"
 prompt = """
 Verify exactly the agreed acceptance criteria of {{ticket}} against the PR set, locally: take the lease qa:{{ticket}} (takeover, 1800 s), provision a fresh worktree and stack, test, tear down, release the lease.
 Criteria: {{stage.investigate.data.criteria}}{{criteria}}
-Verdicts: pass, fail (summary = numbered findings with evidence), unable_to_verify (summary = what blocks you).
+Verdicts: pass, fail (summary = numbered findings with evidence), pending_merge (summary = the criteria that can only be verified once the PRs are merged or deployed, and what to check then; use it instead of unable_to_verify for that reason alone), unable_to_verify (summary = what else blocks you).
 """
 [stage.on]
 pass = "babysit"
 fail = "qa-repair"
+pending_merge = "wait-merge"
 unable_to_verify = "ask-blocked"
 exhausted = "pm"
 
@@ -158,6 +160,7 @@ done = ["exists", "open"]
 [[stage]]
 id = "babysit"
 role = "pr-babysitter"
+skip_if = "{{stage.wait-merge.verdict}} == merged"   # QA ran after the merge: nothing left to babysit
 workspace = "run"      # shares the run's pod when the Blueprints setting shareWorkspace is on
 max_runs = 30
 max_attempts = 3
@@ -169,11 +172,26 @@ Verdicts: ready (CI green, no conflicts, reviews clear; checked on GitHub), need
 """
 [stage.on]
 ready = "merge"
+skipped = "merge"
 needs_fix = "fix"
 blocked = "ask-blocked"
 exhausted = "pm"
 [stage.verify]
 ready = ["ci_green", "mergeable", "open"]
+
+# Passive wait: nothing is asked of a person, the run's "waiting" mail says which PRs to merge. Merged (or a moved head) sends QA again; 8 h without a merge falls back to the human gate.
+[[stage]]
+id = "wait-merge"
+kind = "gate"
+wait = "merge"
+question = "Waiting for the PR set of {{ticket}} to be merged"
+pr = "{{stage.implement.data.pr_urls}}"
+context = "QA: {{stage.qa.summary}}"
+expires_in_minutes = 480
+[stage.on]
+merged = "qa"
+head_moved = "qa"
+expired = "ask-blocked"
 
 [[stage]]
 id = "fix"

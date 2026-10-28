@@ -21,7 +21,19 @@ export interface StageState {
   summary: string | null;
   data: Record<string, unknown>;
   notes: string[];
-  gate: { itemId: string; heads: Record<string, string>; criteriaSha: string | null; reused: boolean } | null;
+  gate: {
+    itemId: string;
+    heads: Record<string, string>;
+    criteriaSha: string | null;
+    reused: boolean;
+    /** Absent in older saved runs. */
+    openedAt?: number;
+    /** Reminders sent for an approval gate that nobody answered, and when the last one went. */
+    reminders?: number;
+    remindedAt?: number;
+    /** A wait for a merge (`wait = "merge"`): no Inbox item, `itemId` is empty. */
+    passive?: boolean;
+  } | null;
   childRunId: string | null;
   startedAt: number | null;
   endedAt: number | null;

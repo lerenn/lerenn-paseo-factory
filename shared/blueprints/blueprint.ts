@@ -73,6 +73,11 @@ export const gateStageSchema = z.strictObject({
   expires_in_minutes: z.number().min(1).optional(),
   /** An answer with the option id "hold" asks the same question again after this many minutes. */
   hold_minutes: z.number().min(1).optional(),
+  /**
+   * "merge": a passive wait, no Inbox item. The gate completes with `on.merged` when every PR in `pr` is merged on GitHub (`on.head_moved` if a head moves first)
+   * and with `on.expired` after `expires_in_minutes` (the engine's own timer, not an Inbox expiry). Someone merging is announced by the run's "waiting" mail.
+   */
+  wait: z.literal("merge").optional(),
 });
 
 export const callStageSchema = z.strictObject({
@@ -166,6 +171,11 @@ export const blueprintSchema = z
         const g = s as GateStage;
         if (g.note_to && !ids.has(g.note_to)) ctx.addIssue({ code: "custom", path: ["stage", i, "note_to"], message: `unknown stage ${g.note_to}` });
         if (g.store_as && !(g.store_as in b.vars)) ctx.addIssue({ code: "custom", path: ["stage", i, "store_as"], message: `unknown variable ${g.store_as}` });
+        if (g.wait) {
+          if (!g.pr) ctx.addIssue({ code: "custom", path: ["stage", i, "wait"], message: "a gate that waits for a merge needs pr" });
+          if (!g.expires_in_minutes) ctx.addIssue({ code: "custom", path: ["stage", i, "expires_in_minutes"], message: "a gate that waits for a merge needs expires_in_minutes (its timeout)" });
+          for (const edge of ["merged", "expired"]) if (!(edge in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: `a gate that waits for a merge needs an on.${edge} edge` });
+        }
         if (g.pr && !("head_moved" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a gate tied to PRs needs an on.head_moved edge" });
       }
       if (s.skip_if && !("skipped" in s.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a stage with skip_if needs an on.skipped edge" });

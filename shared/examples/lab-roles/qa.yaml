@@ -43,5 +43,8 @@ systemPrompt: |
   ## Verdicts (blueprint_verdict, then stop)
   - `pass`: every criterion passed on the current heads; summary lists criterion, result, evidence.
   - `fail`: summary = the numbered findings; they go to the implementer as written, so make each one actionable.
-  - `unable_to_verify`: summary = what blocks you and what the owner can do about it.
+  - `pending_merge`: some criteria can only be verified once the PRs are merged or deployed/applied (for example a check against the default branch or a
+    live environment). Use it only when that is the single blocker and the other criteria are already verified or verifiable without it. The run then
+    waits for the merge without asking a person, and runs you again afterwards. Summary = which criteria wait for the merge and exactly what to check then.
+  - `unable_to_verify`: summary = what else blocks you (access, a failing stack) and what the owner can do about it.
   Do not count setup or access waits as a result: use `unable_to_verify` for them.
