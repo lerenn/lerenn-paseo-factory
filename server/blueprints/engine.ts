@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary } from "./flake";
+import { flakeReason, flakeSummary, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -41,6 +41,10 @@ export interface Ports {
   post?(): PostSettings;
   /** Archive a workspace (the pod of a Kubernetes agent). */
   archiveWorkspace?(workspaceId: string): Promise<void>;
+  /** Suspend the pod of a workspace (volume kept). `busy` says why it was refused (an agent is running in it). Absent: nothing to suspend. */
+  suspendWorkspace?(workspaceId: string, force: boolean): Promise<{ ok: boolean; message?: string }>;
+  /** Wake a suspended pod ahead of the prompt that would wake it anyway. */
+  wakeWorkspace?(workspaceId: string): Promise<void>;
   /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
   worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
   /** Usage recorded for a run / an agent. */
@@ -190,6 +194,8 @@ export class Engine {
       const existing = this.store.byKey(input.idempotencyKey);
       if (existing) return existing;
     }
+    const held = this.store.suspended();
+    if (held) throw new UsageError(`The Factory is suspended (${held.reason}); resume it with blueprint_resume(all=true) before starting runs.`);
     const loaded = this.ports.blueprint(input.blueprint);
     if (!loaded) throw new NotFoundError(`No blueprint "${input.blueprint}".`);
     const { blueprint: def, sha } = loaded;
@@ -326,6 +332,7 @@ export class Engine {
     run.error = error;
     run.endedAt = now;
     run.waitingFor = null;
+    run.suspended = null;
     run.pm.pending = null;
     this.log(run, status, run.stage, error);
     this.store.save();
@@ -361,6 +368,7 @@ export class Engine {
   }
 
   private async childFinished(parent: Run, child: Run): Promise<void> {
+    if (parent.status === "suspended") return; // replayed when the parent is resumed
     const id = Object.entries(parent.stages).find(([, st]) => st.childRunId === child.id)?.[0];
     if (!id || parent.stage !== id) return;
     const st = parent.stages[id];
@@ -375,7 +383,7 @@ export class Engine {
   // ---- entering a stage ----
 
   private async enter(run: Run, id: string): Promise<void> {
-    if (run.status === "done" || run.status === "failed" || run.status === "aborted") return;
+    if (run.status === "done" || run.status === "failed" || run.status === "aborted" || run.status === "suspended") return;
     const def = this.stageDef(run, id);
     const st = (run.stages[id] ??= freshStage());
     run.stage = id;
@@ -462,6 +470,18 @@ export class Engine {
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `paused for a person: ${reason}`, key: `${run.id}:paused:${id}:${run.history.length}` });
     this.escalate(run, id, reason, "setup");
+  }
+
+  /** The run is moving again: the questions asked of a person while it was stuck or paused no longer matter. */
+  private withdrawEscalations(run: Run, why: string): void {
+    for (const itemId of Object.keys(run.escalations ?? {})) {
+      try {
+        this.ports.withdraw(itemId, why);
+      } catch (error) {
+        console.error(`blueprints: withdrawing ${itemId} failed`, error);
+      }
+    }
+    run.escalations = {};
   }
 
   private escalate(run: Run, id: string, why: string, kind: "stuck" | "setup" = "stuck"): void {
@@ -555,6 +575,7 @@ export class Engine {
       run.pm.pending = null;
       run.status = "running";
       run.waitingFor = null;
+      this.withdrawEscalations(run, "PM judged the stage");
       const st = run.stages[stage];
       if (input.to) {
         const target = (run.stages[input.to] ??= freshStage());
@@ -575,10 +596,103 @@ export class Engine {
     });
   }
 
+  // ---- suspending ----
+
+  /** Wake the pod of a worker (best effort: the prompt that follows wakes it anyway). */
+  private async wakePod(run: Run, agentId: string): Promise<void> {
+    const workspaceId = run.agents?.[agentId]?.workspaceId;
+    if (!workspaceId || !this.ports.wakeWorkspace) return;
+    await this.ports.wakeWorkspace(workspaceId).catch((e) => console.error(`blueprints: waking ${workspaceId} failed`, e));
+  }
+
+  /**
+   * Hold a run: no worker is spawned or prompted, no stage is retried, no attempt is used, and open gates (Inbox items) stay as they
+   * are. The pod of the stage's worker is suspended (volume kept) and the worker agent is kept, not archived.
+   */
+  async suspend(runId: string, input: { reason: string; by: string; force?: boolean }): Promise<Run> {
+    const run = this.require(runId);
+    return this.exclusive(run.id, () => this.doSuspend(run, input));
+  }
+
+  private async doSuspend(run: Run, input: { reason: string; by: string; force?: boolean }): Promise<Run> {
+    if (run.status === "done" || run.status === "failed" || run.status === "aborted") throw new UsageError(`Run ${run.id} is already ${run.status}.`);
+    if (run.status === "suspended") return run;
+    const now = this.ports.now();
+    const pods: string[] = [];
+    run.suspended = { reason: input.reason, at: now, by: input.by, prevStatus: run.status, pods };
+    run.status = "suspended";
+    // The Warden would prompt a quiet worker: its watch ends here and the stage registers a new one when it is woken.
+    for (const st of Object.values(run.stages)) {
+      if (st.wardenTask) {
+        this.ports.wardenDone(st.wardenTask, "run suspended");
+        st.wardenTask = null;
+      }
+    }
+    this.log(run, "suspended", run.stage, `${input.reason} (by ${input.by})`);
+    this.store.save();
+    const st = run.stage ? run.stages[run.stage] : undefined;
+    const def = run.stage ? this.stageDef(run, run.stage) : undefined;
+    const workspaceId = st?.agentId ? run.agents?.[st.agentId]?.workspaceId : null;
+    if (st?.status === "running" && (def?.kind ?? "agent") === "agent" && st.agentId) {
+      if (!workspaceId) pods.push(`worker ${st.agentId}: local, not prompted any more`);
+      else if (!this.ports.suspendWorkspace) pods.push(`worker ${st.agentId}: pod ${workspaceId} not suspended (no Kubernetes Runtime handle)`);
+      else {
+        const out = await this.ports.suspendWorkspace(workspaceId, !!input.force).catch((e: Error) => ({ ok: false, message: e.message }));
+        pods.push(`worker ${st.agentId}: pod ${workspaceId} ${out.ok ? "suspended" : `not suspended (${out.message ?? "refused"})`}`);
+      }
+      this.store.save();
+    }
+    return run;
+  }
+
+  /** Suspend the whole Factory: the state survives a reload, runs started later are refused, and every live run is suspended. */
+  async suspendAll(input: { reason: string; by: string; force?: boolean }): Promise<Run[]> {
+    if (!this.store.suspended()) this.store.setSuspended({ reason: input.reason, at: this.ports.now(), by: input.by });
+    const out: Run[] = [];
+    for (const run of this.store.all().filter((r) => r.status === "running" || r.status === "waiting" || r.status === "paused")) {
+      out.push(await this.suspend(run.id, input).catch((e) => {
+        console.error(`blueprints: suspending ${run.id} failed`, e);
+        return run;
+      }));
+    }
+    return out;
+  }
+
+  /** Continue a suspended run at the same stage and attempt count. */
+  async unsuspend(runId: string, input: { note?: string } = {}): Promise<Run> {
+    const run = this.require(runId);
+    return this.exclusive(run.id, () => this.doUnsuspend(run, input));
+  }
+
+  private async doUnsuspend(run: Run, input: { note?: string }): Promise<Run> {
+    if (run.status !== "suspended") throw new UsageError(`Run ${run.id} is ${run.status}, not suspended.`);
+    run.status = run.suspended?.prevStatus ?? "running";
+    run.suspended = null;
+    const id = run.stage;
+    const st = id ? run.stages[id] : undefined;
+    if (input.note && st) st.notes.push(input.note);
+    this.log(run, "unsuspended", id, input.note ?? null);
+    this.store.save();
+    if (id && st) await this.replay(run, id, st, { resumed: true });
+    return run;
+  }
+
+  /** Resume every suspended run, at most `concurrency` at a time; the Factory-wide hold is lifted first. `done` settles when all are going. */
+  resumeAllSuspended(input: { concurrency?: number; note?: string } = {}): { runs: string[]; done: Promise<void> } {
+    this.store.setSuspended(null);
+    const queue = this.store.all().filter((r) => r.status === "suspended").map((r) => r.id);
+    const runs = [...queue];
+    const width = Math.max(1, Math.min(input.concurrency ?? 2, queue.length || 1));
+    const worker = async () => {
+      for (let id = queue.shift(); id; id = queue.shift()) await this.unsuspend(id, { note: input.note }).catch((e) => console.error(`blueprints: resuming ${id} failed`, e));
+    };
+    return { runs, done: Promise.all(Array.from({ length: width }, worker)).then(() => undefined) };
+  }
+
   /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
   async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
     const run = this.require(runId);
-    return this.exclusive(run.id, () => this.doResume(run, input));
+    return this.exclusive(run.id, () => (run.status === "suspended" ? this.doUnsuspend(run, { note: input.note }) : this.doResume(run, input)));
   }
 
   private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
@@ -595,6 +709,7 @@ export class Engine {
       run.endedAt = null;
       run.pm.pending = null;
       run.waitingFor = null;
+      this.withdrawEscalations(run, "run resumed");
       this.log(run, "resumed", stage, input.note ?? null);
       st.status = "entering";
       st.attempts = 0;
@@ -615,9 +730,11 @@ export class Engine {
 
   // ---- agent stages ----
 
-  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry", facts: string): string {
+  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry" | "wake", facts: string): string {
     const parts: string[] = [];
-    if (why === "nudge") {
+    if (why === "wake") {
+      parts.push(`Factory: run ${run.id} was suspended and is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
+    } else if (why === "nudge") {
       parts.push(`Factory: you ended your turn without giving a verdict for stage "${id}" of run ${run.id}. Finish the work if needed, then call blueprint_verdict. Do not end your turn without it.`);
     } else {
       parts.push(this.r(run, def.prompt));
@@ -659,7 +776,8 @@ export class Engine {
     return [...out];
   }
 
-  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry", opts: { free?: boolean; fresh?: boolean } = {}): Promise<void> {
+  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean } = {}): Promise<void> {
+    if (run.status === "suspended") return;
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
     if (!opts.free) st.attempts += 1;
@@ -669,13 +787,18 @@ export class Engine {
     this.store.save();
 
     const facts = await this.prFactsBlock(run, def);
-    const prompt = this.composePrompt(run, id, def, st, why, facts);
+    let prompt = this.composePrompt(run, id, def, st, why, facts);
     const reuse = /^reuse:(.+)$/.exec(def.agent)?.[1];
     // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
     let target: string | null = why === "start" ? null : st.agentId;
     if (reuse) target = run.stages[reuse]?.agentId ?? null;
     if (opts.fresh) target = null; // an infrastructure flake: the worker's pod is not to be trusted
     if (target && (await this.ports.agentState(target)) === "gone") target = null;
+    if (why === "wake") {
+      // Wake the pod ahead of the prompt; a worker that is gone gets a fresh start with the original prompt instead.
+      if (target) await this.wakePod(run, target);
+      else prompt = this.composePrompt(run, id, def, st, "retry", facts);
+    }
 
     try {
       if (target) {
@@ -683,7 +806,8 @@ export class Engine {
         await this.ports.send(target, prompt);
         this.log(run, "sent", id, `to ${target}${reuse ? ` (reuse of ${reuse})` : ""}`);
       } else {
-        const replaced = !!(reuse ? run.stages[reuse]?.agentId : st.agentId);
+        const old = reuse ? run.stages[reuse]?.agentId : st.agentId;
+        const replaced = !!old;
         const share = !!this.ports.settings().shareWorkspace && def.workspace === "run";
         const spawned = await this.ports.spawn({
           idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}`,
@@ -706,11 +830,14 @@ export class Engine {
         this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
         if (share && spawned.workspaceId) run.sharedWorkspaceId = spawned.workspaceId;
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
+        if (opts.archiveOld && old && old !== spawned.agentId) await this.ports.archive(old).catch((e) => console.error(`blueprints: archiving ${old} failed`, e));
       }
     } catch (error) {
       const flake = flakeReason((error as Error).message);
       if (flake && this.takeFlake(run, id, flake, (error as Error).message)) {
-        return this.dispatch(run, id, "retry", { free: true, fresh: true });
+        // A nudge or wake-up that never reached a worker whose session is gone costs nothing: the fresh worker is the same attempt.
+        if (flake === SESSION_GONE && !opts.free && (why === "nudge" || why === "wake")) st.attempts = Math.max(0, st.attempts - 1);
+        return this.dispatch(run, id, "retry", { free: true, fresh: true, archiveOld: flake === SESSION_GONE });
       }
       // A worker that cannot even be started is a setup problem (working directory, role, provider), not a failed
       // attempt: retrying burns the caps in milliseconds. Pause the run with the reason and tell a person.
@@ -747,7 +874,7 @@ export class Engine {
     const st = run.stages[id];
     const reason = flakeReason(detail);
     if (reason) {
-      if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true });
+      if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true, archiveOld: reason === SESSION_GONE });
     } else if (st.flakes < def.flake_retries) {
       // Legacy: a stage that sets flake_retries retries any failed turn (provider errors) for free.
       st.flakes += 1;
@@ -775,6 +902,8 @@ export class Engine {
 
   /** A worker's verdict. The caller must be the stage's current worker. */
   async verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {
+    const held = this.store.all().find((r) => r.status === "suspended" && (!input.run || r.id === input.run) && r.stage && r.stages[r.stage]?.agentId === callerId);
+    if (held) throw new UsageError(`Run ${held.id} is suspended${held.suspended ? ` (${held.suspended.reason})` : ""}: your verdict is not taken until it is resumed. Stop now; you are woken on resume.`);
     const candidates = this.store.active().filter((r) => (!input.run || r.id === input.run) && r.stage && (!input.stage || r.stage === input.stage) && r.stages[r.stage]?.agentId === callerId);
     if (candidates.length === 0) throw new UsageError("You are not the worker of a running stage" + (input.run ? ` of run ${input.run}` : "") + ".");
     const run = candidates[0];
@@ -1139,29 +1268,38 @@ export class Engine {
         if (!id) return;
         const st = run.stages[id];
         if (!st) return;
-        // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
-        if (run.pm.pending && !(await this.hasLivePm(run))) {
-          await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
-          return;
-        }
-        if (st.status === "entering") {
-          const def = this.stageDef(run, id);
-          if ((def.kind ?? "agent") === "agent" && st.runs > 0) await this.dispatch(run, id, "retry", { free: true });
-          else await this.enter(run, id);
-        } else if (st.status === "waiting" && st.gate?.itemId) {
-          const gate = this.ports.gate(st.gate.itemId);
-          if (gate && gate.status !== "pending") await this.handleGate(run, st.gate.itemId);
-        } else if (st.status === "waiting" && st.childRunId) {
-          const child = this.store.get(st.childRunId);
-          if (child && (child.status === "done" || child.status === "failed" || child.status === "aborted")) await this.childFinished(run, child);
-        } else if (st.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent") {
-          const state = st.agentId ? await this.ports.agentState(st.agentId) : "gone";
-          if (state === "gone") await this.agentFailed(run, id, "worker gone after restart");
-          else if (state === "idle") await this.dispatch(run, id, "nudge");
-        } else if (st.status === "running") {
-          await this.enter(run, id); // an extension stage or call: run again (idempotent by contract)
-        }
+        await this.replay(run, id, st, {});
       }).catch((e) => this.crash(run, e));
+    }
+  }
+
+  /** Redo the effect of the stage's state: after a restart, or when a suspended run is resumed (then no attempt is used). */
+  private async replay(run: Run, id: string, st: StageState, opts: { resumed?: boolean }): Promise<void> {
+    // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
+    if (run.pm.pending && !(await this.hasLivePm(run))) {
+      await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
+      return;
+    }
+    if (st.status === "entering") {
+      const def = this.stageDef(run, id);
+      if ((def.kind ?? "agent") === "agent" && st.runs > 0) await this.dispatch(run, id, "retry", { free: true });
+      else await this.enter(run, id);
+    } else if (st.status === "waiting" && st.gate?.itemId) {
+      const gate = this.ports.gate(st.gate.itemId);
+      if (gate && gate.status !== "pending") await this.handleGate(run, st.gate.itemId);
+    } else if (st.status === "waiting" && st.childRunId) {
+      const child = this.store.get(st.childRunId);
+      if (child && (child.status === "done" || child.status === "failed" || child.status === "aborted")) await this.childFinished(run, child);
+    } else if (st.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent") {
+      const state = st.agentId ? await this.ports.agentState(st.agentId) : "gone";
+      if (opts.resumed) {
+        if (state === "gone") await this.dispatch(run, id, "retry", { free: true, fresh: true });
+        else if (state === "idle") await this.dispatch(run, id, "wake", { free: true });
+        // a worker still in its turn (a local one, or a busy pod that was not suspended) carries on by itself
+      } else if (state === "gone") await this.agentFailed(run, id, "worker gone after restart");
+      else if (state === "idle") await this.dispatch(run, id, "nudge");
+    } else if (st.status === "running") {
+      await this.enter(run, id); // an extension stage or call: run again (idempotent by contract)
     }
   }
 
@@ -1319,6 +1457,7 @@ export class Engine {
       endedAt: run.endedAt,
       error: run.error,
       waitingFor: run.waitingFor,
+      suspended: run.suspended ? { reason: run.suspended.reason, since: run.suspended.at, by: run.suspended.by, pods: run.suspended.pods } : null,
       pmPending: run.pm.pending,
       parent: run.parent,
       stages,

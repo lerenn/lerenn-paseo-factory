@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { Engine, UsageError, type GateState, type PrFacts, type Ports } from "./engine";
 import { RunStore } from "./store";
@@ -78,7 +81,7 @@ merged = "done"
 head_moved = "check"
 `;
 
-function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string } = {}, withReport = false) {
+function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean } = {}, withReport = false) {
   let time = 1_000_000;
   const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string }[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -90,6 +93,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
   const store = new RunStore(null);
   let agents = 0;
   const spawnErrors: string[] = [];
+  const pods = { suspended: [] as string[], woken: [] as string[], busy: new Set<string>() };
   const reports: { to: string; subject: string; body: string; kind: string }[] = [];
   const ports: Ports = {
     now: () => time,
@@ -99,8 +103,20 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
       const agentId = `agent-${++agents}`;
       spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey, workspaceTitle: o.workspaceTitle });
       states.set(agentId, "running");
-      return { agentId };
+      return { agentId, workspaceId: over.pods ? `ws-${agents}` : undefined };
     },
+    ...(over.pods
+      ? {
+          async suspendWorkspace(ws: string, force: boolean) {
+            if (pods.busy.has(ws) && !force) return { ok: false, message: "busy: a turn is running" };
+            pods.suspended.push(ws);
+            return { ok: true };
+          },
+          async wakeWorkspace(ws: string) {
+            pods.woken.push(ws);
+          },
+        }
+      : {}),
     async send(to, text) {
       if (states.get(to) === "gone") throw new Error("gone");
       sent.push({ to, text });
@@ -131,7 +147,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     tool: () => null,
     stageKind: () => null,
     blueprint: (name) => (name === "flow" ? parseBlueprint(source) : undefined),
-    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, ...over }),
+    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, flakeRetries: over.flakeRetries, runsMailTo: over.runsMailTo }),
   };
   const engine = new Engine(store, ports);
   const settle = async () => {
@@ -153,7 +169,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     return out;
   };
   states.set("pm-agent", "idle");
-  return { engine, store, spawned, sent, states, spawnErrors, reports, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
+  return { engine, store, spawned, sent, states, pods, spawnErrors, reports, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
 }
 
 const okPr = (url: string, head = "abc123"): PrFacts => ({ url, exists: true, state: "open", head, ci: "green", mergeable: true, draft: false, review: "" });
@@ -809,5 +825,248 @@ describe("runs.notifyMailTo", () => {
     expect(reports[0].body).toContain("blueprint_retry");
     expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
     expect(spawned.filter((s) => s.role === "pm")).toHaveLength(0);
+  });
+});
+
+describe("suspending", () => {
+  it("holds a run: its pod is suspended, its worker kept, no attempt used, no one prompted", async () => {
+    const { start, engine, pods, spawned, sent, states, archived, settle, store } = setup(flow, { pods: true });
+    const run = await start();
+    await engine.suspend(run.id, { reason: "cost freeze", by: "assistant" });
+    const r = engine.require(run.id);
+    expect(r.status).toBe("suspended");
+    expect(r.suspended).toMatchObject({ reason: "cost freeze", by: "assistant", prevStatus: "running" });
+    expect(pods.suspended).toEqual(["ws-1"]);
+    expect(r.suspended!.pods[0]).toContain("pod ws-1 suspended");
+    expect(archived).toEqual([]);
+    expect(store.active()).toHaveLength(0);
+    // the worker's pod going away must not be retried, nudged or respawned, by turn end, tick or restart
+    states.set("agent-1", "gone");
+    await engine.turnEnded("agent-1", { kind: "failed", message: "pod evicted" });
+    await engine.tick();
+    await engine.resumeAll();
+    await settle();
+    expect(spawned).toHaveLength(1);
+    expect(sent).toEqual([]);
+    expect(r.stages.think).toMatchObject({ attempts: 1, flakes: 0, status: "running" });
+    expect(engine.view(r).suspended).toMatchObject({ reason: "cost freeze", by: "assistant" });
+  });
+
+  it("refuses a verdict while held, and says why", async () => {
+    const { start, engine } = setup(flow, { pods: true });
+    const run = await start();
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    await expect(engine.verdict("agent-1", { verdict: "nothing" })).rejects.toThrow(/suspended/);
+  });
+
+  it("keeps a busy pod unless forced, and reports it", async () => {
+    const { start, engine, pods } = setup(flow, { pods: true });
+    pods.busy.add("ws-1");
+    const run = await start();
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    expect(pods.suspended).toEqual([]);
+    expect(engine.require(run.id).suspended!.pods[0]).toContain("not suspended (busy");
+    const second = await start({ ticket: "ANY-2", ticket_confirmed: "true" });
+    pods.busy.add("ws-2");
+    await engine.suspend(second.id, { reason: "freeze", by: "x", force: true });
+    expect(pods.suspended).toEqual(["ws-2"]);
+  });
+
+  it("a local worker (no pod) is just not prompted", async () => {
+    const { start, engine } = setup();
+    const run = await start();
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    expect(engine.require(run.id).suspended!.pods[0]).toContain("local");
+  });
+
+  it("keeps open gates: the Inbox item stays pending, and an answer given meanwhile is taken on resume", async () => {
+    const { start, engine, verdict, items, answer, spawned, settle } = setup(flow, { pods: true });
+    const run = await start();
+    await verdict("agent-1", "fix", { criteria: "c" });
+    expect(engine.require(run.id).status).toBe("waiting");
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    expect(items.get("item-1")!.gate!.status).toBe("pending");
+    expect(items.get("item-1")!.withdrawn).toBeNull();
+    await answer("item-1", "approve");
+    expect(engine.require(run.id).status).toBe("suspended");
+    expect(spawned).toHaveLength(1);
+    await engine.unsuspend(run.id);
+    await settle();
+    expect(engine.require(run.id).stage).toBe("build");
+    expect(spawned).toHaveLength(2);
+  });
+
+  it("resumes at the same stage and attempt count, waking the existing worker", async () => {
+    const { start, engine, pods, spawned, sent, states, wardens, settle } = setup(flow, { pods: true });
+    const run = await start();
+    states.set("agent-1", "idle");
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    await engine.unsuspend(run.id, { note: "carry on" });
+    await settle();
+    const r = engine.require(run.id);
+    expect(r.status).toBe("running");
+    expect(r.suspended).toBeNull();
+    expect(r.stages.think).toMatchObject({ attempts: 1, status: "running", agentId: "agent-1" });
+    expect(pods.woken).toEqual(["ws-1"]);
+    expect(spawned).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ to: "agent-1" });
+    expect(sent[0].text).toContain("was suspended and is resumed");
+    expect(sent[0].text).toContain("carry on");
+    expect(wardens).toEqual(["agent-1", "agent-1"]); // watched again once woken
+  });
+
+  it("spawns a fresh worker with a note when the old one is gone, without using an attempt", async () => {
+    const { start, engine, spawned, states, settle } = setup(flow, { pods: true });
+    const run = await start();
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    states.set("agent-1", "gone");
+    await engine.resume(run.id, {});
+    await settle();
+    expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, agentId: "agent-2" });
+    expect(spawned).toHaveLength(2);
+    expect(spawned[1].prompt).toContain("Investigate ANY-1");
+    expect(spawned[1].prompt).toContain("you are its replacement");
+  });
+
+  it("returns a paused run to paused", async () => {
+    const { start, engine, spawnErrors } = setup(flow, { pods: true });
+    spawnErrors.push("no provider");
+    const run = await start();
+    expect(engine.require(run.id).status).toBe("paused");
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    await engine.unsuspend(run.id);
+    expect(engine.require(run.id).status).toBe("paused");
+  });
+
+  it("an abort of a suspended run ends it", async () => {
+    const { start, engine } = setup(flow, { pods: true });
+    const run = await start();
+    await engine.suspend(run.id, { reason: "freeze", by: "x" });
+    await engine.abort(run.id, "no longer needed");
+    expect(engine.require(run.id)).toMatchObject({ status: "aborted", suspended: null });
+  });
+});
+
+describe("suspending the whole Factory", () => {
+  it("suspends every live run, refuses new ones, and survives a reload", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "factory-suspend-"));
+    const file = path.join(dir, "blueprints.json");
+    try {
+      const a = setup(flow, { pods: true });
+      const store = new RunStore(file);
+      const engine = new Engine(store, a.ports);
+      const run = engine.start({ blueprint: "flow", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "pm" });
+      await a.settle();
+      await engine.suspendAll({ reason: "maintenance", by: "assistant" });
+      expect(engine.require(run.id).status).toBe("suspended");
+      expect(() => engine.start({ blueprint: "flow", vars: { ticket: "ANY-2", ticket_confirmed: "true" }, requestedBy: "pm" })).toThrow(/suspended/);
+
+      // the plugin reloads: nothing is respawned
+      const again = new RunStore(file);
+      expect(again.suspended()).toMatchObject({ reason: "maintenance" });
+      const reloaded = new Engine(again, a.ports);
+      const before = a.spawned.length;
+      await reloaded.resumeAll();
+      await reloaded.tick();
+      await a.settle();
+      expect(a.spawned).toHaveLength(before);
+      expect(reloaded.require(run.id).status).toBe("suspended");
+      expect(reloaded.require(run.id).suspended).toMatchObject({ reason: "maintenance", by: "assistant" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes all with at most N workers starting at once and lifts the hold", async () => {
+    const { start, engine, store, settle, ports } = setup(flow, { pods: true });
+    const runs = [];
+    for (let i = 1; i <= 5; i++) runs.push(await start({ ticket: `ANY-${i}`, ticket_confirmed: "true" }));
+    await engine.suspendAll({ reason: "freeze", by: "x" });
+    expect(store.suspended()).not.toBeNull();
+    let inFlight = 0;
+    let peak = 0;
+    const send = ports.send;
+    ports.send = async (to, text) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      await send(to, text);
+      inFlight -= 1;
+    };
+    for (const r of runs) (ports as { agentState: Ports["agentState"] }).agentState = async () => "idle";
+    const out = engine.resumeAllSuspended({ concurrency: 2 });
+    expect(out.runs).toHaveLength(5);
+    expect(store.suspended()).toBeNull();
+    await out.done;
+    await settle();
+    expect(peak).toBe(2);
+    expect(runs.map((r) => engine.require(r.id).status)).toEqual(Array(5).fill("running"));
+    engine.start({ blueprint: "flow", vars: { ticket: "ANY-9", ticket_confirmed: "true" }, requestedBy: "pm" }); // starts again
+  });
+});
+
+describe("withdrawing stale escalations on resume", () => {
+  it("withdraws older pending pause items of the run when it resumes, keeping none behind", async () => {
+    const { start, engine, spawnErrors, items, settle } = setup(flow, { pods: true });
+    spawnErrors.push("no provider");
+    const run = await start();
+    expect(engine.require(run.id).status).toBe("paused");
+    const first = [...items.keys()][0];
+    expect(items.get(first)!.gate!.status).toBe("pending");
+    await engine.resume(run.id, { note: "fixed" });
+    await settle();
+    expect(engine.require(run.id).status).toBe("running");
+    expect(items.get(first)!.gate!.status).toBe("withdrawn");
+    expect(items.get(first)!.withdrawn).toBe("run resumed");
+    expect(engine.require(run.id).escalations).toEqual({});
+  });
+
+  it("an answer to a newer escalation withdraws the older ones", async () => {
+    const { start, engine, spawnErrors, items, answer, settle } = setup(flow, { pods: true });
+    spawnErrors.push("no provider");
+    const run = await start();
+    const older = [...items.keys()][0];
+    // a second pause of the same run while the first item is still pending
+    await engine.resume(run.id, {}); // spawns fine; withdraws `older`
+    engine.require(run.id).escalations = { [older]: { stage: "think", kind: "setup" } };
+    items.get(older)!.gate = { status: "pending", optionId: null, text: null, by: null };
+    items.set("item-newer", { gate: { status: "pending", optionId: null, text: null, by: null }, question: "q", withdrawn: null });
+    engine.require(run.id).escalations!["item-newer"] = { stage: "think", kind: "setup" };
+    await answer("item-newer", "resume");
+    await settle();
+    expect(items.get(older)!.gate!.status).toBe("withdrawn");
+  });
+});
+
+describe("a worker whose provider session is gone", () => {
+  it("is a free flake: not re-sent to, archived, and replaced by a fresh worker with a note", async () => {
+    const { start, engine, spawned, sent, states, archived, settle } = setup(flow.replace("flake_retries = 1\n", ""));
+    const run = await start();
+    states.set("agent-1", "idle");
+    await engine.turnEnded("agent-1", { kind: "failed", message: "No conversation found with session ID 4f2a1c9e-0000-0000-0000-000000000000" });
+    await settle();
+    const r = engine.require(run.id);
+    expect(r.stages.think).toMatchObject({ attempts: 1, flakes: 1, flakeReasons: ["provider session gone"], agentId: "agent-2", status: "running" });
+    expect(sent.filter((m) => m.to === "agent-1")).toEqual([]);
+    expect(archived).toEqual(["agent-1"]);
+    expect(spawned).toHaveLength(2);
+    expect(spawned[1].prompt).toContain("you are its replacement");
+  });
+
+  it("also when the send itself reports it", async () => {
+    const { start, engine, ports, spawned, archived, states, settle } = setup(flow.replace("flake_retries = 1\n", ""));
+    const run = await start();
+    states.set("agent-1", "idle");
+    const send = ports.send;
+    ports.send = async (to, text) => {
+      if (to === "agent-1") throw new Error("No conversation found with session ID abc");
+      await send(to, text);
+    };
+    await engine.turnEnded("agent-1", { kind: "completed" }); // no verdict: nudged
+    await settle();
+    expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, flakes: 1, agentId: "agent-2" });
+    expect(archived).toEqual(["agent-1"]);
+    expect(spawned).toHaveLength(2);
   });
 });

@@ -9,6 +9,7 @@ import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
 import { probeWorktree } from "./worktree";
+import { suspendPod, wakePod } from "./pod-control";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
@@ -16,7 +17,7 @@ import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
-import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
 import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
 
 /** What the Blueprints tab shows about a loaded blueprint. */
@@ -149,6 +150,8 @@ export function startBlueprints(host: FactoryHost) {
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
     worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId),
+    suspendWorkspace: suspendPod,
+    wakeWorkspace: wakePod,
     spend(runId) {
       const total = aggregate(spend.all().filter((r) => r.run === runId)).total;
       return total.turns ? { costUsd: total.costUsd, turns: total.turns } : null;
@@ -351,6 +354,7 @@ export function startBlueprints(host: FactoryHost) {
       blueprints: [...c.blueprints.values()].map((entry) => describe(entry)),
       errors: c.errors.map((e) => ({ file: path.basename(e.file), message: e.message })),
       settings: current,
+      factorySuspended: store.suspended() ? { reason: store.suspended()!.reason, since: store.suspended()!.at, by: store.suspended()!.by } : null,
     };
   });
   server.handle(runDiffRpc, async ({ runId }, ctx) => {
@@ -397,6 +401,20 @@ export function startBlueprints(host: FactoryHost) {
     host.capture(ctx);
     try {
       await engine.resume(runId, { stage, extraAttempts });
+      return { ok: true, message: null };
+    } catch (error) {
+      return { ok: false, message: (error as Error).message };
+    }
+  });
+
+  server.handle(suspendRunsRpc, async ({ runId, all, resume, reason }, ctx) => {
+    host.capture(ctx);
+    try {
+      if (resume) {
+        if (all) engine.resumeAllSuspended();
+        else await engine.unsuspend(runId!);
+      } else if (all) await engine.suspendAll({ reason: reason ?? "suspended from the Blueprints tab", by: "user" });
+      else await engine.suspend(runId!, { reason: reason ?? "suspended from the Blueprints tab", by: "user" });
       return { ok: true, message: null };
     } catch (error) {
       return { ok: false, message: (error as Error).message };

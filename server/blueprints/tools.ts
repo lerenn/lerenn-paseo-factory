@@ -14,7 +14,7 @@ export const INSTRUCTIONS = `Blueprints are the Factory's flows: a run walks the
 
 If you are a stage worker (your prompt says "You are stage ..."): do the work, then call blueprint_verdict(run, stage, verdict, summary, data) and stop. Never end your turn without it. Facts about pull requests are checked on GitHub, not taken from your word.
 
-If you are the PM: blueprint_list shows what you can run, blueprint_start(blueprint, vars, at?) starts a run (code changes need a Linear key you checked: pass ticket_confirmed="true"), blueprint_status follows it. When a stage is exhausted you get ONE judgement call: blueprint_retry grants a few extra attempts or re-scopes; to escalate ask the human with inbox_ask, then blueprint_resume or blueprint_abort. blueprint_retry, blueprint_resume and blueprint_abort are for the run's PM and the Assistant only.`;
+If you are the PM: blueprint_list shows what you can run, blueprint_start(blueprint, vars, at?) starts a run (code changes need a Linear key you checked: pass ticket_confirmed="true"), blueprint_status follows it. When a stage is exhausted you get ONE judgement call: blueprint_retry grants a few extra attempts or re-scopes; to escalate ask the human with inbox_ask, then blueprint_resume or blueprint_abort. blueprint_retry, blueprint_resume, blueprint_suspend and blueprint_abort are for the run's PM and the Assistant only.`;
 
 const runArg = z.string().describe("Run id (bp-...).");
 
@@ -28,6 +28,14 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
     const labels = await ctx.labels();
     if (labels["paseo.assistant"] === "1" || labels["paseo.factory.supervisor"] === "1") return;
     throw new UsageError(`Run ${run.id} is steered by its PM (${run.pmAgentId ?? "none"}) and the Assistant.`);
+  }
+
+  /** Whole-Factory operations (`all`) are for the Assistant and the Supervisor, not for a run's PM. */
+  async function everything(ctx: CallContext): Promise<void> {
+    if (ctx.callerId === "factory") return;
+    const labels = await ctx.labels();
+    if (labels["paseo.assistant"] === "1" || labels["paseo.factory.supervisor"] === "1") return;
+    throw new UsageError("all=true is for the Assistant and the Supervisor.");
   }
 
   return [
@@ -64,14 +72,14 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
     },
     {
       name: "blueprint_status",
-      description: "One run's card (stages, attempts, history), or all active runs when no run is given.",
+      description: "One run's card (stages, attempts, history, and `suspended` with reason and since when held), or all active runs when no run is given.",
       input: z.object({ run: runArg.optional(), include_finished: z.boolean().optional() }),
       run({ run, include_finished }) {
         if (run) return engine.view(engine.require(run));
         return engine.store
           .all()
           .filter((r) => include_finished || r.endedAt === null)
-          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars }));
+          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars, ...(r.suspended ? { suspended: { reason: r.suspended.reason, since: new Date(r.suspended.at).toISOString(), by: r.suspended.by, pods: r.suspended.pods } } : {}) }));
       },
     },
     {
@@ -102,12 +110,51 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
       },
     },
     {
+      name: "blueprint_suspend",
+      description:
+        "Hold a run (run) or every run and the Factory itself (all=true, for the Assistant and the Supervisor). A suspended run spawns and prompts no worker, retries no stage, uses no attempt and keeps its open gates; " +
+        "its worker keeps existing and its pod is suspended (volume kept; force=true also stops a busy one). The hold survives a plugin reload. Undo it with blueprint_resume.",
+      input: z.object({
+        run: runArg.optional(),
+        all: z.boolean().optional(),
+        reason: z.string().min(1).max(1000),
+        force: z.boolean().optional().describe("Suspend a pod although an agent is running in it."),
+      }),
+      async run({ run, all, reason, force }, ctx) {
+        if (!!run === !!all) throw new UsageError("Give either run or all=true.");
+        if (all) {
+          await everything(ctx);
+          const runs = await engine.suspendAll({ reason, by: ctx.callerId, force });
+          return { factory_suspended: true, suspended: runs.map((r) => ({ run_id: r.id, status: r.status, pods: r.suspended?.pods ?? [] })) };
+        }
+        await steer(engine.require(run!), ctx);
+        const out = await engine.suspend(run!, { reason, by: ctx.callerId, force });
+        return { run_id: out.id, status: out.status, pods: out.suspended?.pods ?? [] };
+      },
+    },
+    {
       name: "blueprint_resume",
-      description: "Continue a failed, paused or PM-waiting run at a stage after a person decided; extra_attempts adds attempts beyond the caps.",
-      input: z.object({ run: runArg, stage: z.string().optional(), extra_attempts: z.number().int().min(0).max(20).optional(), note: z.string().max(2000).optional() }),
-      async run({ run, stage, extra_attempts, note }, ctx) {
-        await steer(engine.require(run), ctx);
-        const out = await engine.resume(run, { stage, extraAttempts: extra_attempts, note });
+      description:
+        "Continue a suspended run at the same stage and attempt count (its worker is woken, or replaced with a note if gone). Also continues a failed, paused or PM-waiting run at a stage after a person decided; extra_attempts adds attempts beyond the caps. " +
+        "all=true (Assistant and Supervisor) lifts the Factory-wide suspension and resumes every suspended run, at most `concurrency` (default 2) starting at once.",
+      input: z.object({
+        run: runArg.optional(),
+        all: z.boolean().optional(),
+        concurrency: z.number().int().min(1).max(20).optional(),
+        stage: z.string().optional(),
+        extra_attempts: z.number().int().min(0).max(20).optional(),
+        note: z.string().max(2000).optional(),
+      }),
+      async run({ run, all, concurrency, stage, extra_attempts, note }, ctx) {
+        if (!!run === !!all) throw new UsageError("Give either run or all=true.");
+        if (all) {
+          await everything(ctx);
+          const out = engine.resumeAllSuspended({ concurrency, note });
+          void out.done;
+          return { factory_suspended: false, resuming: out.runs, concurrency: concurrency ?? 2 };
+        }
+        await steer(engine.require(run!), ctx);
+        const out = await engine.resume(run!, { stage, extraAttempts: extra_attempts, note });
         return { run_id: out.id, status: out.status, stage: out.stage };
       },
     },
@@ -124,7 +171,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
   ];
 }
 
-export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume"];
+export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume", "blueprint_suspend"];
 /** What a stage worker needs. */
 export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status"];
 
