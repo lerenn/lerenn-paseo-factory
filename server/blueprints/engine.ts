@@ -832,8 +832,13 @@ export class Engine {
         if (live.length) return keep(`${live.length} live agent(s) remain`);
       }
       if (this.ports.worktree) {
-        const probe = await this.ports.worktree(ws);
-        if (probe.state !== "clean") return keep(probe.detail);
+        let probe = await this.ports.worktree(ws);
+        // A retired worker's pod is often suspended by the time its turn ends, so the check gets no answer: wake it and look again.
+        if (probe.state === "unknown" && this.ports.wakeWorkspace) {
+          await this.ports.wakeWorkspace(ws).catch((e) => console.error(`blueprints: waking ${ws} for its worktree check failed`, e));
+          probe = await this.ports.worktree(ws);
+        }
+        if (probe.state !== "clean") return keep(probe.state === "unknown" ? `${probe.detail} (checked again by the orphan sweep)` : probe.detail);
       }
       await this.ports.archiveWorkspace(ws);
       for (const a of Object.values(run.agents ?? {})) if (a.workspaceId === ws) a.workspaceArchived = true;
@@ -862,6 +867,8 @@ export class Engine {
 
   /** Workspaces the orphan sweep kept, and until when it leaves them alone (a worktree probe can wake a pod). */
   private orphanKept = new Map<string, number>();
+  /** How many sweeps found no answer from a workspace's worktree; after 3 it is looked at again in hours, like real work. */
+  private orphanNoAnswer = new Map<string, number>();
 
   /**
    * The orphan sweep (every 10 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
@@ -896,8 +903,12 @@ export class Engine {
         let kept = false;
         await this.archiveWorkspaceOf(run, id, (ws, why) => {
           kept = true;
-          this.orphanKept.set(ws, now + ORPHAN_KEEP_MS);
-          this.log(run, "workspace_kept", null, `${ws} of ${id}: ${why} (orphan sweep; looked at again in ${ORPHAN_KEEP_MS / 3_600_000} h)`);
+          // real unpushed work is looked at again in hours; a check that got no answer at the next sweeps
+          const tries = /checked again by the orphan sweep|could not list/.test(why) ? (this.orphanNoAnswer.get(ws) ?? 0) + 1 : Infinity;
+          if (Number.isFinite(tries)) this.orphanNoAnswer.set(ws, tries);
+          const wait = tries < 3 ? 0 : ORPHAN_KEEP_MS;
+          this.orphanKept.set(ws, now + wait);
+          this.log(run, "workspace_kept", null, `${ws} of ${id}: ${why}${wait ? ` (orphan sweep; looked at again in ${ORPHAN_KEEP_MS / 3_600_000} h)` : ""}`);
         });
         if (!kept && run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
       }

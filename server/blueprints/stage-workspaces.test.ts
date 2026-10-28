@@ -31,12 +31,13 @@ done = "check"
 
 const QUOTA = "exceeded quota: agents, requested: count/sandboxes.agents.x-k8s.io=1, used: count/sandboxes.agents.x-k8s.io=24, limited: count/sandboxes.agents.x-k8s.io=24";
 
-function setup(over: { janitor?: boolean; probe?: "clean" | "dirty" } = {}) {
+function setup(over: { janitor?: boolean; probe?: "clean" | "dirty"; probes?: ("clean" | "dirty" | "unknown")[] } = {}) {
   let now = 1_000_000;
   let n = 0;
   const spawned: string[] = [];
   const archived: string[] = [];
   const archivedWs: string[] = [];
+  const woken: string[] = [];
   const asked: string[] = [];
   const states = new Map<string, "running" | "idle" | "gone">();
   const failures: string[] = [];
@@ -62,7 +63,12 @@ function setup(over: { janitor?: boolean; probe?: "clean" | "dirty" } = {}) {
       archivedWs.push(id);
     },
     async worktree() {
-      return { state: over.probe ?? "clean", detail: "1 uncommitted file(s)" };
+      const next = over.probes?.shift();
+      if (next === "unknown") return { state: "unknown", detail: "no answer from the worktree" };
+      return { state: next ?? over.probe ?? "clean", detail: "1 uncommitted file(s)" };
+    },
+    async wakeWorkspace(id: string) {
+      woken.push(id);
     },
     ask: (o) => {
       asked.push(o.question);
@@ -89,7 +95,7 @@ function setup(over: { janitor?: boolean; probe?: "clean" | "dirty" } = {}) {
     await engine.verdict(agent, { verdict: v });
     await settle();
   };
-  return { engine, spawned, archived, archivedWs, asked, states, failures, settle, verdict, advance: (ms: number) => (now += ms) };
+  return { engine, spawned, archived, archivedWs, woken, asked, states, failures, settle, verdict, advance: (ms: number) => (now += ms) };
 }
 
 describe("workspaces of finished stage workers", () => {
@@ -228,5 +234,27 @@ describe("orphan sweep", () => {
     const before = kept();
     await t.engine.sweepOrphans();
     expect(kept()).toBe(before);
+  });
+});
+
+describe("worktree check of a retired worker", () => {
+  it("wakes a pod that gave no answer and archives it once the check is clean", async () => {
+    const t = setup({ probes: ["unknown", "clean"] });
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    t.engine.require(run.id).agents!["old"] = { role: "qa", stage: "check", workspaceId: "ws-old" };
+    await t.engine.sweepOrphans();
+    expect(t.woken).toEqual(["ws-old"]);
+    expect(t.archivedWs).toEqual(["ws-old"]);
+  });
+
+  it("keeps a workspace that never answers, retries at the next sweeps, then waits hours", async () => {
+    const t = setup({ probes: Array(20).fill("unknown") });
+    const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await t.settle();
+    t.engine.require(run.id).agents!["old"] = { role: "qa", stage: "check", workspaceId: "ws-old" };
+    for (let i = 0; i < 5; i++) await t.engine.sweepOrphans();
+    expect(t.woken).toEqual(["ws-old", "ws-old", "ws-old"]);
+    expect(t.archivedWs).toEqual([]);
   });
 });
