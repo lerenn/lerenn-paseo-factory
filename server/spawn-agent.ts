@@ -16,6 +16,8 @@ export interface SpawnAgentInput {
   prompt: string;
   labels: Record<string, string>;
   env: Record<string, string>;
+  /** Kubernetes: put the agent in this existing workspace (pod) instead of creating one. */
+  joinWorkspaceId?: string;
 }
 
 /** Paseo's worktree slug rule: names the pod and the branch. */
@@ -36,6 +38,10 @@ export async function spawnAgent(paseo: Paseo, runtime: Runtime, o: SpawnAgentIn
     const handle = await paseo.agents.create({ ...agent, cwd: o.cwd } as never);
     await setWorkspaceTitle(paseo, handle.id, o.workspaceTitle);
     return { agentId: handle.id, workspaceId: null };
+  }
+  if (o.joinWorkspaceId) {
+    const handle = await paseo.workspaces.ref(o.joinWorkspaceId).agents.create(agent as never);
+    return { agentId: handle.id, workspaceId: o.joinWorkspaceId };
   }
   const slug = slugFor(o.workspaceTitle, o.idempotencyKey.replace(/[^a-z0-9]/gi, "").slice(-4).toLowerCase() || undefined);
   const workspace = await paseo.workspaces.create({
