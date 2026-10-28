@@ -42,3 +42,15 @@ describe("buildTimeline", () => {
     expect([formatDuration(5000), formatDuration(5 * MIN), formatDuration(125 * MIN)]).toEqual(["5s", "5m", "2h05"]);
   });
 });
+
+describe("gates the Assistant answered", () => {
+  it("count a quick Assistant answer apart from waiting on a person, and a slow one as waiting", () => {
+    const ev = (at: number, event: string, detail: string | null = null) => ({ at, stage: "merge", event, detail });
+    const quick = buildTimeline([ev(0, "enter"), ev(0, "gate_opened", "i1"), ev(3 * 60_000, "gate_answered", "merged by assistant")], 3 * 60_000);
+    expect(quick[0]).toMatchObject({ waitingMs: 0, assistantMs: 3 * 60_000 });
+    const slow = buildTimeline([ev(0, "enter"), ev(0, "gate_opened", "i1"), ev(40 * 60_000, "gate_answered", "merged by assistant")], 40 * 60_000);
+    expect(slow[0]).toMatchObject({ waitingMs: 40 * 60_000, assistantMs: 0 });
+    const human = buildTimeline([ev(0, "enter"), ev(0, "gate_opened", "i1"), ev(3 * 60_000, "gate_answered", "merged by human")], 3 * 60_000);
+    expect(human[0]).toMatchObject({ waitingMs: 3 * 60_000, assistantMs: 0 });
+  });
+});

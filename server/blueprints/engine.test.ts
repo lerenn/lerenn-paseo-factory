@@ -1201,3 +1201,60 @@ describe("blueprint_resume attach_agent", () => {
     await expect(engine.resume(run.id, { stage: "think", attachAgent: "agent-1" })).rejects.toThrow(/is gone/);
   });
 });
+
+describe("merge gate and the merge queue (d82771ac)", () => {
+  const src = `
+version = 1
+name = "flow"
+[[stage]]
+id = "merge"
+kind = "gate"
+question = "Merge?"
+pr = "${PR}"
+options = [{ id = "merged", label = "Merged / queued" }]
+[stage.on]
+merged = "done"
+head_moved = "merge"
+`;
+  it("waits for the merge without a second question when the PR is queued", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), queued: true };
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.answer("item-1", "merged");
+    let r = ctx.engine.require(run.id);
+    expect(r.status).toBe("waiting");
+    expect(r.history.some((h) => h.event === "merge_queued")).toBe(true);
+    expect(ctx.items.size).toBe(1);
+    ctx.pr[PR] = { ...okPr(PR), state: "merged" };
+    await ctx.engine.tick();
+    await ctx.settle();
+    r = ctx.engine.require(run.id);
+    expect(r.status).toBe("done");
+    expect(ctx.items.size).toBe(1);
+  });
+
+  it("asks again when the PR is neither merged nor queued, or leaves the queue", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), queued: true };
+    ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.answer("item-1", "merged");
+    ctx.pr[PR] = { ...okPr(PR), queued: false };
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.items.size).toBe(2);
+  });
+});
+
+describe("pod start failures (d82771ac)", () => {
+  it("pauses the run after two pod starts in a row failed, instead of more retries", async () => {
+    const ctx = setup();
+    ctx.spawnErrors.push("kube: could not start the pod: boom", "kube: could not start the pod: boom", "kube: could not start the pod: boom");
+    const run = await ctx.start();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("paused");
+    expect(r.history.filter((h) => h.event === "pod_start_failed")).toHaveLength(1);
+    expect(ctx.spawnErrors).toHaveLength(1); // the third start was never tried
+  });
+});
