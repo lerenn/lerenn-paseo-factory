@@ -101,6 +101,17 @@ export function startBlueprints(host: FactoryHost) {
   };
   const agentRef = (id: string) => host.paseo.agents.ref(id);
 
+  const liveAgentsIn = async (workspaceId: string): Promise<string[] | null> => {
+    try {
+      const { entries } = await listAgents(host.paseo);
+      return (entries as { agent: { id: string; workspaceId?: string | null; archivedAt?: string | null; status?: string } }[])
+        .filter(({ agent: a }) => a.workspaceId === workspaceId && !a.archivedAt && a.status !== "closed")
+        .map(({ agent: a }) => a.id);
+    } catch {
+      return null;
+    }
+  };
+
   const ports: Ports = {
     now: Date.now,
     async spawn(o) {
@@ -150,6 +161,7 @@ export function startBlueprints(host: FactoryHost) {
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
     worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId),
+    liveAgentsIn,
     suspendWorkspace: suspendPod,
     wakeWorkspace: wakePod,
     spend(runId) {
@@ -293,16 +305,7 @@ export function startBlueprints(host: FactoryHost) {
       void archiveWorkspaceWithAgent(
         {
           workspaceOf: (id) => store.all().find((run) => run.agents?.[id])?.agents?.[id]?.workspaceId ?? null,
-          async liveAgentsIn(workspaceId) {
-            try {
-              const { entries } = await listAgents(host.paseo);
-              return (entries as { agent: { id: string; workspaceId?: string | null; archivedAt?: string | null; status?: string } }[])
-                .filter(({ agent: a }) => a.workspaceId === workspaceId && !a.archivedAt && a.status !== "closed")
-                .map(({ agent: a }) => a.id);
-            } catch {
-              return null;
-            }
-          },
+          liveAgentsIn,
           worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId).catch((e: Error) => ({ state: "unknown" as const, detail: e.message })),
           archiveWorkspace: ports.archiveWorkspace!,
           log: (line) => console.log(line),

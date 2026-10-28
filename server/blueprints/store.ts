@@ -10,6 +10,8 @@ export interface StageState {
   runs: number;
   /** Tries within the current entry. */
   attempts: number;
+  /** A start refused for cluster quota, retried by the tick at `at` (1, 2, 4, 8 min back-off), replaying the same dispatch; no attempt is used. */
+  quotaRetry?: { n: number; at: number; why: "start" | "nudge" | "retry" | "wake"; opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } } | null;
   /** Extra attempts and runs granted by the PM. */
   extra: number;
   flakes: number;
@@ -91,6 +93,8 @@ export interface SpawnedAgent {
   role: string;
   stage: string;
   workspaceId: string | null;
+  /** The Factory archived the workspace when the worker was retired. */
+  workspaceArchived?: boolean;
 }
 
 export interface PostState {
