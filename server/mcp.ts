@@ -6,7 +6,7 @@ import { isTrusted } from "./trust";
 /** Whether an agent with these labels may see and call the tool. */
 function allowed(t: HostTool, labels: Record<string, string>): boolean {
   if (t.requiresLabel && labels[t.requiresLabel.key] !== t.requiresLabel.value) return false;
-  if (t.requiresTrusted && !isTrusted(labels)) return false;
+  if (t.requiresTrusted && !isTrusted(labels) && !(t.alsoLabel && labels[t.alsoLabel.key] === t.alsoLabel.value)) return false;
   // Trusted agents act for the human without asking (bypassPermissions): they get an extension's reads, not its
   // writes, which stay with the extension's own agents or with agents a person confirms each call for.
   if (t.extension && !t.readOnly && isTrusted(labels)) return false;

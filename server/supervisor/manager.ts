@@ -116,6 +116,11 @@ export class Supervisor {
     }
   }
 
+  /** The Supervisor's settings, for the modules that route to it (the run PMs' escalation target). */
+  config(): SupervisorSettings {
+    return this.ports.settings();
+  }
+
   // ---- lifecycle ----
 
   /** Create the agent when there is none or it is gone, then deliver what waits for it. `restart` replaces a live one. */

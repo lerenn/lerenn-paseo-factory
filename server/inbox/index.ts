@@ -46,7 +46,9 @@ export function startInbox(host: FactoryHost) {
   const store = new Store(process.env.INBOX_STATE ?? host.statePath("inbox", "agents-inbox"));
   const engine = new Engine(store, actions, () => current);
   host.engines.inbox = engine;
-  const removeTools = host.registerTools("inbox", TOOLS.map((t) => adapt(t, engine, t.name === "inbox_answer" ? { requiresTrusted: true } : {})));
+  // A run's PM may answer the pm = true gate it was spawned for (the Blueprints engine knows which).
+  engine.mayAnswer = (agentId, itemId) => !!(host.engines.blueprints?.engine as { pmMayAnswer?(a: string, i: string): boolean } | undefined)?.pmMayAnswer?.(agentId, itemId);
+  const removeTools = host.registerTools("inbox", TOOLS.map((t) => adapt(t, engine, t.name === "inbox_answer" ? { requiresTrusted: true, alsoLabel: { key: "paseo.factory.stage", value: "pm" } } : {})));
   host.setInstructions("inbox", INSTRUCTIONS);
   host.contribute({
     module: "inbox",

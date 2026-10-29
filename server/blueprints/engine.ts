@@ -8,6 +8,9 @@ import type { Classification, ProviderFailure } from "../../shared/blueprints/us
 import { condition, render } from "./template";
 import { workspaceTitle } from "../workspace-title";
 import { PostRun } from "./post";
+import { buildDigest } from "./digest";
+import { escalationHow, PM_DEFAULTS, pmCalls, pmKey, pmLive, pmPrompt, pmTitle, type PmSettings } from "./pm";
+import type { PmCall, PmPoint } from "./store";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
@@ -98,7 +101,9 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings> };
+  /** Where an on-demand PM escalates first: "supervisor", an agent address or alias, or "" (straight to the human). */
+  escalationTarget?(): string;
 }
 
 /** The usage-limit controller as the engine sees it (server/blueprints/usage-limit). Absent or disabled: nothing changes. */
@@ -434,8 +439,13 @@ export class Engine {
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
     const mailTo = this.ports.settings().runsMailTo?.trim();
     if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} ${status}`, body: `${text}\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
-    else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
+    else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x && !this.isPmAgent(run, x)))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
     if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
+    // A failed run gets a PM (a child's failure is judged by its parent's PM, at the parent's stage).
+    if (status === "failed" && !opts.quiet && !run.parent && this.pmMode()) {
+      const stage = run.stage ?? run.def.stage[0].id;
+      void this.exclusive(run.id, () => this.judge(run, "failed", stage, `The run failed at stage "${stage}": ${error ?? "no detail"}.`)).catch((e) => console.error(`blueprints: PM of failed run ${run.id}`, e));
+    }
     // The janitor (after the retro) replaces the blunt archive-everything switch.
     if (!this.ports.post?.().janitor.enabled && this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
     if (!this.ports.post?.().janitor.enabled) void this.retireWorkers(run).catch((e) => console.error(`blueprints: retiring workers of ${run.id} failed`, e));
@@ -541,14 +551,19 @@ export class Engine {
   }
 
   /** Stop the run where it is with a reason, ask the human through the Inbox, and wait for `blueprint_resume`. */
-  private pause(run: Run, id: string, reason: string): void {
+  private pause(run: Run, id: string, reason: string, opts: { human?: boolean } = {}): void {
     run.status = "paused";
     run.error = reason;
     run.waitingFor = `a person: ${reason}`;
     this.log(run, "paused", id, reason);
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `paused for a person: ${reason}`, key: `${run.id}:paused:${id}:${run.history.length}` });
-    this.escalate(run, id, reason, "setup");
+    if (opts.human || !this.pmMode()) return this.escalate(run, id, reason, "setup");
+    // A resume decision: the run's PM first, the human when no PM takes it.
+    void this.exclusive(run.id, async () => {
+      if (run.status !== "paused" || run.stage !== id) return;
+      if (!(await this.judge(run, "resume", id, `The run is paused at stage "${id}": ${reason}.`))) this.escalate(run, id, reason, "setup");
+    }).catch((e) => this.crash(run, e));
   }
 
   /** The run is moving again: the questions asked of a person while it was stuck or paused no longer matter. */
@@ -611,30 +626,273 @@ export class Engine {
       await this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} needs PM`, body: `${this.runFacts(run)}\n${text}`, kind: "run" }).catch((e) => console.error("blueprints: PM mail failed", e));
       return;
     }
-    if (run.pmAgentId && (await this.ports.agentState(run.pmAgentId)) !== "gone") {
-      await this.ports.send(run.pmAgentId, text).catch((e) => console.error("blueprints: PM notice failed", e));
-      return;
+    // Otherwise an on-demand PM for this judgement key; none (no pm role, the per-run limit, a key already judged): the human.
+    const stage = run.pm.pending?.stage ?? run.stage ?? "?";
+    const detail = `Stage "${stage}" is exhausted: ${run.pm.pending?.reason ?? "out of attempts"}.\nLast summary: ${run.stages[stage]?.summary ?? "none"}\nThis is the run's ONE judgement on this stage: if it exhausts again after your extra attempts, the run fails and goes to the human.`;
+    if (await this.judge(run, "exhausted", stage, detail)) return;
+    const call = pmCalls(run)[pmKey(run.id, "exhausted", stage, run.stages[stage]?.runs ?? 0)];
+    const why = call?.state === "unavailable" ? (call.outcome ?? "spawn failed") : call ? "a PM already had this point" : `pm.maxPerRun (${this.pmSettings().maxPerRun}) reached`;
+    run.pm.pending = null;
+    this.pause(run, stage, `exhausted (${run.stages[stage]?.summary ?? "no summary"}) and no PM could be started: ${why}`, { human: true });
+  }
+
+  // ---- the on-demand PM ----
+
+  private pmSettings(): PmSettings {
+    return { ...PM_DEFAULTS, ...(this.ports.settings().pm ?? {}) };
+  }
+
+  /** With runs.notifyMailTo set, judgement requests are mailed there and no PM is spawned. */
+  private pmMode(): boolean {
+    return !this.ports.settings().runsMailTo?.trim();
+  }
+
+  private isPmAgent(run: Run, agentId: string): boolean {
+    return Object.values(run.pm.calls ?? {}).some((c) => c.agentId === agentId);
+  }
+
+  /** The run and call of a PM agent the Factory spawned. */
+  private pmCallOf(agentId: string): { run: Run; call: PmCall } | null {
+    for (const run of this.store.all()) for (const call of Object.values(run.pm.calls ?? {})) if (call.agentId === agentId) return { run, call };
+    return null;
+  }
+
+  /** The run a Factory PM was spawned for (it may act only on it and its child runs), or null for any other agent. */
+  pmRunOf(agentId: string): string | null {
+    return this.pmCallOf(agentId)?.run.id ?? null;
+  }
+
+  /** May this agent answer this Inbox item? Only the live PM of a `pm = true` gate, for that gate's item. */
+  pmMayAnswer(agentId: string, itemId: string): boolean {
+    const found = this.pmCallOf(agentId);
+    if (!found || !pmLive(found.call) || found.call.point !== "gate" || !itemId || found.call.gateItemId !== itemId) return false;
+    const def = found.run.def.stage.find((s) => s.id === found.call.stage);
+    return def?.kind === "gate" && (def as GateStage).pm === true;
+  }
+
+  /**
+   * A judgement point: spawn the PM of its key (`<run>:<point>:<stage>:<entry>`). True when a PM has it (just spawned, or one of
+   * the same key still live); false when the caller must go to the human: a key that already had its PM, the per-run limit, or
+   * no PM could be started.
+   */
+  private async judge(run: Run, point: PmPoint, stage: string, detail: string, extra: { gateItemId?: string } = {}): Promise<boolean> {
+    const key = pmKey(run.id, point, stage, run.stages[stage]?.runs ?? 0);
+    const calls = pmCalls(run);
+    if (calls[key]) return pmLive(calls[key]);
+    const s = this.pmSettings();
+    const count = Object.keys(calls).length;
+    if (count >= s.maxPerRun) {
+      this.log(run, "pm_limit", stage, `${count} PMs already (pm.maxPerRun ${s.maxPerRun}): ${point} goes to the human`);
+      this.store.save();
+      return false;
     }
+    const now = this.ports.now();
+    const call: PmCall = { key, point, stage, entry: run.stages[stage]?.runs ?? 0, agentId: null, startedAt: now, endedAt: null, state: "active", gateItemId: extra.gateItemId ?? null, escalation: null, outcome: null };
+    calls[key] = call;
+    this.store.save();
     const role = this.ports.settings().pmRole;
     try {
+      const prompt = pmPrompt({ run, call, detail, pmExtraMax: run.def.pm_extra_max, timeoutMinutes: s.timeoutMinutes, digest: buildDigest(run, { now, spend: this.ports.spend?.(run.id) ?? null, janitor: [] }), prFacts: await this.prFactLines(run) });
       const { agentId, workspaceId } = await this.ports.spawn({
-        idempotencyKey: `${run.id}:pm:${Object.keys(run.pm.judged).length}`,
+        idempotencyKey: `pm:${key}`,
         role,
-        prompt: text,
-        title: `PM ${run.blueprint} ${run.id}`,
+        prompt,
+        title: pmTitle(run, point),
         workspaceTitle: workspaceTitle(role, run.vars, `${run.blueprint} ${run.id}`),
         cwd: this.ports.settings().defaultCwd,
-        labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm" },
-        env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id },
+        labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm", "paseo.factory.pm.point": point },
+        env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: "pm" },
       });
+      call.agentId = agentId;
       run.pmAgentId = agentId;
       this.registerAgent(run, agentId, role, "pm", workspaceId);
+      this.log(run, "pm_spawned", stage, `${point}: ${agentId} (${key})`);
       this.store.save();
+      return true;
     } catch (error) {
-      // No PM to ask (no pm role, no working directory...): go straight to the human with the reason.
-      const stage = run.pm.pending?.stage ?? run.stage ?? "?";
-      run.pm.pending = null;
-      this.pause(run, stage, `exhausted (${run.stages[stage]?.summary ?? "no summary"}) and no PM could be started: ${(error as Error).message}`);
+      call.state = "unavailable";
+      call.endedAt = this.ports.now();
+      call.outcome = (error as Error).message;
+      this.log(run, "pm_unavailable", stage, `${point}: ${clip((error as Error).message, 300)}`);
+      this.store.save();
+      return false;
+    }
+  }
+
+  private async prFactLines(run: Run): Promise<string[]> {
+    const out: string[] = [];
+    for (const url of this.prUrls(run, undefined).slice(0, 10)) {
+      try {
+        const f = await this.ports.prFacts(url);
+        out.push(`- ${url}: ${f.state}${f.draft ? " (draft)" : ""}, head ${f.head.slice(0, 12)}, CI ${f.ci}, mergeable ${f.mergeable === null ? "unknown" : f.mergeable}, review ${f.review || "none"}`);
+      } catch (error) {
+        out.push(`- ${url}: facts unavailable (${(error as Error).message})`);
+      }
+    }
+    return out;
+  }
+
+  /** Is the point the PM was spawned for still waiting for a decision? */
+  private pointOpen(run: Run, call: PmCall): boolean {
+    switch (call.point) {
+      case "exhausted":
+        return run.status === "waiting" && run.pm.pending?.stage === call.stage;
+      case "resume":
+        return run.status === "paused" && run.stage === call.stage;
+      case "failed":
+        return run.status === "failed" && call.state !== "done";
+      case "gate":
+        return false; // the gate is in the Inbox for the human all along
+    }
+  }
+
+  /** The PM did not settle its point: ask the human as the engine did before PMs. */
+  private pmToHuman(run: Run, call: PmCall, why: string): void {
+    this.log(run, "pm_to_human", call.stage, `${call.point}: ${why}`);
+    if (call.point === "resume") this.escalate(run, call.stage, `${run.error ?? "paused"}; the PM: ${why}`, "setup");
+    else if (call.point === "exhausted") this.escalate(run, call.stage, `${run.pm.pending?.reason ?? "exhausted"}; the PM: ${why}`);
+    else if (call.point === "failed") this.escalate(run, call.stage, `the run failed (${run.error ?? "no detail"}); the PM: ${why}`);
+    this.store.save();
+  }
+
+  /** The PM's call is over: archive it (and its workspace); a point it left open goes to the human. */
+  private async endPm(run: Run, call: PmCall, state: PmCall["state"], why: string): Promise<void> {
+    if (call.endedAt !== null) return;
+    const handedOver = call.state === "handover";
+    call.state = state;
+    call.endedAt = this.ports.now();
+    call.outcome ??= why;
+    call.escalation = null;
+    this.log(run, "pm_ended", call.stage, `${call.point} ${call.agentId ?? "?"}: ${state} (${clip(why, 200)})`);
+    this.store.save();
+    if (call.agentId) {
+      if ((await this.ports.agentState(call.agentId).catch(() => "gone" as const)) !== "gone") await this.ports.archive(call.agentId).catch((e) => console.error(`blueprints: archiving PM ${call.agentId} failed`, e));
+      await this.archiveWorkspaceOf(run, call.agentId);
+    }
+    if (!handedOver && this.pointOpen(run, call)) this.pmToHuman(run, call, why);
+    this.store.save();
+  }
+
+  /** A PM's turn ended: it is archived, unless it waits for the answer to its escalation. Over-budget spend is flagged. */
+  pmTurnEnded(agentId: string): Promise<void> {
+    const found = this.pmCallOf(agentId);
+    if (!found || found.call.endedAt !== null) return Promise.resolve();
+    const { run, call } = found;
+    return this.exclusive(run.id, async () => {
+      if (call.endedAt !== null) return;
+      const cost = this.ports.spendOfAgent?.(agentId);
+      const max = this.pmSettings().maxUsd;
+      if (cost !== undefined && max > 0 && cost > max) this.log(run, "pm_over_budget", call.stage, `$${cost.toFixed(2)} > $${max.toFixed(2)} (${call.key})`);
+      if (call.state === "escalated") {
+        this.log(run, "pm_waiting", call.stage, `waiting for ${call.escalation?.target ?? "an answer"}`);
+        this.store.save();
+        return;
+      }
+      await this.endPm(run, call, call.state === "active" ? "done" : call.state, call.state === "active" ? "turn ended without blueprint_pm_done" : (call.outcome ?? "done"));
+    }).catch((e) => console.error(`blueprints: PM turn of ${agentId}`, e));
+  }
+
+  private requirePm(callerId: string, runId: string): { run: Run; call: PmCall } {
+    const found = this.pmCallOf(callerId);
+    if (!found || found.run.id !== runId || !pmLive(found.call)) throw new UsageError(`You are not the live PM of run ${runId}.`);
+    return found;
+  }
+
+  /** Tell the run's waiting worker, if there is one, what the PM is doing; it is marked waiting (no nudge, no attempt). */
+  private async tellWorker(run: Run, text: string): Promise<void> {
+    const id = run.stage;
+    const st = id ? run.stages[id] : undefined;
+    if (!id || !st?.agentId || (st.status !== "running" && st.status !== "waiting")) return;
+    if ((await this.ports.agentState(st.agentId).catch(() => "gone" as const)) === "gone") return;
+    st.workerWaitSince ??= this.ports.now();
+    run.waitingFor = clip(text, 300);
+    this.log(run, "worker_told", id, clip(text, 200));
+    this.store.save();
+    await this.ports.send(st.agentId, `Factory: ${text}. Wait for it; no attempt is used meanwhile.`).catch((e) => console.error(`blueprints: telling the worker of ${run.id} failed`, e));
+  }
+
+  /** blueprint_pm_escalate: step 1 to the escalation target, step 2 (or no target) to the human through a blocking inbox_ask. */
+  async pmEscalate(callerId: string, runId: string, input: { question: string; bestGuess: string; checked: string }): Promise<{ target: string; step: 1 | 2; how: string; wait_minutes: number | null }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      if (call.escalation?.step === 2) throw new UsageError("Your question is already with the human: wait for the Inbox answer.");
+      let step: 1 | 2 = call.escalation ? 2 : 1;
+      let target = step === 1 ? (this.ports.escalationTarget?.() ?? "").trim() : "";
+      if (!target) {
+        step = 2;
+        target = "human";
+      }
+      const wait = this.pmSettings().escalateTimeoutMinutes;
+      call.escalation = { step, target, at: this.ports.now(), question: clip(input.question, 2000) };
+      call.state = "escalated";
+      this.log(run, "pm_escalated", call.stage, `step ${step} to ${target}: ${clip(input.question, 200)} (best guess: ${clip(input.bestGuess, 120)})`);
+      this.store.save();
+      await this.tellWorker(run, step === 1 ? `the run's PM asked ${target} about: ${clip(input.question, 150)}; waiting up to ${wait} min` : `the run's PM asked the human about: ${clip(input.question, 150)}`);
+      return { target, step, how: escalationHow({ run, call, target, step, question: input.question, bestGuess: input.bestGuess, checked: input.checked, waitMinutes: wait }), wait_minutes: step === 1 ? wait : null };
+    });
+  }
+
+  /** blueprint_pm_answer: the answer the PM got to its escalation, with who gave it. */
+  async pmAnswer(callerId: string, runId: string, input: { answer: string; by: string }): Promise<{ ok: true }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      if (!call.escalation) throw new UsageError("You have no escalation waiting for an answer.");
+      this.log(run, "pm_answer", call.stage, `${clip(input.by, 80)} (step ${call.escalation.step}): ${clip(input.answer, 300)}`);
+      call.escalation = null;
+      call.state = "active";
+      call.startedAt = this.ports.now(); // a fresh pm.timeoutMinutes to act on the answer
+      this.store.save();
+      return { ok: true as const };
+    });
+  }
+
+  /** blueprint_pm_done: the PM's decision (or its handover to the human); it is archived when its turn ends. */
+  async pmDone(callerId: string, runId: string, input: { summary: string; handover?: boolean }): Promise<{ ok: true; archived_at_turn_end: true }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      call.escalation = null;
+      call.state = input.handover ? "handover" : "done";
+      call.outcome = clip(input.summary, 1000);
+      this.log(run, input.handover ? "pm_handover" : "pm_done", call.stage, `${call.point}: ${clip(input.summary, 300)}`);
+      if (input.handover && this.pointOpen(run, { ...call, state: "active" })) this.pmToHuman(run, call, `handed over: ${clip(input.summary, 300)}`);
+      this.store.save();
+      return { ok: true as const, archived_at_turn_end: true as const };
+    });
+  }
+
+  /** Timeouts of the PMs: a turn past pm.timeoutMinutes, an escalation past pm.escalateTimeoutMinutes, a PM that is gone. */
+  private async pmTick(now: number): Promise<void> {
+    const s = this.pmSettings();
+    for (const run of this.store.all()) {
+      for (const call of Object.values(run.pm.calls ?? {})) {
+        if (call.endedAt !== null || call.state === "unavailable") continue;
+        try {
+          await this.exclusive(run.id, async () => {
+            if (call.endedAt !== null) return;
+            const state = call.agentId ? await this.ports.agentState(call.agentId).catch(() => "gone" as const) : "gone";
+            // Decided, and its turn is over (a turn_ended that a restart lost): archive it now.
+            if (call.state === "done" || call.state === "handover") return state === "running" ? undefined : this.endPm(run, call, call.state, call.outcome ?? call.state);
+            if (state === "gone") return this.endPm(run, call, "gone", "the PM agent is gone");
+            if (call.state === "active" && now - call.startedAt >= s.timeoutMinutes * 60_000) {
+              this.log(run, "pm_timeout", call.stage, `${call.point}: no decision in ${s.timeoutMinutes} min`);
+              return this.endPm(run, call, "timeout", `no decision in ${s.timeoutMinutes} min`);
+            }
+            const esc = call.escalation;
+            if (call.state === "escalated" && esc?.step === 1 && now - esc.at >= s.escalateTimeoutMinutes * 60_000) {
+              this.log(run, "pm_escalation_timeout", call.stage, `${esc.target} did not answer in ${s.escalateTimeoutMinutes} min: the human is next`);
+              call.escalation = { ...esc, step: 2, target: "human", at: now };
+              this.store.save();
+              await this.tellWorker(run, `the run's PM got no answer from ${esc.target}; it asks the human now about: ${clip(esc.question, 150)}`);
+              if (call.agentId)
+                await this.ports
+                  .send(call.agentId, `Factory: ${esc.target} did not answer in ${s.escalateTimeoutMinutes} min. ${escalationHow({ run, call, target: "human", step: 2, question: esc.question, bestGuess: "your best guess", checked: "what you checked", waitMinutes: 0 })}`)
+                  .catch((e) => console.error(`blueprints: PM ${call.agentId} not told`, e));
+            }
+          });
+        } catch (error) {
+          console.error(`blueprints: PM tick of ${run.id} failed`, error);
+        }
+      }
     }
   }
 
@@ -1370,6 +1628,10 @@ export class Engine {
     this.log(run, "gate_opened", id, itemId);
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `gate: ${clip(this.r(run, def.question), 300)} (inbox ${itemId})`, key: `${run.id}:gate:${itemId}` });
+    if (def.pm && this.pmMode()) {
+      const choices = options.length ? ` Options: ${options.map((o) => `${o.id} (${o.label})`).join(", ")}.` : " It takes a free-text answer.";
+      await this.judge(run, "gate", id, `Gate "${id}" waits for an answer (inbox item ${itemId}): ${clip(this.r(run, def.question), 1000)}.${choices}${context ? `\nContext: ${clip(context, 2000)}` : ""}`, { gateItemId: itemId });
+    }
   }
 
   /** `wait = "merge"`: nothing is asked; `tick` completes the gate when the PRs are merged, or on its timeout. */
@@ -1683,7 +1945,7 @@ export class Engine {
   /** Redo the effect of the stage's state: after a restart, or when a suspended run is resumed (then no attempt is used). */
   private async replay(run: Run, id: string, st: StageState, opts: { resumed?: boolean }): Promise<void> {
     // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
-    if (run.pm.pending && !(await this.hasLivePm(run))) {
+    if (run.pm.pending && !(await this.hasLivePm(run)) && !pmCalls(run)[pmKey(run.id, "exhausted", run.pm.pending.stage, run.stages[run.pm.pending.stage]?.runs ?? 0)]) {
       await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
       return;
     }
@@ -1715,6 +1977,7 @@ export class Engine {
     const now = this.ports.now();
     this.observer.tick?.();
     await this.dequeue().catch((e) => console.error("blueprints: dequeue failed", e));
+    await this.pmTick(now).catch((e) => console.error("blueprints: PM tick failed", e));
     for (const run of this.store.active()) {
       const id = run.stage;
       if (!id) continue;

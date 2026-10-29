@@ -73,6 +73,8 @@ export const gateStageSchema = z.strictObject({
   expires_in_minutes: z.number().min(1).optional(),
   /** An answer with the option id "hold" asks the same question again after this many minutes. */
   hold_minutes: z.number().min(1).optional(),
+  /** The run's on-demand PM is spawned when the gate opens and may answer it (and only it); the human can still answer it in the Inbox. */
+  pm: z.boolean().default(false),
   /**
    * "merge": a passive wait, no Inbox item. The gate completes with `on.merged` when every PR in `pr` is merged on GitHub (`on.head_moved` if a head moves first)
    * and with `on.expired` after `expires_in_minutes` (the engine's own timer, not an Inbox expiry). Someone merging is announced by the run's "waiting" mail.

@@ -45,3 +45,19 @@ describe("inbox_withdraw", () => {
     expect(engine.store.get(workerItem.id)?.status).toBe("withdrawn");
   });
 });
+
+describe("inbox_answer scoped to a run's PM", () => {
+  const answerTool = TOOLS.find((t) => t.name === "inbox_answer")!;
+  beforeEach(() => setTrustedLabels(["paseo.assistant=1"]));
+  afterEach(() => setTrustedLabels([]));
+
+  it("lets the PM answer only the item the Blueprints engine allows, recorded as answered by the PM", async () => {
+    const { engine, factoryItem, workerItem, ctx } = setup();
+    engine.mayAnswer = (agentId, itemId) => agentId === "pm-1" && itemId === factoryItem.id;
+    await expect(Promise.resolve().then(() => answerTool.run({ item: workerItem.id, answer: "yes" }, ctx("pm-1")))).rejects.toThrow(/pm = true gate/);
+    await expect(Promise.resolve().then(() => answerTool.run({ item: factoryItem.id, answer: "yes" }, ctx("pm-2")))).rejects.toThrow(UsageError);
+    const out = (await answerTool.run({ item: factoryItem.id, answer: "go on" }, ctx("pm-1"))) as { recorded_as: string };
+    expect(out.recorded_as).toBe("answered by the run's PM");
+    expect(engine.store.get(factoryItem.id)?.answer?.by).toBe("pm");
+  });
+});

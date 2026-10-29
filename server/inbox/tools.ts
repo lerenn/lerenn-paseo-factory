@@ -133,6 +133,7 @@ export const TOOLS: ToolDef[] = [
     name: "inbox_answer",
     description:
       "Answer a pending item on behalf of the user. Only for an agent with a trusted label (factory setting trustedLabels); the answer is recorded as \"answered by the Assistant on behalf of the user\". " +
+      "A run's PM may answer the one pm = true gate it was spawned for, and nothing else. " +
       "`answer` is an option id, or free text for items that take it. Answer only what the user said; never decide for him.",
     input: z.object({
       item: z.string().describe("The item id from inbox_pending."),
@@ -140,13 +141,15 @@ export const TOOLS: ToolDef[] = [
       comment: z.string().max(2000).optional(),
     }),
     async run({ item, answer, comment }, ctx) {
-      if (!(await isAssistant(ctx))) throw new UsageError("inbox_answer is only for an agent with a trusted label (factory setting trustedLabels).");
+      const trusted = await isAssistant(ctx);
+      if (!trusted && !ctx.engine.mayAnswer?.(ctx.callerId, item)) throw new UsageError("inbox_answer is only for an agent with a trusted label (factory setting trustedLabels), or a run's PM for the pm = true gate it was spawned for.");
       const found = ctx.engine.store.get(item);
       if (!found) throw new UsageError(`No inbox item "${item}".`);
       const isOption = found.options.some((o) => o.id === answer);
-      const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, "assistant");
+      const by = trusted ? "assistant" : "pm";
+      const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, by);
       if (!result.ok) throw new UsageError(result.message ?? "Not answered.");
-      return { ...summary(result.item!), recorded_as: "answered by the Assistant on behalf of the user" };
+      return { ...summary(result.item!), recorded_as: trusted ? "answered by the Assistant on behalf of the user" : "answered by the run's PM" };
     },
   },
   {
