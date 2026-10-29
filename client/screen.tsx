@@ -15,7 +15,7 @@ import { ActivityScreen } from "./activity";
 import { OverviewScreen } from "./overview";
 import { SupervisorScreen } from "./supervisor/screen";
 import { UsageLimitBanner } from "./blueprints/quota";
-import { subscribeTabs, tabFor, type ExtensionLink } from "./registry";
+import { extensionTabView, subscribeTabs, tabFor, type ExtensionLink } from "./registry";
 import { resolveLink } from "./extension-link";
 import { builtinTabs } from "./tabs";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
@@ -63,7 +63,8 @@ function SettingsTab({ theme, layout }: PluginScreenProps) {
 function ExtensionTab({ theme, layout, ext, open }: PluginScreenProps & { ext: { id: string; version: string; tab: string | null; tools: string[]; stageKinds: string[] }; open(link: ExtensionLink): void }) {
   const c = theme.colors;
   const rpc = useRpc(extensionCallRpc);
-  const Component = useSyncExternalStore(subscribeTabs, () => tabFor(ext.id));
+  useSyncExternalStore(subscribeTabs, () => tabFor(ext.id));
+  const view = extensionTabView(ext.id);
   const call = useCallback(
     async (name: string, input?: unknown) => {
       const out = await rpc({ id: ext.id, name, input });
@@ -72,7 +73,7 @@ function ExtensionTab({ theme, layout, ext, open }: PluginScreenProps & { ext: {
     },
     [rpc, ext.id],
   );
-  if (Component) return <Component theme={theme} layout={layout} extensionId={ext.id} call={call} open={open} />;
+  if (view.kind === "tab") return <view.Component theme={theme} layout={layout} extensionId={ext.id} call={call} open={open} />;
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 16, gap: 6 }}>
       <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>{ext.tab ?? ext.id}</Text>
