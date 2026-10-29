@@ -81,7 +81,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
         return engine.store
           .all()
           .filter((r) => include_finished || r.endedAt === null)
-          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars, ...(r.suspended ? { suspended: { reason: r.suspended.reason, since: new Date(r.suspended.at).toISOString(), by: r.suspended.by, pods: r.suspended.pods } } : {}) }));
+          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars, ...(r.suspended ? { suspended: { reason: r.suspended.reason, since: new Date(r.suspended.at).toISOString(), by: r.suspended.by, pods: r.suspended.pods, ...(r.suspended.usageLimit ? { quota: true, resume_at: r.suspended.usageLimit.resumeAt ? new Date(r.suspended.usageLimit.resumeAt).toISOString() : null } : {}) } } : {}) }));
       },
     },
     {

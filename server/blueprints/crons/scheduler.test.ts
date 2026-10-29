@@ -189,3 +189,16 @@ describe("Scheduler", () => {
     expect(s.snapshot().schedules.nightly).toMatchObject({ consecutiveFailures: 1, lastRunId: "bp-2", lastResult: "failed" });
   });
 });
+
+describe("Scheduler.skipWindow (usage-limit pause)", () => {
+  it("slots of the pause are not back-filled after it and count as no failure", async () => {
+    const h = harness();
+    const s = h.make();
+    await s.tick(sched(), at("2026-10-29T07:55:00Z"), "");
+    expect(s.skipWindow(at("2026-10-29T08:00:30Z"))).toBe(true);
+    expect(s.skipWindow(at("2026-10-29T08:00:40Z"))).toBe(false);
+    await s.tick(sched(), at("2026-10-29T08:03:00Z"), "");
+    expect(h.starts).toEqual([]);
+    expect(s.snapshot().schedules.nightly?.consecutiveFailures ?? 0).toBe(0);
+  });
+});
