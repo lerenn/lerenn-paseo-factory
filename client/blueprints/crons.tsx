@@ -10,8 +10,8 @@ const when = (now: number, at: number) => {
   return min < 90 ? `${local} (in ${Math.max(0, min)} min)` : `${local} (in ${Math.round(min / 60)} h)`;
 };
 
-/** The Crons tab: cron schedules of the Blueprints module, their next run, the run they follow, Pause/Resume and Run now. */
-export function CronsScreen({ theme, layout }: PluginScreenProps) {
+/** The Crons sub-tab of Blueprints: cron schedules, their next run, the run they follow, Pause/Resume and Run now. */
+export function CronsTab({ theme, layout }: Pick<PluginScreenProps, "theme" | "layout">) {
   const list = useRpc(listCronsRpc);
   const pauseCall = useRpc(pauseCronRpc);
   const resumeCall = useRpc(resumeCronRpc);
@@ -33,7 +33,6 @@ export function CronsScreen({ theme, layout }: PluginScreenProps) {
     return {
       screen: { flex: 1, backgroundColor: c.surface0 },
       body: { padding: pad, gap: 8 },
-      h: { color: c.foreground, fontSize: layout.compact ? 17 : 20, fontWeight: "600" as const },
       muted: { color: c.foregroundMuted, fontSize: 12 },
       text: { color: c.foreground, fontSize: 14 },
       card: { borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1, padding: 10, gap: 4 },
@@ -51,7 +50,6 @@ export function CronsScreen({ theme, layout }: PluginScreenProps) {
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
-      <Text style={s.h}>Crons</Text>
       <Text style={s.muted}>Schedules from crons/schedules.json of the git sources and the Blueprints setting crons.schedules. One run at a time per schedule.</Text>
       {data && !data.enabled ? (
         <View style={s.warn}>

@@ -4,7 +4,7 @@ import { SettingsCard, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { BlueprintsScreen, CronsScreen } from "./blueprints";
+import { BlueprintsScreen } from "./blueprints";
 import { InboxScreen } from "./inbox";
 import { LeasesScreen } from "./leases";
 import { RolesScreen } from "./roles";
@@ -15,10 +15,11 @@ import { ActivityScreen } from "./activity";
 import { OverviewScreen } from "./overview";
 import { SupervisorScreen } from "./supervisor/screen";
 import { subscribeTabs, tabFor } from "./registry";
+import { builtinTabs } from "./tabs";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
 const TITLES: Record<ModuleId, string> = { blueprints: "Blueprints", roles: "Roles", leases: "Leases", warden: "Warden", inbox: "Inbox", supervisor: "Supervisor" };
-const SCREENS = { blueprints: BlueprintsScreen, crons: CronsScreen, roles: RolesScreen, leases: LeasesScreen, warden: WardenScreen, inbox: InboxScreen };
+const SCREENS = { blueprints: BlueprintsScreen, roles: RolesScreen, leases: LeasesScreen, warden: WardenScreen, inbox: InboxScreen };
 const SETTINGS_TAB = "~settings";
 const OVERVIEW_TAB = "~overview";
 const ACTIVITY_TAB = "~activity";
@@ -104,8 +105,7 @@ export function FactoryScreen(props: PluginScreenProps) {
   const query = useQuery({ queryKey: ["factory", "overview"], queryFn: () => overview({}), refetchInterval: 15_000 });
   const modules = query.data?.settings?.modules;
   const { builtin, extensionTabs } = useMemo(() => {
-    const builtin: { key: string; label: string }[] = [{ key: OVERVIEW_TAB, label: "Overview" }, ...((modules?.supervisor ?? true) ? [{ key: "supervisor", label: "Supervisor" }] : []), { key: ACTIVITY_TAB, label: "Activity" }, ...MODULES.filter((id) => id !== "supervisor" && (modules?.[id] ?? true)).flatMap((id) => (id === "blueprints" ? [{ key: id as string, label: TITLES[id] }, { key: "crons", label: "Crons" }] : [{ key: id as string, label: TITLES[id] }]))];
-    builtin.push({ key: SETTINGS_TAB, label: "Settings" });
+    const builtin = builtinTabs(modules, TITLES, { overview: OVERVIEW_TAB, activity: ACTIVITY_TAB, settings: SETTINGS_TAB });
     const extensionTabs = (query.data?.extensions ?? []).filter((e) => e.tab).map((e) => ({ key: `ext:${e.id}`, label: e.tab as string, health: e.health }));
     return { builtin, extensionTabs };
   }, [modules, query.data?.extensions]);
