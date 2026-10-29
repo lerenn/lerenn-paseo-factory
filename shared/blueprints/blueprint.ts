@@ -138,6 +138,8 @@ export const blueprintSchema = z
     confirm: z.array(z.string()).default([]),
     /** Failed-run cap on the PM's single judgement call: at most this many extra attempts. */
     pm_extra_max: z.number().int().min(0).max(10).default(2),
+    /** Most runs of this blueprint active at once (pods are a quota); more wait as "queued" and start, oldest first, when one ends. */
+    max_active: z.number().int().min(1).optional(),
     vars: z.record(z.string(), varSchema).default({}),
     stage: z.array(z.unknown()).min(1),
   })

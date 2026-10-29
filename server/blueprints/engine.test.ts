@@ -1258,3 +1258,44 @@ describe("pod start failures (d82771ac)", () => {
     expect(ctx.spawnErrors).toHaveLength(1); // the third start was never tried
   });
 });
+
+describe("max_active and keys (f36893f5)", () => {
+  const src = `
+version = 1
+name = "flow"
+max_active = 1
+[[stage]]
+id = "think"
+role = "investigator"
+prompt = "Investigate"
+[stage.on]
+done = "done"
+`;
+  it("queues runs past max_active and starts the oldest when a slot frees", async () => {
+    const ctx = setup(src);
+    const a = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    const b = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    expect(ctx.engine.require(b.id)).toMatchObject({ status: "waiting", stage: null });
+    expect(ctx.engine.require(b.id).waitingFor).toMatch(/queued: 1 flow runs active/);
+    expect(ctx.spawned).toHaveLength(1);
+    await ctx.verdict("agent-1", "done");
+    expect(ctx.engine.require(a.id).status).toBe("done");
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.engine.require(b.id)).toMatchObject({ status: "running", stage: "think" });
+    expect(ctx.spawned).toHaveLength(2);
+  });
+
+  it("joins the run of a key, but starts again after that run failed or was aborted", async () => {
+    const ctx = setup(src.replace("max_active = 1\n", ""));
+    const a = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x", idempotencyKey: "aikido:1" });
+    await ctx.settle();
+    expect(ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x", idempotencyKey: "aikido:1" }).id).toBe(a.id);
+    await ctx.engine.abort(a.id, "test");
+    const b = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x", idempotencyKey: "aikido:1" });
+    expect(b.id).not.toBe(a.id);
+    expect(ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x", idempotencyKey: "aikido:1" }).id).toBe(b.id);
+  });
+});
