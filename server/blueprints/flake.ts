@@ -46,3 +46,14 @@ export function isBusyError(text: string | null | undefined): boolean {
 
 /** Back-off retries of a start that timed out on a busy daemon before the run pauses and asks a person. */
 export const MAX_BUSY_RETRIES = 6;
+
+/** A git command of the daemon that timed out (for example `git rev-parse --show-toplevel` after 90 s). */
+export function isGitTimeout(text: string | null | undefined): boolean {
+  return !!text && /Git command timed out/i.test(text);
+}
+
+/**
+ * Git timeouts in a row at which the run pauses and alerts (one retry in between): a git that hangs twice rarely recovers by
+ * waiting, and six back-off retries cost about 37 minutes on bp-7bc45f89 (decision f1cd49be).
+ */
+export const MAX_GIT_TIMEOUTS = 2;

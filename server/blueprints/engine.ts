@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary, isBusyError, isQuotaError, MAX_BUSY_RETRIES, quotaBackoffMs, SESSION_GONE } from "./flake";
+import { flakeReason, flakeSummary, isBusyError, isGitTimeout, isQuotaError, MAX_BUSY_RETRIES, MAX_GIT_TIMEOUTS, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -10,6 +10,12 @@ import { PostRun } from "./post";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
+
+/** How long a worker may say it waits on a person or an outside system (no nudges meanwhile) before the run pauses for a person. */
+const WORKER_WAIT_CEILING_MS = 120 * 60_000;
+
+/** How long a stage waits for the extension that provides its kind to register (after a restart) before the run fails. */
+const KIND_WAIT_MS = 15 * 60_000;
 
 /** Polls in a row that must not see a queued PR in the queue before the merge gate asks again. */
 const LEFT_QUEUE_POLLS = 2;
@@ -979,6 +985,7 @@ export class Engine {
     if (run.status === "suspended") return;
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
+    if (why === "start" || why === "retry") st.workerWaitSince = null;
     if (!opts.free) st.attempts += 1;
     if (st.attempts > def.max_attempts + st.extra) return this.exhausted(run, id, `${st.attempts - 1} attempts used (max_attempts ${def.max_attempts})`);
     st.status = "entering";
@@ -1043,6 +1050,16 @@ export class Engine {
       // No room in the namespace (quota on pods, sandboxes...), or a daemon too loaded to answer a plugin hook in time: nothing is
       // wrong with the stage, so no attempt is used and nobody is asked (a busy daemon only up to MAX_BUSY_RETRIES times).
       const quota = isQuotaError((error as Error).message);
+      const gitTimeout = !quota && isGitTimeout((error as Error).message);
+      if (gitTimeout && (st.quotaRetry?.n ?? 0) + 1 >= MAX_GIT_TIMEOUTS) {
+        if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
+        st.summary = `the daemon's git timed out ${(st.quotaRetry?.n ?? 0) + 1} times in a row starting the worker: ${clip((error as Error).message, 300)}`;
+        st.quotaRetry = null;
+        this.log(run, "git_timeout_pause", id, st.summary);
+        const mailTo = this.ports.post?.().eventsMailTo?.trim();
+        if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)}: git timed out repeatedly at ${id}`, body: `${st.summary}\nThe run is paused; resume it once the daemon's git answers.\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
+        return this.pause(run, id, st.summary);
+      }
       const busy = !quota && isBusyError((error as Error).message) && (st.quotaRetry?.n ?? 0) < MAX_BUSY_RETRIES;
       if (quota || busy) {
         const n = (st.quotaRetry?.n ?? 0) + 1;
@@ -1147,11 +1164,13 @@ export class Engine {
     const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === callerId && r.stages[r.stage].status === "running");
     if (!run) throw new UsageError("You are not the worker of a running stage.");
     const text = clip(reason.trim() || "waiting", 300);
+    const st = run.stages[run.stage!];
+    st.workerWaitSince ??= this.ports.now();
     if (run.waitingFor !== text) {
       run.waitingFor = text;
       this.log(run, "worker_waiting", run.stage, text);
-      this.store.save();
     }
+    this.store.save();
     return { stage: run.stage! };
   }
 
@@ -1186,6 +1205,7 @@ export class Engine {
       st.verdict = input.verdict;
       st.summary = input.summary ? clip(input.summary, 4000) : null;
       st.data = data;
+      st.workerWaitSince = null;
       st.status = "done";
       st.endedAt = this.ports.now();
       if (st.wardenTask) {
@@ -1510,8 +1530,25 @@ export class Engine {
     const st = run.stages[id];
     const handler = this.ports.stageKind(def.kind ?? "");
     if (!handler) {
+      // After a restart of the Factory (or of the plugin that provides the kind), the extension registers again a little later:
+      // wait for it instead of failing the run (bp-6a9e18ab failed at wait-pins on "train" during an update).
+      const now = this.ports.now();
+      st.kindWaitSince ??= now;
+      if (now - st.kindWaitSince < KIND_WAIT_MS) {
+        if (st.status !== "entering" || run.waitingFor?.startsWith("extension") !== true) this.log(run, "kind_waiting", id, def.kind ?? "");
+        st.status = "entering";
+        run.status = "running";
+        run.waitingFor = `extension for stage kind "${def.kind}" (not registered yet)`;
+        this.store.save();
+        return;
+      }
+      st.kindWaitSince = null;
       this.log(run, "no_such_kind", id, def.kind ?? "");
-      return this.finish(run, "failed", `stage ${id}: no extension provides the stage kind "${def.kind}"`);
+      return this.finish(run, "failed", `stage ${id}: no extension provides the stage kind "${def.kind}" (waited ${Math.round(KIND_WAIT_MS / 60_000)} min)`);
+    }
+    if (st.kindWaitSince) {
+      st.kindWaitSince = null;
+      if (run.waitingFor?.startsWith("extension for stage kind")) run.waitingFor = null;
     }
     st.status = "running";
     this.store.save();
@@ -1593,7 +1630,12 @@ export class Engine {
       const st = run.stages[id];
       if (!st) continue;
       try {
-        if (st.status === "entering" && st.quotaRetry && now >= st.quotaRetry.at && run.status === "running") {
+        if (st.status === "entering" && st.kindWaitSince && run.status === "running") {
+          await this.exclusive(run.id, async () => {
+            if (run.stage !== id || st.status !== "entering" || !st.kindWaitSince) return;
+            await this.runExtension(run, id, this.stageDef(run, id));
+          });
+        } else if (st.status === "entering" && st.quotaRetry && now >= st.quotaRetry.at && run.status === "running") {
           await this.exclusive(run.id, async () => {
             const q = st.quotaRetry;
             if (run.stage !== id || st.status !== "entering" || !q || now < q.at) return;
@@ -1614,6 +1656,20 @@ export class Engine {
           if (st.gate?.passive) await this.expireMergeWait(run, id);
         } else if (st.status === "waiting" && st.gate?.itemId) this.remindGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
+          // A worker that said it waits on a person or an outside system (a review) watches it with events: no nudges, no attempts,
+          // until the ceiling; then a person is asked (decision f1cd49be: babysit was nudged every minute while Codex had not answered).
+          if (st.workerWaitSince) {
+            if (now - st.workerWaitSince < WORKER_WAIT_CEILING_MS) continue;
+            await this.exclusive(run.id, async () => {
+              if (run.stage !== id || st.status !== "running" || !st.workerWaitSince) return;
+              const mins = Math.round((now - st.workerWaitSince) / 60_000);
+              const why = `waited ${mins} min on: ${run.waitingFor ?? "an outside system"}`;
+              st.workerWaitSince = null;
+              this.log(run, "worker_wait_ceiling", id, why);
+              await this.pause(run, id, why);
+            });
+            continue;
+          }
           const grace = this.ports.settings().idleGraceSeconds * 1000;
           if (now - (st.lastNudgeAt ?? st.startedAt ?? now) < grace) continue;
           const state = await this.ports.agentState(st.agentId);
