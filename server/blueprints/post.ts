@@ -105,6 +105,7 @@ export class PostRun implements Observer {
   }
 
   private async begin(run: Run, post: PostState): Promise<void> {
+    if (this.ports.quiet?.()) return; // paused for a usage limit: the tick starts it later
     const s = this.settings();
     if (s.janitor.enabled) {
       post.plan = await this.plan(run, s.janitor.dryRun).catch((e) => {
