@@ -142,7 +142,7 @@ export function LeasesScreen({ theme, layout }: PluginScreenProps) {
             render: () =>
               page(
                 <>
-                  <Text style={s.text}>A lease is a name held by one agent for a TTL (seconds). The holder renews before it expires and releases when done; a handover token changes with every new holder, so a stale renew is refused. Names are agreed between roles; these are the conventions of the lab roles:</Text>
+                  <Text style={s.text}>A lease is a name held by one agent for a TTL (seconds). The holder renews before it expires and releases when done; a handover token changes with every new holder, so a stale renew is refused. Names are agreed between roles, for example:</Text>
                   {RULES.map((r) => (
                     <View key={r.name} style={[s.row, { gap: 2 }]}>
                       <Text style={[s.text, { fontWeight: "700" }]} selectable>{r.name}</Text>
@@ -177,7 +177,6 @@ export function LeasesScreen({ theme, layout }: PluginScreenProps) {
 }
 
 const RULES = [
-  { name: "pr:<owner>/<repo>#<number>@<head sha>", mode: "takeover", ttl: "900 s", when: "before pushing to or babysitting a PR; re-taken for the new head after each push" },
-  { name: "qa:<ticket>", mode: "takeover", ttl: "1800 s", when: "before a local QA run, one per ticket; renew at least every 10 min" },
-  { name: "release:<open|dev|stg|prd>", mode: "queue", ttl: "1800 s (4 h while waiting for a merge)", when: "first thing in a releaser job" },
+  { name: "<kind>:<item>", mode: "takeover", ttl: "900 s", when: "exclusive work on one item (a PR head, a ticket): the newest holder wins; renew before the TTL" },
+  { name: "<resource>:<name>", mode: "queue", ttl: "1800 s", when: "a shared resource used one at a time (an environment, a test stack): holders wait their turn" },
 ];

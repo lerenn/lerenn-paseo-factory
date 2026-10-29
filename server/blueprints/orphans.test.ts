@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { agentlessWorkspaces } from "./orphans";
+import { setTrustedLabels } from "../trust";
 
 const ws = (id: string, projectId = "p1") => ({ id, title: id, projectId, projectRootPath: `/r/${projectId}` });
 const base = { known: new Set(["a", "b", "c"]), pmAgentIds: new Set<string>() };
@@ -26,5 +27,13 @@ describe("agentlessWorkspaces", () => {
       { id: "as", workspaceId: "b", status: "closed", labels: { "paseo.assistant": "1" } },
     ];
     expect(agentlessWorkspaces([ws("a"), ws("b"), ws("c")], agents, { ...base, pmAgentIds: new Set(["pm1"]), protect: new Set(["c"]) })).toEqual([]);
+  });
+
+  afterEach(() => setTrustedLabels([]));
+  it("keeps the workspace of an agent with a trusted label, even archived, only when the label is trusted", () => {
+    const agents = [{ id: "as", workspaceId: "b", archivedAt: "2026-10-28", labels: { "paseo.assistant": "1" } }];
+    expect(agentlessWorkspaces([ws("b")], agents, base).map((w) => w.id)).toEqual(["b"]);
+    setTrustedLabels(["paseo.assistant=1"]);
+    expect(agentlessWorkspaces([ws("b")], agents, base)).toEqual([]);
   });
 });

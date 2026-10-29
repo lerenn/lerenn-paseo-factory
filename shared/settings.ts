@@ -19,12 +19,18 @@ export const factorySettingsSchema = z.object({
   /** Where every workspace the Factory creates (Supervisor, PMs, stage workers) runs: a pod, or the daemon. */
   runtime: z.enum(["kubernetes", "local"]).default("kubernetes"),
   /**
-   * Projects the Factory stays out of: it never lists, watches, digests or spawns an agent whose directory is inside one.
-   * The default is the Security coordinator's checkout (matched by path, because its agent is recreated with a new id).
+   * Projects the Factory stays out of: it never lists, watches, digests or spawns an agent whose directory is inside one
+   * (matched by path, so an agent recreated with a new id stays excluded). Empty: none.
    */
-  excludePaths: z.array(z.string()).default(["/home/paseo/src/github.com/anyshift-io/anyshift-monorepo"]),
+  excludePaths: z.array(z.string()).default([]),
   /** Extra agent ids to leave alone. */
   excludeAgents: z.array(z.string()).default([]),
+  /**
+   * Labels ("key=value") that mark a trusted agent, such as an assistant acting for the user: it may see and answer every
+   * inbox item, withdraw the Factory's own items, steer any run and use whole-Factory operations. Its workspace is never swept.
+   * Empty: no agent is trusted this way.
+   */
+  trustedLabels: z.array(z.string()).default([]),
   /**
    * One-off, off by default: on the next start, a module with no Factory state yet copies the state
    * file of its old stand-alone plugin (agents-leases, agents-warden, agents-inbox).

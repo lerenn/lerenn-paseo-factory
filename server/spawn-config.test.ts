@@ -4,7 +4,14 @@ import { describe, expect, it } from "vitest";
 import { parseRole } from "./roles/loader";
 import { resolveAgentConfig } from "./spawn-config";
 
-const dir = path.join(__dirname, "..", "shared", "examples", "lab-roles");
+const dir = path.join(__dirname, "..", "shared", "examples", "roles");
+
+/** Role files the way a roles git source writes them: provider, model, thinking and mode set, or only some of them. */
+const FIXTURES: Record<string, string> = {
+  "worker.yaml": "version: 1\nname: worker\ndescription: A worker.\nprovider: claude\nmodel: claude-sonnet-5-5\nthinkingOptionId: high\nmodeId: auto\nsystemPrompt: Work.\n",
+  "caller.yaml": "version: 1\nname: caller\ndescription: Calls one tool.\nprovider: claude\nmodel: claude-haiku-5-5\nmodeId: auto\nsystemPrompt: Call the tool.\n",
+};
+const shipped = Object.fromEntries(readdirSync(dir).filter((f) => f.endsWith(".yaml")).map((f) => [f, readFileSync(path.join(dir, f), "utf8")]));
 
 describe("resolveAgentConfig", () => {
   it("joins a role's provider and model as provider/model, with mode and thinking", () => {
@@ -22,8 +29,8 @@ describe("resolveAgentConfig", () => {
     expect(resolveAgentConfig(null, "claude").provider).toBe("claude");
   });
 
-  it.each(readdirSync(dir).filter((f) => f.endsWith(".yaml")))("the real lab role %s yields a provider/model string", (file) => {
-    const role = parseRole(readFileSync(path.join(dir, file), "utf8"), file);
+  it.each(Object.entries({ ...FIXTURES, ...shipped }))("the role %s yields a provider/model string", (file, text) => {
+    const role = parseRole(text, file);
     const config = resolveAgentConfig(role, "claude/claude-sonnet-5-5");
     expect(config.provider).toMatch(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/);
     if (role.model) expect(config.provider.endsWith(`/${role.model}`)).toBe(true);

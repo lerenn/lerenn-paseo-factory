@@ -91,7 +91,7 @@ export interface Ports {
 export interface PostSettings {
   /** Who gets the event mails ("" = nobody). */
   eventsMailTo: string;
-  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean };
+  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean; prompt?: string };
   janitor: { enabled: boolean; dryRun: boolean };
 }
 
@@ -299,7 +299,7 @@ export class Engine {
     for (const name of Object.keys(given)) if (!(name in def.vars) && !name.endsWith("_confirmed")) throw new UsageError(`Unknown variable ${name}.`);
     for (const name of def.confirm) {
       if (out[name] && given[`${name}_confirmed`] !== "true") {
-        throw new UsageError(`${name} must be confirmed before this blueprint changes code: check it exists (Linear) and pass ${name}_confirmed=true.`);
+        throw new UsageError(`${name} must be confirmed before this blueprint changes code: check it exists for real and pass ${name}_confirmed=true.`);
       }
       if (!out[name]) throw new UsageError(`${name} is required and must be confirmed.`);
     }
@@ -1677,7 +1677,7 @@ export class Engine {
         return;
       }
     }
-    // The run's status says where the PRs stand in the queue (ANY-2738).
+    // The run's status says where the PRs stand in the queue.
     if (st.gate && places.length) {
       const where = `merge queue: ${places.join("; ")}`;
       if (run.waitingFor !== where) {

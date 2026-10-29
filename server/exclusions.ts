@@ -1,6 +1,6 @@
 import path from "node:path";
 
-/** Where the Factory must not look or spawn: the Security coordinator's project (by path, since its agent id changes) and optional agent ids. */
+/** Where the Factory must not look or spawn: excluded projects (by path, since an agent there may be recreated with a new id) and optional agent ids. */
 export interface Exclusions {
   paths: string[];
   agents: string[];

@@ -1,6 +1,14 @@
 import { z } from "zod";
 import type { CallContext, HostTool } from "./tools";
 import { UsageError } from "./tools";
+import { isTrusted } from "./trust";
+
+/** Whether an agent with these labels may see and call the tool. */
+function allowed(t: HostTool, labels: Record<string, string>): boolean {
+  if (t.requiresLabel && labels[t.requiresLabel.key] !== t.requiresLabel.value) return false;
+  if (t.requiresTrusted && !isTrusted(labels)) return false;
+  return true;
+}
 
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -50,7 +58,7 @@ export class McpServer {
         return reply({});
       case "tools/list": {
         const labels = await ctx.labels();
-        const visible = this.source.tools().filter((t) => !t.requiresLabel || labels[t.requiresLabel.key] === t.requiresLabel.value);
+        const visible = this.source.tools().filter((t) => allowed(t, labels));
         return reply({
           tools: visible.map((t) => ({ name: t.name, description: t.description, inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }) })),
         });
@@ -58,7 +66,7 @@ export class McpServer {
       case "tools/call": {
         const tool = [...this.source.tools(), ...this.source.aliases()].find((t) => t.name === req.params?.name);
         if (!tool) return fail(-32602, `Unknown tool: ${req.params?.name}`);
-        if (tool.requiresLabel && (await ctx.labels())[tool.requiresLabel.key] !== tool.requiresLabel.value) {
+        if ((tool.requiresLabel || tool.requiresTrusted) && !allowed(tool, await ctx.labels())) {
           return reply(textResult(`${tool.name} is not available to this agent.`, true));
         }
         const parsed = tool.input.safeParse(req.params?.arguments ?? {});

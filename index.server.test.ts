@@ -100,9 +100,9 @@ describe("the blueprint start endpoint", () => {
 });
 
 describe("inbox_answer", () => {
-  it("is for agents labelled paseo.assistant=1 and is recorded as the Assistant's answer", async () => {
+  it("is for agents with a trusted label and is recorded as the Assistant's answer", async () => {
     const asker = "asker";
-    const b = bootPlugin({}, {
+    const b = bootPlugin({ factory: { trustedLabels: ["paseo.assistant=1"] } }, {
       agents: {
         list: async () => ({ entries: [{ agent: { id: "assistant", labels: { "paseo.assistant": "1" } } }, { agent: { id: "plain", labels: {} } }] }),
         ref: (id: string) => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {} } }),

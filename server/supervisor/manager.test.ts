@@ -287,14 +287,14 @@ describe("memory and intro", () => {
   it("round-trips notes into the next session's intro with issues, requests and runs", async () => {
     const { supervisor, prompts, setActivity, setIssues } = setup();
     await supervisor.ensure();
-    supervisor.note("waiting for Louis on the tf-aws pin");
+    supervisor.note("waiting for a person on the deploy pin");
     supervisor.state.data.requests.push({ id: "sq-1", fromId: "a", fromName: "Assistant", question: "Q1", at: 1, answer: "A1", answeredAt: 2, deliveredAt: 1 });
     setIssues([{ key: "run:bp-9:failed", text: "Run bp-9 failed" }]);
     setActivity({ runs: [{ id: "bp-9", label: "ticket ANY-1", status: "waiting", stage: "review", detail: "gate" }], liveStageAgents: 0 });
     await supervisor.ensure({ restart: true });
     const intro = prompts[1];
     expect(intro).toMatch(/session #2/);
-    expect(intro).toMatch(/waiting for Louis on the tf-aws pin/);
+    expect(intro).toMatch(/waiting for a person on the deploy pin/);
     expect(intro).toMatch(/Run bp-9 failed/);
     expect(intro).toMatch(/sq-1 from "Assistant": Q1/);
     expect(intro).toMatch(/bp-9 \(ticket ANY-1\) waiting at review/);

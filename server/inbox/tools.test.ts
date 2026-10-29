@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setTrustedLabels } from "../trust";
 import { settingsSchema } from "../../shared/inbox/settings";
 import { Engine, UsageError } from "./engine";
 import { Store } from "./store";
@@ -15,6 +16,15 @@ function setup() {
 }
 
 describe("inbox_withdraw", () => {
+  beforeEach(() => setTrustedLabels(["paseo.assistant=1"]));
+  afterEach(() => setTrustedLabels([]));
+
+  it("treats no one as trusted when trustedLabels is empty", async () => {
+    setTrustedLabels([]);
+    const { factoryItem, ctx } = setup();
+    await expect(Promise.resolve().then(() => withdraw.run({ item_id: factoryItem.id }, ctx("assistant", { "paseo.assistant": "1" })))).rejects.toThrow(UsageError);
+  });
+
   it("lets the Assistant withdraw a Factory-internal item", async () => {
     const { engine, factoryItem, ctx } = setup();
     await withdraw.run({ item_id: factoryItem.id, reason: "run is running again" }, ctx("assistant", { "paseo.assistant": "1" }));
