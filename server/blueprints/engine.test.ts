@@ -309,8 +309,16 @@ describe("verdicts", () => {
     await expect(engine.verdict("agent-1", { verdict: "done", data: { pr_urls: [PR] } })).rejects.toThrow(/no pull request/);
     await expect(engine.verdict("agent-1", { verdict: "done", data: { pr_urls: ["https://example.com/x"] } })).rejects.toThrow(/not a GitHub pull request/);
     pr[PR] = { ...okPr(PR), state: "closed" };
-    await expect(engine.verdict("agent-1", { verdict: "done", data: { pr_urls: [PR] } })).rejects.toThrow(/closed, not open/);
+    await expect(engine.verdict("agent-1", { verdict: "done", data: { pr_urls: [PR] } })).rejects.toThrow(/closed without merging, not open/);
     pr[PR] = okPr(PR);
+    await verdict("agent-1", "done", { pr_urls: [PR] });
+    expect(engine.require(run.id).stage).toBe("check");
+  });
+
+  it("takes a merged PR as passing an \"open\" check (bp-a4ee2a1b)", async () => {
+    const { start, verdict, engine, pr } = setup();
+    const run = await start(undefined, { at: "build" });
+    pr[PR] = { ...okPr(PR), state: "merged" };
     await verdict("agent-1", "done", { pr_urls: [PR] });
     expect(engine.require(run.id).stage).toBe("check");
   });

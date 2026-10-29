@@ -1213,7 +1213,8 @@ export class Engine {
         throw new UsageError(`Cannot verify ${url} on GitHub (${(error as Error).message}); try again.`);
       }
       if (!f.exists) throw new UsageError(`GitHub has no pull request ${url}.`);
-      if (checks.includes("open") && f.state !== "open") throw new UsageError(`GitHub says ${url} is ${f.state}, not open.`);
+      // "open" guards against a PR closed without merging; a merged one is the goal, not an error (bp-a4ee2a1b could not report done).
+      if (checks.includes("open") && f.state === "closed") throw new UsageError(`GitHub says ${url} is closed without merging, not open.`);
       if (checks.includes("ci_green") && f.ci !== "green") throw new UsageError(`GitHub says CI on ${url} (head ${f.head.slice(0, 12)}) is ${f.ci}, not green. Fix it before reporting "${verdict}".`);
       if (checks.includes("mergeable") && f.mergeable !== true) throw new UsageError(`GitHub says ${url} is not mergeable (${f.mergeable === null ? "unknown" : "conflicts"}).`);
     }
