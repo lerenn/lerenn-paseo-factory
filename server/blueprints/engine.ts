@@ -11,6 +11,9 @@ import { PostRun } from "./post";
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
 
+/** Polls in a row that must not see a queued PR in the queue before the merge gate asks again. */
+const LEFT_QUEUE_POLLS = 2;
+
 export interface PrFacts {
   url: string;
   exists: boolean;
@@ -20,7 +23,7 @@ export interface PrFacts {
   mergeable: boolean | null;
   draft: boolean;
   review: string;
-  /** Auto-merge is on: with a merge queue, the PR is queued and merges by itself (absent: unknown). */
+  /** Auto-merge is on or the PR is in a merge queue: it merges by itself (absent: unknown). */
   queued?: boolean;
 }
 
@@ -1634,7 +1637,12 @@ export class Engine {
     for (const [url, head] of Object.entries(heads)) {
       const f = await this.ports.prFacts(url);
       if (f.state === "merged") merged += 1;
-      else if (st.gate?.queued && (f.state !== "open" || f.queued === false)) {
+      else if (st.gate?.queued && f.state === "open" && f.queued !== false) st.gate.notQueuedPolls = 0;
+      else if (st.gate?.queued && f.state === "open" && (st.gate.notQueuedPolls = (st.gate.notQueuedPolls ?? 0) + 1) < LEFT_QUEUE_POLLS) {
+        // One poll that does not see the PR in the queue is not "left the queue": GitHub's answer flips while it moves the PR.
+        this.store.save();
+        return;
+      } else if (st.gate?.queued && (f.state !== "open" || f.queued === false)) {
         // left the merge queue without merging: ask the person again
         await this.exclusive(run.id, async () => {
           if (run.stage !== id || st.status !== "waiting" || !st.gate?.queued) return;
@@ -1658,6 +1666,14 @@ export class Engine {
         });
         return;
       }
+    }
+    // Queued but still not merged after `stall_minutes` (15 by default): say so once, keep waiting; never a new question.
+    if (st.gate?.queued && !st.gate.slowNoticed && merged < Object.keys(heads).length && this.ports.now() - (st.gate.openedAt ?? this.ports.now()) >= (def.stall_minutes ?? 15) * 60_000) {
+      st.gate.slowNoticed = true;
+      const mins = Math.round((this.ports.now() - (st.gate.openedAt ?? this.ports.now())) / 60_000);
+      this.log(run, "merge_queue_slow", id, `still in the merge queue after ${mins} min`);
+      this.notify(run, { kind: "waiting", stage: id, reason: `still in the merge queue after ${mins} min: ${Object.keys(heads).join(", ")}`, key: `${run.id}:queue-slow:${id}:${st.runs}` });
+      this.store.save();
     }
     // A passive merge wait whose PRs are neither queued nor tested after `stall_minutes` will never merge by itself.
     if (st.gate?.passive && def.stall_minutes && def.on.stalled && merged < Object.keys(heads).length && this.ports.now() - (st.gate.openedAt ?? this.ports.now()) >= def.stall_minutes * 60_000) {

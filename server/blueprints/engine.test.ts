@@ -1243,7 +1243,41 @@ head_moved = "merge"
     ctx.pr[PR] = { ...okPr(PR), queued: false };
     await ctx.engine.tick();
     await ctx.settle();
+    expect(ctx.items.size).toBe(1); // one poll that misses the PR in the queue is not enough (ANY-2740)
+    await ctx.engine.tick();
+    await ctx.settle();
     expect(ctx.items.size).toBe(2);
+  });
+
+  it("does not ask again when GitHub's queue answer flips for one poll", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), queued: true };
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.answer("item-1", "merged");
+    for (const queued of [false, true, false, true]) {
+      ctx.pr[PR] = { ...okPr(PR), queued };
+      await ctx.engine.tick();
+      await ctx.settle();
+    }
+    expect(ctx.items.size).toBe(1);
+    expect(ctx.engine.require(run.id).history.some((h) => h.event === "merge_not_seen")).toBe(false);
+  });
+
+  it("says once that the queue is slow after stall_minutes, and keeps waiting", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), queued: true };
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.answer("item-1", "merged");
+    ctx.advance(16 * 60_000);
+    await ctx.engine.tick();
+    await ctx.engine.tick();
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("waiting");
+    expect(r.history.filter((h) => h.event === "merge_queue_slow")).toHaveLength(1);
+    expect(ctx.items.size).toBe(1);
   });
 });
 
