@@ -1474,4 +1474,51 @@ describe("a worker that waits on an outside system (decision f1cd49be)", () => {
     expect(r.status).toBe("paused");
     expect(r.history.filter((h) => h.event === "worker_wait_ceiling")).toHaveLength(1);
   });
+
+  it("is not nudged when it ends its turns while waiting, and they cost no attempt", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    ctx.engine.workerWaiting("agent-1", "waiting for the Codex review on acme/api#7");
+    const sentBefore = ctx.sent.length;
+    const attempts = ctx.engine.require(run.id).stages[ctx.engine.require(run.id).stage!].attempts;
+    for (let i = 0; i < 3; i++) {
+      // Each turn end stands for a turn the worker's event mail started; it is still waiting.
+      ctx.advance(10 * 60_000);
+      await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+      await ctx.settle();
+    }
+    const r = ctx.engine.require(run.id);
+    const st = r.stages[r.stage!];
+    expect(ctx.sent.length).toBe(sentBefore);
+    expect(st.attempts).toBe(attempts);
+    expect(st.status).toBe("running");
+    expect(r.status).toBe("running");
+    expect(r.history.some((h) => h.event === "exhausted" || h.event === "turn_ended")).toBe(false);
+    expect(r.history.filter((h) => h.event === "worker_waiting_turn_end")).toHaveLength(3);
+  });
+
+  it("pauses for a person when a waiting worker ends its turn past the ceiling", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    ctx.engine.workerWaiting("agent-1", "waiting for the merge queue");
+    ctx.advance(121 * 60_000);
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("paused");
+    expect(r.history.filter((h) => h.event === "worker_wait_ceiling")).toHaveLength(1);
+  });
+
+  it("still nudges a worker that ends its turn without having declared a wait", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    const sentBefore = ctx.sent.length;
+    const attempts = ctx.engine.require(run.id).stages[ctx.engine.require(run.id).stage!].attempts;
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(ctx.sent.length).toBeGreaterThan(sentBefore);
+    expect(r.stages[r.stage!].attempts).toBe(attempts + 1);
+    expect(r.history.some((h) => h.event === "turn_ended")).toBe(true);
+  });
 });
