@@ -137,7 +137,7 @@ export function startBlueprints(host: FactoryHost) {
         labels: o.labels,
         env: o.env,
       };
-      const runtime = o.local ? "local" : host.runtime;
+      const runtime = o.runtime ?? host.runtime;
       const { agentId, workspaceId } = await spawnAgent(host.paseo, runtime, { ...input, joinWorkspaceId: o.joinWorkspaceId }).catch((error: Error) => {
         // The shared pod is gone (archived, evicted): this worker gets a pod of its own and becomes the new shared one.
         if (!o.joinWorkspaceId) throw error;
