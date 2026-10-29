@@ -1507,6 +1507,18 @@ export class Engine {
 
   private async startChild(run: Run, id: string, def: BlueprintStage): Promise<void> {
     const st = run.stages[id];
+    // A resumed or re-entered stage re-attaches to its live child instead of starting a second one:
+    // the idempotency key counts entries, so a new entry alone would not join it. An ended child is not
+    // re-attached: its outcome already reached the parent when it ended, and re-entering after it means a new run.
+    const live = this.store.all().find((r) => r.parent?.runId === run.id && r.parent.stageId === id && r.status !== "done" && r.status !== "failed" && r.status !== "aborted");
+    if (live) {
+      st.childRunId = live.id;
+      st.status = "waiting";
+      run.waitingFor = `child run ${live.id}`;
+      this.log(run, "child_reattached", id, live.id);
+      this.store.save();
+      return;
+    }
     const vars = Object.fromEntries(Object.entries(def.vars).map(([k, v]) => [k, this.r(run, v)]));
     const confirmed = Object.fromEntries(Object.entries(run.vars).filter(([k]) => k.endsWith("_confirmed")));
     let child: Run;

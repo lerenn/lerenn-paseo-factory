@@ -603,6 +603,70 @@ default = "backend"
   });
 });
 
+describe("child runs re-attach", () => {
+  const parentSrc = `
+version = 1
+name = "parent"
+[[stage]]
+id = "hand"
+kind = "blueprint"
+blueprint = "kid"
+[stage.on]
+done = "done"
+failed = "failed"
+`;
+  const kidSrc = `
+version = 1
+name = "kid"
+[[stage]]
+id = "work"
+role = "implementer"
+prompt = "Work"
+[stage.on]
+done = "done"
+bad = "failed"
+`;
+  function family() {
+    const ctx = setup();
+    ctx.ports.blueprint = (name) => (name === "parent" ? parseBlueprint(parentSrc) : name === "kid" ? parseBlueprint(kidSrc) : undefined);
+    const children = (id: string) => ctx.store.all().filter((r) => r.parent?.runId === id);
+    return { ctx, children };
+  }
+
+  it("a parent resumed while its child still runs waits on the same child, whose end completes the stage", async () => {
+    const { ctx, children } = family();
+    const run = ctx.engine.start({ blueprint: "parent", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    expect(children(run.id)).toHaveLength(1);
+    const child = children(run.id)[0]!;
+    await ctx.engine.resume(run.id, { stage: "hand" });
+    await ctx.settle();
+    expect(children(run.id)).toHaveLength(1);
+    const p = ctx.engine.require(run.id);
+    expect(p.stages.hand).toMatchObject({ status: "waiting", childRunId: child.id });
+    expect(p.waitingFor).toBe(`child run ${child.id}`);
+    expect(p.history.some((e) => e.event === "child_reattached")).toBe(true);
+    await ctx.verdict("agent-1", "done");
+    expect(ctx.engine.require(child.id).status).toBe("done");
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "done" });
+    expect(ctx.engine.require(run.id).stages.hand.verdict).toBe("done");
+  });
+
+  it("a parent resumed at the stage after its child failed starts a new child", async () => {
+    const { ctx, children } = family();
+    const run = ctx.engine.start({ blueprint: "parent", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.verdict("agent-1", "bad");
+    expect(ctx.engine.require(run.id).status).toBe("failed");
+    await ctx.engine.resume(run.id, { stage: "hand" });
+    await ctx.settle();
+    const kids = children(run.id);
+    expect(kids).toHaveLength(2);
+    expect(kids[0]!.status).toBe("failed");
+    expect(ctx.engine.require(run.id).stages.hand).toMatchObject({ status: "waiting", childRunId: kids[1]!.id });
+  });
+});
+
 describe("Inbox escalations are multiple choice and act", () => {
   async function stuck() {
     const ctx = setup();
