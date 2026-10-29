@@ -434,3 +434,19 @@ describe("supervisor.enabled", () => {
     await expect(s.supervisor.digest()).resolves.toBeUndefined();
   });
 });
+
+describe("Supervisor during a usage-limit pause", () => {
+  it("is not woken by a run start or a digest while quiet; the digest waits and is delivered after", async () => {
+    let quiet = true;
+    const { supervisor, sent, setIssues, created } = setup({ quiet: () => quiet });
+    supervisor.wake();
+    setIssues([{ key: "run:1", text: "Run bp-1 is paused" }]);
+    await supervisor.digest();
+    await supervisor.tick();
+    expect(created).toHaveLength(0);
+    quiet = false;
+    await supervisor.tick();
+    expect(created).toHaveLength(1);
+    expect(sent.some((m) => /Run bp-1 is paused/.test(m.text))).toBe(true);
+  });
+});

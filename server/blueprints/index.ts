@@ -18,6 +18,7 @@ import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
 import { startCrons } from "./crons";
+import { startUsageLimits } from "./usage-limit";
 import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
@@ -195,6 +196,8 @@ export function startBlueprints(host: FactoryHost) {
     },
     spendOfAgent: (agentId) => spend.all().filter((r) => r.agentId === agentId).reduce((n, r) => n + r.costUsd, 0),
     post: () => ({ eventsMailTo: cfg().events.mailTo, retro: cfg().retro, janitor: cfg().janitor }),
+    // While the Factory is paused for a usage limit no retro agent starts (it would hit the limit too); it starts after.
+    quiet: () => !!(engine.usageLimits?.enabled() && engine.usageLimits.globalHold()),
     ask(o) {
       const e = inbox();
       e.store.upsertAgent(`blueprint:${o.runId}`, { title: o.title });
@@ -278,6 +281,16 @@ export function startBlueprints(host: FactoryHost) {
     stateFile: (process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "crons.json"),
   });
 
+  // Provider usage limits (Blueprints > Quota), off until usageLimit.enabled (decision f007d95a / b05f2c5c).
+  const usage = startUsageLimits({
+    host,
+    engine,
+    store,
+    cfg,
+    stateFile: (process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "usage-limit.json"),
+  });
+  host.engines.blueprints.usageLimits = usage.controller;
+
   const removeTools = host.registerTools("blueprints", blueprintTools({ engine, catalog: async () => (await refresh()).blueprints }));
   host.setInstructions("blueprints", INSTRUCTIONS);
   host.contribute({
@@ -359,7 +372,10 @@ export function startBlueprints(host: FactoryHost) {
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
       void recordSpend(agent.id, turnId).finally(() => engine.observer.retroEnded?.(agent.id));
-      void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
+      if (outcome.kind !== "canceled") usage.probeEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined, code: outcome.kind === "failed" ? outcome.error.code : undefined });
+      void engine
+        .turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined, code: outcome.kind === "failed" ? outcome.error.code : undefined, provider: agent.provider ?? null })
+        .catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];
   const runVars = (id: string) => {
@@ -439,8 +455,13 @@ export function startBlueprints(host: FactoryHost) {
     try {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
+      if (host.enabled("blueprints") && host.hasPaseo()) await usage.controller.tick().catch((e) => console.error("blueprints: usage-limit tick failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await notify();
-      if (host.enabled("blueprints") && host.hasPaseo() && !store.suspended()) await crons.tick().catch((e) => console.error("blueprints: cron tick failed", e));
+      if (host.enabled("blueprints") && host.hasPaseo() && !store.suspended()) {
+        if (engine.usageLimits?.enabled() && engine.usageLimits.globalHold()) {
+          if (crons.scheduler.skipWindow(Date.now())) console.log("blueprints: cron slots skipped while the Factory is paused for a usage limit");
+        } else await crons.tick().catch((e) => console.error("blueprints: cron tick failed", e));
+      }
       if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
@@ -538,6 +559,7 @@ export function startBlueprints(host: FactoryHost) {
     unlisten?.();
     unsubscribeSettings();
     removeTools();
+    usage.remove();
     host.blueprints = null;
   };
 }
