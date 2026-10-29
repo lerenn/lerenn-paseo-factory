@@ -195,8 +195,9 @@ export class Engine {
   /** Validate the variables and create the run; the first stage is entered in the background. */
   start(input: StartInput): Run {
     if (input.idempotencyKey) {
+      // The same key joins the run it started; only a run that failed or was aborted lets the key start a new one.
       const existing = this.store.byKey(input.idempotencyKey);
-      if (existing) return existing;
+      if (existing && existing.status !== "failed" && existing.status !== "aborted") return existing;
     }
     const held = this.store.suspended();
     if (held) throw new UsageError(`The Factory is suspended (${held.reason}); resume it with blueprint_resume(all=true) before starting runs.`);
@@ -232,6 +233,15 @@ export class Engine {
       history: [],
     };
     this.store.log(run, "started", first, `by ${input.requestedBy}${input.at ? ` at ${input.at}` : ""}`, now);
+    const active = def.max_active ? this.activeOf(def.name) : 0;
+    if (def.max_active && active >= def.max_active) {
+      run.queued = { first, at: now };
+      run.status = "waiting";
+      run.waitingFor = `queued: ${active} ${def.name} runs active (max_active ${def.max_active})`;
+      this.store.log(run, "queued", null, run.waitingFor, now);
+      this.store.add(run);
+      return run;
+    }
     run.stage = first;
     run.stages[first] = { ...freshStage(), status: "entering" };
     this.store.add(run);
@@ -242,6 +252,30 @@ export class Engine {
       console.error("blueprints: runStarted failed", error);
     }
     return run;
+  }
+
+  /** Runs of a blueprint that hold a slot under `max_active`: not ended, not queued. */
+  private activeOf(blueprint: string): number {
+    return this.store.active().filter((r) => r.blueprint === blueprint && !r.queued).length;
+  }
+
+  /** Starts queued runs, oldest first, while their blueprint has a free slot under `max_active`. */
+  private async dequeue(): Promise<void> {
+    if (this.store.suspended()) return;
+    const queued = this.store.active().filter((r) => r.queued).sort((a, b) => a.queued!.at - b.queued!.at);
+    for (const run of queued) {
+      const max = run.def.max_active ?? Infinity;
+      if (this.activeOf(run.blueprint) >= max) continue;
+      const first = run.queued!.first;
+      run.queued = null;
+      run.status = "running";
+      run.waitingFor = null;
+      run.stage = first;
+      run.stages[first] = { ...freshStage(), status: "entering" };
+      this.log(run, "dequeued", first, `a ${run.blueprint} slot is free`);
+      this.store.save();
+      await this.exclusive(run.id, () => this.enter(run, first)).catch((e) => this.crash(run, e));
+    }
   }
 
   private checkVars(def: Blueprint, given: Record<string, string>): Record<string, string> {
@@ -1545,6 +1579,7 @@ export class Engine {
   async tick(): Promise<void> {
     const now = this.ports.now();
     this.observer.tick?.();
+    await this.dequeue().catch((e) => console.error("blueprints: dequeue failed", e));
     for (const run of this.store.active()) {
       const id = run.stage;
       if (!id) continue;

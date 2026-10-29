@@ -79,6 +79,8 @@ export interface Run {
   history: HistoryEvent[];
   /** Inbox items asking a person about a stuck or paused run: item id -> the stage and what was asked. */
   escalations?: Record<string, { stage: string; kind: "stuck" | "setup" }>;
+  /** Waiting for a slot under the blueprint's `max_active`: the stage it starts at once dequeued. */
+  queued?: { first: string; at: number } | null;
   /** The stage whose edge led into the current one (`{{from.*}}` in templates). */
   prev?: string | null;
   /** The workspace (pod) the stages marked `workspace = "run"` share, once the first of them has created it. */
@@ -188,8 +190,10 @@ export class RunStore {
     return this.state.runs.filter((r) => r.status === "running" || r.status === "waiting" || r.status === "paused");
   }
 
+  /** The latest run started with this key. */
   byKey(key: string): Run | undefined {
-    return this.state.runs.find((r) => r.idempotencyKey === key);
+    for (let i = this.state.runs.length - 1; i >= 0; i--) if (this.state.runs[i]!.idempotencyKey === key) return this.state.runs[i];
+    return undefined;
   }
 
   approval(key: string) {
