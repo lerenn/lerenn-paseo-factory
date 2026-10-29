@@ -5,7 +5,7 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 | Module | Tab | What it does | MCP tools |
 |---|---|---|---|
 | Roles | Roles | Agent roles from git (`PASEO_AGENT_ROLE=<name>`) | none (hook) |
-| Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume` |
+| Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume`; `usage_limit_status`, `_classify`, `_lift` |
 | Leases | Leases | One agent at a time on a named resource | `lease_acquire`, `_renew`, `_release`, `_list` |
 | Warden | Warden | Pings agents that go quiet; supervises subagents | `warden_register`, `_register_subagent`, `_update`, `_done`, `_list` |
 | Inbox | Inbox | Multiple-choice questions and approvals for the human (2 to 4 options, an open "Other" always added) | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
@@ -81,12 +81,13 @@ The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalat
 The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) and serves on loopback only, with the token as a bearer:
 
 - `POST /blueprints/start`, body `{blueprint, vars, requestedBy, idempotencyKey}` → `200 {runId}`, `404` unknown blueprint, `400` bad vars, `401`. The same `idempotencyKey` returns the same run.
-- `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, and the kinds of `events` in its history. For plugins that follow runs (for example Slack feedback in paseo-factory-slack).
+- `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, the kinds of `events` in its history, and where it stands now: `stage`, `waitingFor`, `pmPending`, `suspended` (`{reason, since, by}`), the open `gate` of the current stage (`{stage, itemId, kind: approval|question|merge, openedAt, passive}`; `itemId` is the Inbox item, null for a passive merge wait), the open `escalations` (Inbox item ids), the current stage's worker `agentId` and `role`, and `prs`: per PR URL the run refers to, the last facts the Factory read from GitHub (`state`, `head`, `ci`, `review`, `mergeable`, `draft`, `queued`, `queuePosition`, ..., and `checkedAt`). Read-only: the endpoint never calls GitHub itself. For plugins that follow runs (for example Slack feedback in paseo-factory-slack, the tickets-dispatcher's Tickets tab).
+- PR facts go through one per-URL cache: a fact younger than 2 min is served from memory, a merged PR is kept (and a closed one until a forced read) while a stored run refers to it, concurrent lookups of a URL share one `gh` call, and at most 4 run at once. Gates that need the current head (opening a gate, checking an answer, `verify`, a PR in the merge queue) read GitHub now.
 - `GET /blueprints` → names, descriptions and variables (`required`).
 
 ## Crons (Blueprints module)
 
-The **Crons** tab (next to Blueprints) starts blueprints on cron schedules, with at most one active run per schedule.
+The **Crons** sub-tab of Blueprints (Runs | Templates | Crons | Quota | Settings) starts blueprints on cron schedules, with at most one active run per schedule.
 
 - **Where schedules live:** `crons/schedules.json` in the Factory folder of each git source (next to `roles/` and `blueprints/`, synced with them), plus the Blueprints setting `crons.schedules` (same entries; it wins on a repeated id, then sources in order). A file that does not parse keeps its last good copy; a bad entry is left out and shown in the tab.
 - **Format:** `{"schedules": [{"id": "nightly", "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "blueprint": "my-blueprint", "vars": {}, "enabled": true, "maxFailures": 2, "mailTo": "@ops"}]}`. `id` is lowercase letters, digits, `-` and `_`; `cron` has 5 fields (minute hour day-of-month month day-of-week, with `*`, lists, ranges and steps; day of week 0-7, Sunday 0 or 7; both day fields restricted means either matches); `timezone` is an IANA zone (default `UTC`); `vars` are strings; `enabled` defaults to true, `maxFailures` to 2; `mailTo` replaces `crons.mailTo`.
@@ -126,11 +127,13 @@ const unregister = factory.registerExtension({
 
 Paseo runs each plugin's server in its own process, so `globalThis` registration only works for code inside the Factory's process. Other plugins register over the Factory's loopback endpoint (`~/.paseo/factory/endpoint.json`, bearer = its token) and serve a small loopback API of their own:
 
-`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
+`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name, readOnly? }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
 
 The Factory forwards, with `Authorization: Bearer <callback.token>`:
 - `POST <callback>/tools/<name>` `{ input, callerId }` → `{ result }` (the tool is served under the `factory` MCP server with your `inputSchema`; validate the input yourself; an error status with `{ error }` becomes the tool error).
 - `POST <callback>/rpc/<name>` `{ input, callerId }` → `{ output }` (for the tab, through `factory.extension.call`).
+
+An rpc registered with `readOnly: true` (in-process or remote) is also reachable by other plugins on the Factory's loopback endpoint: `POST /extensions/<id>/rpc/<name>` `{ input }` → `200 { output }`, bearer = the endpoint token (`~/.paseo/factory/endpoint.json`), `callerId` `loopback`. Other rpcs answer 403, an unknown extension or rpc 404, input that fails the rpc's schema 400. Mark only rpcs with no side effect and no secret in the output; this is how one extension reads another's facts (for example the releaser's `ticket-facts`).
 - `POST <callback>/stages/<kind>` `{ runId, stageId, blueprint, params, vars, outcomeToken }` → `{ outcome: { verdict, summary?, data? } }`, or `{ pending: true }` for a stage that waits: finish it later with `POST <factory>/stages/<outcomeToken>/outcome` `{ verdict, summary?, data? }` (bearer = the endpoint token; one use).
 - `GET <callback>/health`: any HTTP answer counts as alive. After 3 consecutive unreachable calls or probes (probed once a minute) the extension is dropped.
 
@@ -138,7 +141,7 @@ Roles shipped by an extension and `ctx.services` are in-process only for now.
 
 ### Extension tab UI
 
-Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call) }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:
+Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call), readOnly? }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:
 
 ```ts
 const queue = ((globalThis as any)[Symbol.for("paseo.factory.client")] ??= []);
@@ -146,7 +149,7 @@ const add = (id, Tab) => (Array.isArray(queue) ? queue.push([id, Tab]) : queue.r
 add("my-extension", ({ theme, layout, extensionId, call }) => /* call("board", { ... }) */ null);
 ```
 
-Until the Factory client has loaded, push `[id, Component]` onto that array; afterwards the global is the registry object and `registerTab(id, Component)` returns an unregister function. The component renders inside the extension's tab with `{ theme, layout, extensionId, call(name, input) }`; without one the tab shows the extension's metadata. It can use the host UI exports. Settings go through your own `rpc` entries (your server half reads and writes its own settings).
+Until the Factory client has loaded, push `[id, Component]` onto that array; afterwards the global is the registry object and `registerTab(id, Component)` returns an unregister function. The component renders inside the extension's tab with `{ theme, layout, extensionId, call(name, input), open(link) }`; `open` leaves the tab for `{ tab: "blueprints", runId }` (the run, expanded), `{ tab: "inbox", itemId }` (the item, opened) or `{ url }` (http(s) only, in the browser); without one the tab shows the extension's metadata. It can use the host UI exports. Settings go through your own `rpc` entries (your server half reads and writes its own settings).
 
 ## Sidebar badge
 
@@ -168,6 +171,17 @@ Settings of the Blueprints module (`runs`, `events`, `retro`, `janitor`):
 - **Criteria reminder** (`gates.criteriaReminderMinutes`, default 30, 0 = off): an approval gate that has `criteria` (the ticket blueprint's acceptance-criteria gate) and is still unanswered after this many minutes sends one more "waiting" mail, "reminder n/3 ... still waiting N min", every N minutes, at most 3. It goes through the event mails, so it needs `events.mailTo` (default empty = no reminders) and nothing is hardcoded. There is deliberately no timed default: criteria are the human's sign-off on what QA checks, so a timeout never approves (or denies) them; the gate stays open.
 - **QA `pending_merge`** (ticket blueprint): QA that can verify some criteria only once the PRs are merged or deployed answers `pending_merge` instead of `unable_to_verify`. The run goes to `wait-merge`, a `wait = "merge"` gate: no Inbox item blocks, the engine polls GitHub (`pollSeconds`) and a "waiting" mail (`events.mailTo`) says which PRs to merge. Merged (or a head that moved) runs QA again; after 8 h (`expires_in_minutes = 480`) it falls back to the `ask-blocked` gate as before. After a merge the PR babysitting stage is skipped (`skip_if` on the `wait-merge` verdict) and the `merge` gate, which completes by itself once GitHub shows the PRs merged, leads to the release request. The `qa` role of your roles git source should describe the `pending_merge` verdict.
 - `{{from.stage}}`, `{{from.verdict}}`, `{{from.summary}}` in blueprint templates are the stage whose edge led to the current one (the `ask-blocked` gate uses them).
+
+## Provider usage limits (`usageLimit`, Blueprints > Quota)
+
+Off by default (`usageLimit.enabled`). Not the Kubernetes `exceeded quota` above: this is the model provider's usage limit.
+
+- **Classifier** (`shared/blueprints/usage-limit.ts`, pure, also the read-only tool `usage_limit_classify`): only the terminal error of a failed turn (`PluginTurnOutcome.error`: `message` and `code`), never logs or timelines. A usage limit only on an explicit signal: `code` `rate_limit_error` / `rate_limit` / `usage_limit_reached` / `rate_limit_exceeded`, HTTP status 429, `API Error: 429 {...}` (or a JSON error type above), or the provider's own sentence anchored on the whole message (Claude Code "Claude AI usage limit reached|<epoch>", "... limit reached ... resets 3pm (Europe/Paris)"; Codex "You've hit your usage limit ... try again in/at ..."), with the reset time read from it (`resetZone` for a clock without a zone; past or more than 7 days ahead: none). Not a usage limit: 529/overloaded, other 5xx, network and DNS, auth, context too long, tool and permission errors, the Kubernetes quota, work failures. An error nobody classified takes the normal path and mails ONE alert per signature to `unknownAlertTo` (persisted), so the rules grow from evidence.
+- **Run level:** a match holds the run (status `suspended`, shown as "paused: quota" with `resume_at`): no attempt, flake, nudge or Inbox item; the worker is kept and its pod suspended. It resumes at the reset time plus 60 s, else after `probeMinutes`, with a continue prompt ("the provider usage limit was lifted ..."). A cron run held this way is no failure of its schedule.
+- **Whole Factory:** only a second independent match (another agent and run within `confirmMinutes`, default 15) or a probe (a throw-away one-turn agent on the daemon, label `paseo.factory.usage-probe=1`, model `probeModel` or the defaultProvider, 30 s after a first match, at most one every 5 minutes) holds every live run. While held: `blueprint_start` and the start form refuse, cron slots are skipped (not back-filled, no failure), no retro agent starts, the Supervisor is not woken automatically and Warden pings nobody.
+- **Resume:** a non-LLM scheduler on the Blueprints tick probes at `resume_at`; still limited: the hold stays (next reset time, else 10, 15, 30 minutes); passed: runs resume `resumeConcurrency` (default 2) every `resumeStaggerSeconds` (default 60), oldest first. A person's own Factory-wide suspension (`blueprint_suspend all`) always wins: nothing resumes on its own while it is on.
+- **Notify:** `usageLimit.notify` (addresses, aliases such as `@assistant`, `supervisor`): one mail on a global pause, resume and lift, with the held runs and their workers' agent ids, so an assistant can sweep agents outside the Factory ("continue" one by one) once it resumes. `usage_limit_status` (read-only, every agent; `PASEO_USAGE_LIMIT=off` skips it) gives state, `resume_at`, runs and agents for a heartbeat.
+- **State and audit:** `usage-limit.json` in the Factory's data folder (outside any run, written atomically): the hold, the recent matches, the alerted signatures and an audit log of every run pause, global pause, probe, resume and lift (matched rule and evidence, reset time, runs). The Quota sub-tab (next to Crons) and a banner above every Factory tab show it, with **Lift pause** (RPC `blueprints.usage_limit.lift`; `usage_limit_lift` for trusted agents and the Supervisor).
 
 ## Infrastructure flakes (`flakeRetries`)
 

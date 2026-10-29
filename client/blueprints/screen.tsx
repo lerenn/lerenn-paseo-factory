@@ -11,6 +11,9 @@ import { blueprintsSettings } from "../../shared/blueprints/settings";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { SubTabs } from "../subtabs";
 import { BlueprintGraph } from "./graph";
+import { CronsTab } from "./crons";
+import { QuotaTab } from "./quota";
+import { BLUEPRINTS_SUBTABS } from "./tabs";
 
 type Colors = PluginScreenProps["theme"]["colors"];
 
@@ -63,7 +66,8 @@ function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }
   );
 }
 
-export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProps) {
+/** `focus`: a run to show expanded (an extension tab's `open({tab: "blueprints", runId})`). */
+export function BlueprintsScreen({ theme, layout, navigation, focus }: PluginScreenProps & { focus?: string }) {
   const list = useRpc(listRunsRpc);
   const startCall = useRpc(startRunRpc);
   const abortCall = useRpc(abortRunRpc);
@@ -72,7 +76,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [showFinished, setShowFinished] = useState(true);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => (focus ? { [focus]: true } : {}));
   const [picked, setPicked] = useState<string | null>(null);
   const [startOpen, setStartOpen] = useState(false);
   const [tabKey, setTabKey] = useState(0);
@@ -463,9 +467,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
           <SettingsInput label="Poll interval (seconds)" hint="How often PR gates are polled and idle workers checked." initialValue={String(settings.values.pollSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, pollSeconds: Math.round(Number(v)) }, settings.revision)} />
           <SettingsInput label="Idle grace (seconds)" hint="A worker idle this long without a verdict gets nudged." initialValue={String(settings.values.idleGraceSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, idleGraceSeconds: Math.round(Number(v)) }, settings.revision)} />
           <SettingsSwitch label="Archive workers when a run finishes" value={settings.values.archiveOnFinish} onValueChange={(on) => void settings.save({ ...settings.values, archiveOnFinish: on }, settings.revision)} />
-          <SettingsSwitch label="Crons" hint="Start blueprints on the cron schedules of the Crons tab. Off by default: switch it on once no other scheduler starts the same blueprints." value={settings.values.crons.enabled} onValueChange={(on) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, enabled: on } }, settings.revision)} />
-          <SettingsInput label="Cron pause mail" hint="Agents Mail address told when a schedule pauses after repeated failures (a schedule's own mailTo wins). Empty: only logged." initialValue={settings.values.crons.mailTo} onChangeText={(v) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, mailTo: v.trim() } }, settings.revision)} />
-          <SettingsSwitch label="Crons" hint="Start blueprints on the cron schedules of the Crons tab. Off by default: switch it on once no other scheduler starts the same blueprints." value={settings.values.crons.enabled} onValueChange={(on) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, enabled: on } }, settings.revision)} />
+          <SettingsSwitch label="Crons" hint="Start blueprints on the cron schedules of the Crons sub-tab. Off by default: switch it on once no other scheduler starts the same blueprints." value={settings.values.crons.enabled} onValueChange={(on) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, enabled: on } }, settings.revision)} />
           <SettingsInput label="Cron pause mail" hint="Agents Mail address told when a schedule pauses after failed runs (a schedule's mailTo wins). Empty: only logged." initialValue={settings.values.crons.mailTo} onChangeText={(v) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, mailTo: v.trim() } }, settings.revision)} placeholder="@assistant" />
           {settings.saveError ? <Text style={{ color: c.statusDanger }}>{settings.saveError}</Text> : null}
         </SettingsCard>
@@ -482,11 +484,17 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         key={tabKey}
         theme={theme}
         initial={tabKey > 0 ? "runs" : undefined}
-        tabs={[
-          { key: "runs", label: "Runs", badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
-          { key: "templates", label: "Templates", badge: errors.length || undefined, render: templatesTab },
-          { key: "settings", label: "Settings", render: settingsTab },
-        ]}
+        tabs={BLUEPRINTS_SUBTABS.map(({ key, label }) => ({
+          key,
+          label,
+          ...{
+            runs: { badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
+            templates: { badge: errors.length || undefined, render: templatesTab },
+            crons: { render: () => <CronsTab theme={theme} layout={layout} /> },
+            quota: { render: () => <QuotaTab theme={theme} layout={layout} /> },
+            settings: { render: settingsTab },
+          }[key],
+        }))}
       />
     </View>
   );

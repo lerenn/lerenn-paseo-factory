@@ -120,6 +120,18 @@ export class Scheduler {
     return this.state;
   }
 
+  /**
+   * The Factory is paused for a provider usage limit: the minutes up to now are evaluated without starting anything, so the
+   * slots of the pause are not back-filled when it resumes and count as no failure. Returns whether a window was skipped.
+   */
+  skipWindow(now: number): boolean {
+    const nowMin = floorMinute(now);
+    if (this.state.lastMinute !== null && this.state.lastMinute >= nowMin) return false;
+    this.state.lastMinute = nowMin;
+    this.store.save(this.state);
+    return true;
+  }
+
   private of(id: string): ScheduleState {
     return (this.state.schedules[id] ??= emptySchedule());
   }
@@ -274,7 +286,7 @@ export class Scheduler {
         subject: `Factory cron ${id} paused after ${st.consecutiveFailures} failed runs in a row`,
         body: [
           `The cron schedule ${id}${s ? ` (${s.cron} ${s.timezone}, blueprint ${s.blueprint})` : ""} is paused: its last ${st.consecutiveFailures} runs ended failed or aborted (last: ${st.lastRunId ? `${st.lastRunId} ` : ""}${st.lastResult ?? "?"}).`,
-          "No new run starts until it is resumed: Resume in the Factory's Crons tab, or set its enabled to false and then true again.",
+          "No new run starts until it is resumed: Resume in the Factory's Blueprints > Crons tab, or set its enabled to false and then true again.",
         ].join("\n"),
       });
       st.mailTries += 1;

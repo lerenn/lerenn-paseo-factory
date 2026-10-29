@@ -58,6 +58,37 @@ export interface RunSnapshot {
   endedAt: number | null;
   stages: Record<string, { status: string; verdict: string | null; summary: string | null; data: Record<string, unknown> }>;
   events: string[];
+  /** The current stage (null before the first and after the last). */
+  stage: string | null;
+  /** What the run waits on, in words (`a person: ...`, `PM judgement on stage ...`, the worker's `blueprint_waiting` text). */
+  waitingFor: string | null;
+  /** The PM was asked to judge this stage. */
+  pmPending: { stage: string; reason: string } | null;
+  suspended: { reason: string; since: number; by: string } | null;
+  /** The open gate of the current stage: an Inbox item, or none (`itemId` null) for a passive merge wait. */
+  gate: { stage: string; itemId: string | null; kind: "approval" | "question" | "merge"; openedAt: number | null; passive: boolean } | null;
+  /** Open Inbox items escalating the run to a person (stuck or setup). */
+  escalations: string[];
+  /** The worker of the current stage and its role (null for gates, calls and extension stages). */
+  agentId: string | null;
+  role: string | null;
+  /** The last PR facts the Factory read from GitHub, per URL the run refers to (`data.pr_urls`, gate heads); absent: never read. */
+  prs: Record<string, PrSnapshot>;
+}
+
+/** A PR as the Factory last saw it on GitHub, and when (`checkedAt`, epoch ms). Never read just for the snapshot. */
+export interface PrSnapshot {
+  state: "open" | "closed" | "merged";
+  exists: boolean;
+  head: string;
+  ci: "green" | "red" | "pending" | "none";
+  mergeable: boolean | null;
+  draft: boolean;
+  review: string;
+  queued?: boolean;
+  queuePosition?: number;
+  queueEtaSeconds?: number;
+  checkedAt: number;
 }
 
 /** A problem the Supervisor should know about; `key` identifies it across polls. */
@@ -456,6 +487,21 @@ export class FactoryHost {
     return rpc.output.parse(await rpc.run(parsed, { callerId }));
   }
 
+  /**
+   * A read-only rpc of an extension, for another plugin on the loopback endpoint (`POST /extensions/<id>/rpc/<name>`).
+   * An rpc not marked `readOnly` is refused (403), whatever it does.
+   */
+  async callReadOnlyRpc(id: string, name: string, input: unknown): Promise<unknown> {
+    const ext = this.extensions.get(id);
+    if (!ext) throw new HttpError(404, `extension "${id}" is not registered`);
+    const rpc = ext.rpc.find((r) => r.name === name);
+    if (!rpc) throw new HttpError(404, `extension "${id}" has no rpc "${name}"`);
+    if (rpc.readOnly !== true) throw new HttpError(403, `rpc "${name}" of extension "${id}" is not read-only`);
+    const parsed = rpc.input.safeParse(input ?? {});
+    if (!parsed.success) throw new HttpError(400, z.prettifyError(parsed.error));
+    return rpc.output.parse(await rpc.run(parsed.data, { callerId: "loopback" }));
+  }
+
   /** Services an extension gets in its stage kinds and tools. */
   services: Record<string, unknown> = {};
 
@@ -521,6 +567,22 @@ export class FactoryHost {
     const host = req.headers.host ?? "";
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return { status: 403, body: { error: "forbidden host" } };
     const pathname = (req.url ?? "").split("?")[0];
+
+    const rpcPath = /^\/extensions\/([a-z][a-z0-9-]*)\/rpc\/([a-z][a-z0-9_-]*)$/.exec(pathname);
+    if (rpcPath) {
+      const given = Buffer.from(this.bearer(req) ?? "");
+      const want = Buffer.from(this.endpointToken);
+      if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
+      if (req.method !== "POST") return { status: 405, body: { error: "POST only" } };
+      let body: any;
+      try {
+        const text = await readBody(req);
+        body = text ? JSON.parse(text) : {};
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } };
+      }
+      return { status: 200, body: { output: await this.callReadOnlyRpc(rpcPath[1], rpcPath[2], body?.input) } };
+    }
 
     if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event" || pathname === "/extensions/leases/keep") {
       const given = Buffer.from(this.bearer(req) ?? "");

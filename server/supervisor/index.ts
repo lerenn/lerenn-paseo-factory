@@ -26,6 +26,10 @@ export function startSupervisor(host: FactoryHost) {
 
   const ports: SupervisorPorts = {
     now: Date.now,
+    quiet: () => {
+      const u = host.engines.blueprints?.usageLimits as { enabled(): boolean; globalHold(): unknown } | undefined;
+      return !!(u?.enabled() && u.globalHold());
+    },
     async create({ idempotencyKey, prompt, cwd }) {
       const role = await host.loadRole(current.role);
       const { agentId, workspaceId } = await spawnAgent(host.paseo, host.runtime, {
