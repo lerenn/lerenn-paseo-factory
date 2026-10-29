@@ -1387,3 +1387,91 @@ stalled = "done"
     expect(ctx.engine.require(run.id)).toMatchObject({ stage: "wait-queue", status: "waiting" });
   });
 });
+
+describe("a stage kind whose extension has not registered yet (bp-6a9e18ab)", () => {
+  const src = `
+version = 1
+name = "flow"
+[[stage]]
+id = "pins"
+kind = "train"
+[stage.on]
+ok = "done"
+`;
+  it("waits for the extension instead of failing, then runs the stage once it registers", async () => {
+    const ctx = setup(src);
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    let r = ctx.engine.require(run.id);
+    expect(r.status).toBe("running");
+    expect(r.waitingFor).toContain('extension for stage kind "train"');
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.engine.require(run.id).history.filter((h) => h.event === "kind_waiting")).toHaveLength(1);
+    const calls: string[] = [];
+    ctx.ports.stageKind = () => async (input) => {
+      calls.push(input.stageId);
+      return { verdict: "ok" };
+    };
+    ctx.advance(5 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    r = ctx.engine.require(run.id);
+    expect(calls).toEqual(["pins"]);
+    expect(r.status).toBe("done");
+  });
+
+  it("fails the run once the extension is still missing after 15 minutes", async () => {
+    const ctx = setup(src);
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    ctx.advance(16 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("failed");
+    expect(r.error).toContain('no extension provides the stage kind "train"');
+  });
+});
+
+describe("git timeouts on the daemon (decision f1cd49be)", () => {
+  it("retries once, then pauses the run and mails instead of six back-off retries", async () => {
+    const ctx = setup(undefined, { runsMailTo: "@assistant" }, true);
+    const err = "Git command timed out after 90000ms: git rev-parse --show-toplevel";
+    ctx.spawnErrors.push(err, err, err);
+    const run = await ctx.start();
+    expect(ctx.engine.require(run.id).history.filter((h) => h.event === "busy_wait")).toHaveLength(1);
+    ctx.advance(2 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("paused");
+    expect(r.history.filter((h) => h.event === "git_timeout_pause")).toHaveLength(1);
+    expect(ctx.spawnErrors).toHaveLength(1); // the third start was never tried
+  });
+});
+
+describe("a worker that waits on an outside system (decision f1cd49be)", () => {
+  it("is not nudged while it waits, and the run pauses for a person after the 2 h ceiling", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    ctx.states.set("agent-1", "idle");
+    ctx.engine.workerWaiting("agent-1", "waiting for the Codex review on acme/api#7");
+    const sentBefore = ctx.sent.length;
+    for (let i = 0; i < 5; i++) {
+      ctx.advance(20 * 60_000);
+      await ctx.engine.tick();
+      await ctx.settle();
+    }
+    let r = ctx.engine.require(run.id);
+    expect(r.history.some((h) => h.event === "stalled")).toBe(false);
+    expect(ctx.sent.length).toBe(sentBefore);
+    expect(r.status).toBe("running");
+    ctx.advance(25 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    r = ctx.engine.require(run.id);
+    expect(r.status).toBe("paused");
+    expect(r.history.filter((h) => h.event === "worker_wait_ceiling")).toHaveLength(1);
+  });
+});

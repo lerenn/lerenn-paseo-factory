@@ -13,6 +13,10 @@ export interface StageState {
   /** A start refused for cluster quota, retried by the tick at `at` (1, 2, 4, 8 min back-off), replaying the same dispatch; no attempt is used. */
   /** Pod starts of this stage that failed in a row (reset by a start that works). */
   podStartFailures?: number;
+  /** The worker said it waits on a person or an outside system (blueprint_waiting): since when; no nudges until the ceiling. */
+  workerWaitSince?: number | null;
+  /** No extension provided the stage's kind yet: since when the stage waits for one to register. */
+  kindWaitSince?: number | null;
   quotaRetry?: { n: number; at: number; why: "start" | "nudge" | "retry" | "wake"; opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } } | null;
   /** Extra attempts and runs granted by the PM. */
   extra: number;
