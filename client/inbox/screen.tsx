@@ -32,7 +32,8 @@ function statusIcon(status: ItemStatus, c: Colors): { glyph: string; color: stri
   }
 }
 
-export function InboxScreen({ theme, layout }: PluginScreenProps) {
+/** `focus`: an item to show opened (an extension tab's `open({tab: "inbox", itemId})`), on the sub-tab that holds it. */
+export function InboxScreen({ theme, layout, focus }: PluginScreenProps & { focus?: string }) {
   const list = useRpc(listItemsRpc);
   const answerCall = useRpc(answerRpc);
   const readCall = useRpc(readRpc);
@@ -89,6 +90,7 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
         pill={{ text: item.status === "pending" ? (item.kind === "approval" ? "approval" : "question") : icon.label.toLowerCase(), color: icon.color }}
         title={`${item.kind === "approval" && item.status !== "pending" ? "Approval: " : ""}${item.question}`}
         bold={unread}
+        initiallyOpen={item.id === focus}
         parts={[item.agentTitle ?? "Untitled conversation", where || null, ago(now, item.createdAt)]}
         onOpen={() => {
           setError(null);
@@ -152,7 +154,7 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
             ) : (
               <Text style={s.text} selectable>
                 {icon.label}
-                {item.answer ? `: ${item.answer.optionId ? (item.options.find((o) => o.id === item.answer!.optionId)?.label ?? item.answer.optionId) : item.answer.text}${item.answer.by === "default" ? " (default)" : item.answer.by === "assistant" ? " (by the Assistant on behalf of the user)" : ""}` : ""}
+                {item.answer ? `: ${item.answer.optionId ? (item.options.find((o) => o.id === item.answer!.optionId)?.label ?? item.answer.optionId) : item.answer.text}${item.answer.by === "default" ? " (default)" : item.answer.by === "assistant" ? " (by the Assistant on behalf of the user)" : item.answer.by === "pm" ? " (by the run's PM)" : ""}` : ""}
                 {item.comment ? ` — ${item.comment}` : ""}
                 {item.answer || item.status === "expired" ? ` · agent ${item.delivery === "sent" ? "notified" : item.delivery === "undeliverable" ? "archived or gone, so it could not be told" : item.delivery === "failed" ? "could not be notified" : "not yet notified"}` : ""}
               </Text>
@@ -175,7 +177,9 @@ export function InboxScreen({ theme, layout }: PluginScreenProps) {
     <View style={s.screen}>
       <Text style={[s.h, { paddingHorizontal: layout.compact ? 10 : 20, paddingTop: 12 }]}>Inbox</Text>
       <SubTabs
+        key={focus ? (data ? "focus" : "loading") : "plain"}
         theme={theme}
+        initial={focus && done.some((i) => i.id === focus) ? "history" : undefined}
         tabs={[
           {
             key: "pending",

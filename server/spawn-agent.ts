@@ -20,6 +20,8 @@ export interface SpawnAgentInput {
   joinWorkspaceId?: string;
   /** Kubernetes: pod profile of the new workspace (role `runtimeProfile`); unset keeps the Runtime's choice. */
   profile?: string;
+  /** Kubernetes: told the id of a workspace created for this agent, before the agent is created (so a leak can be found later). */
+  onWorkspaceCreated?: (workspaceId: string) => void;
 }
 
 /** Paseo's worktree slug rule: names the pod and the branch. */
@@ -52,6 +54,28 @@ export async function spawnAgent(paseo: Paseo, runtime: Runtime, o: SpawnAgentIn
     idempotencyKey: `ws:${o.idempotencyKey}`,
     runtime: { id: "kubernetes", options: { cwd: o.cwd, slug, ref: null, title: o.workspaceTitle, ...(o.profile ? { profile: o.profile } : {}) } },
   } as never);
-  const handle = await workspace.agents.create(agent as never);
-  return { agentId: handle.id, workspaceId: workspace.id };
+  try {
+    o.onWorkspaceCreated?.(workspace.id);
+  } catch {
+    // bookkeeping only
+  }
+  try {
+    const handle = await workspace.agents.create(agent as never);
+    return { agentId: handle.id, workspaceId: workspace.id };
+  } catch (error) {
+    // The agent could not be created (a plugin's agent.create.before refused it, the pod did not start...): the workspace made
+    // for it would stay empty forever, and a retry makes another one. Archive it, best effort; the original error is what counts.
+    await archiveEmptyWorkspace(paseo, workspace.id, (error as Error)?.message ?? String(error));
+    throw error;
+  }
+}
+
+async function archiveEmptyWorkspace(paseo: Paseo, workspaceId: string, why: string): Promise<void> {
+  try {
+    const result = (await paseo.workspaces.archive(workspaceId)) as { error?: string | null } | undefined;
+    if (result?.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
+    console.log(`factory: archived workspace ${workspaceId}: its agent could not be created (${why.slice(0, 200)})`);
+  } catch (archiveError) {
+    console.error(`factory: could not archive workspace ${workspaceId} after its agent failed to start (the orphan sweep retries)`, archiveError);
+  }
 }

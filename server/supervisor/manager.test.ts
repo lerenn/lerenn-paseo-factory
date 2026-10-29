@@ -287,14 +287,14 @@ describe("memory and intro", () => {
   it("round-trips notes into the next session's intro with issues, requests and runs", async () => {
     const { supervisor, prompts, setActivity, setIssues } = setup();
     await supervisor.ensure();
-    supervisor.note("waiting for Louis on the tf-aws pin");
+    supervisor.note("waiting for a person on the deploy pin");
     supervisor.state.data.requests.push({ id: "sq-1", fromId: "a", fromName: "Assistant", question: "Q1", at: 1, answer: "A1", answeredAt: 2, deliveredAt: 1 });
     setIssues([{ key: "run:bp-9:failed", text: "Run bp-9 failed" }]);
     setActivity({ runs: [{ id: "bp-9", label: "ticket ANY-1", status: "waiting", stage: "review", detail: "gate" }], liveStageAgents: 0 });
     await supervisor.ensure({ restart: true });
     const intro = prompts[1];
     expect(intro).toMatch(/session #2/);
-    expect(intro).toMatch(/waiting for Louis on the tf-aws pin/);
+    expect(intro).toMatch(/waiting for a person on the deploy pin/);
     expect(intro).toMatch(/Run bp-9 failed/);
     expect(intro).toMatch(/sq-1 from "Assistant": Q1/);
     expect(intro).toMatch(/bp-9 \(ticket ANY-1\) waiting at review/);
@@ -432,5 +432,21 @@ describe("supervisor.enabled", () => {
     const s = setup({ notify: () => Promise.reject(new Error("down")) }, { enabled: false });
     s.setIssues([{ key: "ext:a:dropped", text: "Extension a was dropped." }]);
     await expect(s.supervisor.digest()).resolves.toBeUndefined();
+  });
+});
+
+describe("Supervisor during a usage-limit pause", () => {
+  it("is not woken by a run start or a digest while quiet; the digest waits and is delivered after", async () => {
+    let quiet = true;
+    const { supervisor, sent, setIssues, created } = setup({ quiet: () => quiet });
+    supervisor.wake();
+    setIssues([{ key: "run:1", text: "Run bp-1 is paused" }]);
+    await supervisor.digest();
+    await supervisor.tick();
+    expect(created).toHaveLength(0);
+    quiet = false;
+    await supervisor.tick();
+    expect(created).toHaveLength(1);
+    expect(sent.some((m) => /Run bp-1 is paused/.test(m.text))).toBe(true);
   });
 });

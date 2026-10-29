@@ -1,9 +1,11 @@
 import { z } from "zod";
 import type { CallContext, HostTool } from "../tools";
 import { UsageError } from "../tools";
+import { isTrusted } from "../trust";
 import { stageVerdicts } from "../../shared/blueprints/blueprint";
 import type { Engine } from "./engine";
 import type { Loaded } from "./toml";
+import { PM_TOOL_NAMES } from "./pm";
 
 export interface Deps {
   engine: Engine;
@@ -14,21 +16,38 @@ export const INSTRUCTIONS = `Blueprints are the Factory's flows: a run walks the
 
 If you are a stage worker (your prompt says "You are stage ..."): do the work, then call blueprint_verdict(run, stage, verdict, summary, data) and stop. Never end your turn without it. Facts about pull requests are checked on GitHub, not taken from your word.
 
-If you are the PM: blueprint_list shows what you can run, blueprint_start(blueprint, vars, at?) starts a run (code changes need a Linear key you checked: pass ticket_confirmed="true"), blueprint_status follows it. When a stage is exhausted you get ONE judgement call: blueprint_retry grants a few extra attempts or re-scopes; to escalate ask the human with inbox_ask, then blueprint_resume or blueprint_abort. blueprint_retry, blueprint_resume and blueprint_abort are for the run's PM and the Assistant only.`;
+If you start runs: blueprint_list shows what you can run, blueprint_start(blueprint, vars, at?) starts a run (variables the starter must confirm, such as a ticket key, need a real check first: pass <name>_confirmed="true"), blueprint_status follows it. You are told when it ends.
+
+If you are a run's PM (spawned by the Factory for ONE judgement: an exhausted stage, a failed run, a pm = true gate, a resume decision): your prompt says what happened and what you may do. Act only on your run (and its child runs) with blueprint_retry, blueprint_resume or blueprint_abort, or answer your gate with inbox_answer; when unsure call blueprint_pm_escalate and record the answer with blueprint_pm_answer; finish with blueprint_pm_done and stop. blueprint_retry, blueprint_resume, blueprint_suspend and blueprint_abort are for the run's PM, trusted agents and the Supervisor only.`;
 
 const runArg = z.string().describe("Run id (bp-...).");
 
 export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
   const { engine } = deps;
 
-  /** The PM of the run (or whoever started it) and the Assistant may steer it. */
+  /** The PM of the run (or whoever started it), a trusted agent and the Supervisor may steer it. */
   async function steer(run: ReturnType<Engine["require"]>, ctx: CallContext): Promise<void> {
+    // A Factory PM acts on its own run and that run's children, nothing else.
+    const pmOf = engine.pmRunOf(ctx.callerId);
+    if (pmOf) {
+      if (run.id === pmOf || run.parent?.runId === pmOf) return;
+      throw new UsageError(`You are the PM of run ${pmOf}: you act only on it and its child runs.`);
+    }
     if (ctx.callerId === run.pmAgentId || ctx.callerId === run.ownerAgentId || ctx.callerId === "factory") return;
     if (!(await engine.hasLivePm(run))) return; // no PM to protect: anyone may steer
     const labels = await ctx.labels();
-    if (labels["paseo.assistant"] === "1" || labels["paseo.factory.supervisor"] === "1") return;
-    throw new UsageError(`Run ${run.id} is steered by its PM (${run.pmAgentId ?? "none"}) and the Assistant.`);
+    if (isTrusted(labels) || labels["paseo.factory.supervisor"] === "1") return;
+    throw new UsageError(`Run ${run.id} is steered by its PM (${run.pmAgentId ?? "none"}), trusted agents and the Supervisor.`);
   }
+
+  /** Whole-Factory operations (`all`) are for trusted agents and the Supervisor, not for a run's PM. */
+  async function assistantOnly(ctx: CallContext, message: string): Promise<void> {
+    if (ctx.callerId === "factory") return;
+    const labels = await ctx.labels();
+    if (isTrusted(labels) || labels["paseo.factory.supervisor"] === "1") return;
+    throw new UsageError(message);
+  }
+  const everything = (ctx: CallContext) => assistantOnly(ctx, "all=true is for an agent with a trusted label and the Supervisor.");
 
   return [
     {
@@ -48,7 +67,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
     {
       name: "blueprint_start",
       description:
-        "Start a run of a blueprint. vars are strings. Variables that change code (the Linear ticket) must be checked for real first and passed with <name>_confirmed=\"true\". " +
+        "Start a run of a blueprint. vars are strings. Variables the starter must confirm (the blueprint's `confirm` list, such as a ticket key) must be checked for real first and passed with <name>_confirmed=\"true\". " +
         "`at` enters at a later stage (for example a ticket run at implement). Returns the run id; you are the run's PM and are told when it finishes or needs you.",
       input: z.object({
         blueprint: z.string(),
@@ -57,6 +76,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
         idempotency_key: z.string().max(200).optional(),
       }),
       async run({ blueprint, vars, at, idempotency_key }, ctx) {
+        if (engine.pmRunOf(ctx.callerId)) throw new UsageError("A run's PM does not start runs; resume your run's own child with blueprint_resume instead.");
         await deps.catalog();
         const run = engine.start({ blueprint, vars, at, requestedBy: ctx.callerId, ownerAgentId: ctx.callerId, idempotencyKey: idempotency_key });
         return { run_id: run.id, stage: run.stage, status: run.status };
@@ -64,14 +84,23 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
     },
     {
       name: "blueprint_status",
-      description: "One run's card (stages, attempts, history), or all active runs when no run is given.",
+      description: "One run's card (stages, attempts, history, and `suspended` with reason and since when held), or all active runs when no run is given.",
       input: z.object({ run: runArg.optional(), include_finished: z.boolean().optional() }),
       run({ run, include_finished }) {
         if (run) return engine.view(engine.require(run));
         return engine.store
           .all()
           .filter((r) => include_finished || r.endedAt === null)
-          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars }));
+          .map((r) => ({ run_id: r.id, blueprint: r.blueprint, status: r.status, stage: r.stage, waiting_for: r.waitingFor, vars: r.vars, ...(r.suspended ? { suspended: { reason: r.suspended.reason, since: new Date(r.suspended.at).toISOString(), by: r.suspended.by, pods: r.suspended.pods, ...(r.suspended.usageLimit ? { quota: true, resume_at: r.suspended.usageLimit.resumeAt ? new Date(r.suspended.usageLimit.resumeAt).toISOString() : null } : {}) } } : {}) }));
+      },
+    },
+    {
+      name: "blueprint_waiting",
+      description:
+        "Say your stage waits on a person or an outside system (for example \"waiting for a reviewer's review on org/repo#12\") while you keep watching it with events_subscribe. The run shows it as waiting, not stalled, with no warning and no Inbox item. Then end your turn; give the verdict when it is over.",
+      input: z.object({ reason: z.string().min(3).max(300) }),
+      run(input, ctx) {
+        return { ok: true, ...engine.workerWaiting(ctx.callerId, input.reason) };
       },
     },
     {
@@ -102,12 +131,55 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
       },
     },
     {
+      name: "blueprint_suspend",
+      description:
+        "Hold a run (run) or every run and the Factory itself (all=true, for an agent with a trusted label and the Supervisor). A suspended run spawns and prompts no worker, retries no stage, uses no attempt and keeps its open gates; " +
+        "its worker keeps existing and its pod is suspended (volume kept; force=true also stops a busy one). The hold survives a plugin reload. Undo it with blueprint_resume.",
+      input: z.object({
+        run: runArg.optional(),
+        all: z.boolean().optional(),
+        reason: z.string().min(1).max(1000),
+        force: z.boolean().optional().describe("Suspend a pod although an agent is running in it."),
+      }),
+      async run({ run, all, reason, force }, ctx) {
+        if (!!run === !!all) throw new UsageError("Give either run or all=true.");
+        if (all) {
+          await everything(ctx);
+          const runs = await engine.suspendAll({ reason, by: ctx.callerId, force });
+          return { factory_suspended: true, suspended: runs.map((r) => ({ run_id: r.id, status: r.status, pods: r.suspended?.pods ?? [] })) };
+        }
+        await steer(engine.require(run!), ctx);
+        const out = await engine.suspend(run!, { reason, by: ctx.callerId, force });
+        return { run_id: out.id, status: out.status, pods: out.suspended?.pods ?? [] };
+      },
+    },
+    {
       name: "blueprint_resume",
-      description: "Continue a failed, paused or PM-waiting run at a stage after a person decided; extra_attempts adds attempts beyond the caps.",
-      input: z.object({ run: runArg, stage: z.string().optional(), extra_attempts: z.number().int().min(0).max(20).optional(), note: z.string().max(2000).optional() }),
-      async run({ run, stage, extra_attempts, note }, ctx) {
-        await steer(engine.require(run), ctx);
-        const out = await engine.resume(run, { stage, extraAttempts: extra_attempts, note });
+      description:
+        "Continue a suspended run at the same stage and attempt count (its worker is woken, or replaced with a note if gone). Also continues a failed, paused or PM-waiting run at a stage after a person decided; extra_attempts adds attempts beyond the caps. " +
+        "attach_agent (trusted agents and the Supervisor) resumes the stage onto a live worker of the run instead of spawning one. all=true (trusted agents and the Supervisor) lifts the Factory-wide suspension and resumes every suspended run, at most `concurrency` (default 2) starting at once.",
+      input: z.object({
+        run: runArg.optional(),
+        all: z.boolean().optional(),
+        concurrency: z.number().int().min(1).max(20).optional(),
+        stage: z.string().optional(),
+        extra_attempts: z.number().int().min(0).max(20).optional(),
+        note: z.string().max(2000).optional(),
+        attach_agent: z.string().optional().describe("Trusted agents and the Supervisor only: resume the stage onto this live worker of the run (same role) instead of spawning a new one."),
+      }),
+      async run({ run, all, concurrency, stage, extra_attempts, note, attach_agent }, ctx) {
+        if (!!run === !!all) throw new UsageError("Give either run or all=true.");
+        if (all) {
+          await everything(ctx);
+          const out = engine.resumeAllSuspended({ concurrency, note });
+          void out.done;
+          return { factory_suspended: false, resuming: out.runs, concurrency: concurrency ?? 2 };
+        }
+        const target = engine.require(run!);
+        await steer(target, ctx);
+        if (attach_agent) await assistantOnly(ctx, "attach_agent is for an agent with a trusted label and the Supervisor.");
+        if (engine.pmRunOf(ctx.callerId) && (extra_attempts ?? 0) > target.def.pm_extra_max) throw new UsageError(`A PM grants at most ${target.def.pm_extra_max} extra attempts (pm_extra_max).`);
+        const out = await engine.resume(run!, { stage, extraAttempts: extra_attempts, note, attachAgent: attach_agent });
         return { run_id: out.id, status: out.status, stage: out.stage };
       },
     },
@@ -121,11 +193,38 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
         return { run_id: out.id, status: out.status };
       },
     },
+    {
+      name: "blueprint_pm_escalate",
+      description:
+        "For a run's PM only, when unsure (facts you cannot read, an irreversible or production-affecting action, conflicting instructions): record the question with your best guess and what you checked. " +
+        "Returns whom to ask and how (step 1: the escalation target; called again, or with no target: step 2, the human through a blocking inbox_ask). The run's waiting worker is told.",
+      input: z.object({ run: runArg, question: z.string().min(3).max(2000), best_guess: z.string().min(1).max(1000), checked: z.string().min(1).max(2000) }),
+      async run({ run, question, best_guess, checked }, ctx) {
+        return engine.pmEscalate(ctx.callerId, run, { question, bestGuess: best_guess, checked });
+      },
+    },
+    {
+      name: "blueprint_pm_answer",
+      description: "For a run's PM only: record the answer you got to your escalation and who gave it (for the run history), then act on it.",
+      input: z.object({ run: runArg, answer: z.string().min(1).max(4000), by: z.string().min(1).max(200) }),
+      async run({ run, answer, by }, ctx) {
+        return engine.pmAnswer(ctx.callerId, run, { answer, by });
+      },
+    },
+    {
+      name: "blueprint_pm_done",
+      description: "For a run's PM only: what you decided and why; handover=true hands the point to the human. Then end your turn: you are archived when it ends.",
+      input: z.object({ run: runArg, summary: z.string().min(1).max(2000), handover: z.boolean().optional() }),
+      async run({ run, summary, handover }, ctx) {
+        return engine.pmDone(ctx.callerId, run, { summary, handover });
+      },
+    },
   ];
 }
 
-export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume"];
+export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume", "blueprint_suspend"];
 /** What a stage worker needs. */
-export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status"];
+export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status", "blueprint_waiting"];
+export { PM_TOOL_NAMES };
 
 export { stageVerdicts };

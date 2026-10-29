@@ -9,7 +9,9 @@ import path from "node:path";
 import type { PluginBeforeRequests, PluginHookContext, PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { createReporter } from "./report";
 import { setExclusions } from "./exclusions";
+import { setTrustedLabels } from "./trust";
 import { factorySettings, factorySettingsSchema, type FactorySettings, type ModuleId } from "../shared/settings";
+import { KnownExtensions, placeholderTools } from "./known-extensions";
 import { McpServer } from "./mcp";
 import { SessionStore } from "./sessions";
 import type { CallContext, HostTool } from "./tools";
@@ -41,6 +43,52 @@ export interface Contribution {
 export interface BlueprintEndpoint {
   list(): { name: string; description: string; vars: { name: string; required: boolean; description: string }[] }[];
   start(input: { blueprint: string; vars: Record<string, string>; requestedBy: string; idempotencyKey?: string }): { runId: string };
+  /** Runs updated at or after `since` (epoch ms), optionally only those with a non-empty `hasVar`: for plugins that follow runs. */
+  runs(input: { since: number; hasVar?: string }): RunSnapshot[];
+}
+
+/** What another plugin sees of a run: its state, vars, each stage's outcome and the kinds of events in its history. */
+export interface RunSnapshot {
+  id: string;
+  blueprint: string;
+  status: string;
+  parent: { runId: string; stageId: string } | null;
+  vars: Record<string, string>;
+  updatedAt: number;
+  endedAt: number | null;
+  stages: Record<string, { status: string; verdict: string | null; summary: string | null; data: Record<string, unknown> }>;
+  events: string[];
+  /** The current stage (null before the first and after the last). */
+  stage: string | null;
+  /** What the run waits on, in words (`a person: ...`, `PM judgement on stage ...`, the worker's `blueprint_waiting` text). */
+  waitingFor: string | null;
+  /** The PM was asked to judge this stage. */
+  pmPending: { stage: string; reason: string } | null;
+  suspended: { reason: string; since: number; by: string } | null;
+  /** The open gate of the current stage: an Inbox item, or none (`itemId` null) for a passive merge wait. */
+  gate: { stage: string; itemId: string | null; kind: "approval" | "question" | "merge"; openedAt: number | null; passive: boolean } | null;
+  /** Open Inbox items escalating the run to a person (stuck or setup). */
+  escalations: string[];
+  /** The worker of the current stage and its role (null for gates, calls and extension stages). */
+  agentId: string | null;
+  role: string | null;
+  /** The last PR facts the Factory read from GitHub, per URL the run refers to (`data.pr_urls`, gate heads); absent: never read. */
+  prs: Record<string, PrSnapshot>;
+}
+
+/** A PR as the Factory last saw it on GitHub, and when (`checkedAt`, epoch ms). Never read just for the snapshot. */
+export interface PrSnapshot {
+  state: "open" | "closed" | "merged";
+  exists: boolean;
+  head: string;
+  ci: "green" | "red" | "pending" | "none";
+  mergeable: boolean | null;
+  draft: boolean;
+  review: string;
+  queued?: boolean;
+  queuePosition?: number;
+  queueEtaSeconds?: number;
+  checkedAt: number;
 }
 
 /** A problem the Supervisor should know about; `key` identifies it across polls. */
@@ -72,7 +120,10 @@ export class FactoryHost {
   private readonly contributions: Contribution[] = [];
   private readonly createHooks: BeforeCreate[] = [];
   private readonly extensions = new Map<string, Extension>();
-  private readonly remotes = new Map<string, { handle: RemoteHandle; remove: () => void }>();
+  private readonly remotes = new Map<string, { handle: RemoteHandle; remove: (away?: boolean) => void }>();
+  /** Remote extensions' tools as they last registered, offered while they are away (see known-extensions.ts). */
+  private readonly known: KnownExtensions;
+  private readonly placeholders = new Map<string, () => void>();
   private readonly pending = new PendingOutcomes();
   /** Events extensions report (merges, deploys, ...): a ring shown in the Activity tab. */
   readonly extensionEvents: import("./activity").ExtensionEvent[] = [];
@@ -108,13 +159,17 @@ export class FactoryHost {
   /** Information for an agent: through Agents Mail when it is there, else sent directly. */
   readonly report = createReporter({ send: (id, text) => this.paseo.agents.ref(id).send(text, { activeTurnBehavior: "steer" }) as Promise<void> });
 
-  constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null } = {}) {
+  constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null; knownExtensionsFile?: string | null } = {}) {
     this.sessions = new SessionStore(opts.sessionsFile === undefined ? path.join(dataDir(), "sessions.json") : opts.sessionsFile);
+    this.known = new KnownExtensions(opts.knownExtensionsFile === undefined ? path.join(dataDir(), "extensions.json") : opts.knownExtensionsFile);
+    for (const id of this.known.ids()) this.offerPlaceholders(id);
     setExclusions({ paths: factorySettingsSchema.parse({}).excludePaths, agents: [] });
+    setTrustedLabels(factorySettingsSchema.parse({}).trustedLabels);
     const settings = server.registerSettings(factorySettings);
     const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
       this.current = state.status === "ready" ? state.values : null;
       setExclusions({ paths: this.current?.excludePaths ?? factorySettingsSchema.parse({}).excludePaths, agents: this.current?.excludeAgents ?? [] });
+      setTrustedLabels(this.current?.trustedLabels ?? factorySettingsSchema.parse({}).trustedLabels);
     };
     this.ready = settings.read().then(apply);
     this.unsubscribe = settings.subscribe(apply);
@@ -199,7 +254,7 @@ export class FactoryHost {
     return this.paseoRef !== null;
   }
 
-  /** Labels of an agent (cached briefly): the `paseo.*` labels carry the factory run and the Assistant mark. */
+  /** Labels of an agent (cached briefly): the `paseo.*` labels carry the factory run; `trustedLabels` mark trusted agents. */
   async labelsOf(agentId: string): Promise<Record<string, string>> {
     const cached = this.labelCache.get(agentId);
     if (cached && Date.now() - cached.at < 30_000) return cached.labels;
@@ -259,7 +314,19 @@ export class FactoryHost {
   }
 
   private visible(tool: HostTool): boolean {
-    return this.enabled(tool.owner) || this.extensions.has(tool.owner);
+    return this.enabled(tool.owner) || this.extensions.has(tool.owner) || this.placeholders.has(tool.owner);
+  }
+
+  /** List a known remote extension's tools while it is not registered; a call answers "try again in a minute". */
+  private offerPlaceholders(id: string): void {
+    if (this.placeholders.has(id) || this.extensions.has(id)) return;
+    const tools = placeholderTools(id, this.known.tools(id)).filter((t) => !this.tools.has(t.name));
+    this.placeholders.set(id, this.registerTools(id, tools));
+  }
+
+  private withdrawPlaceholders(id: string): void {
+    this.placeholders.get(id)?.();
+    this.placeholders.delete(id);
   }
 
   private source() {
@@ -344,9 +411,10 @@ export class FactoryHost {
     for (const r of ext.rpc) if (!/^[a-z][a-z0-9_-]*$/.test(r.name)) throw new Error(`rpc name "${r.name}" must be lowercase letters, digits, '-' and '_'`);
     if (!/^[a-z][a-z0-9-]*$/.test(ext.id)) throw new Error(`extension id "${ext.id}" must be lowercase letters, digits and '-'`);
     if (this.extensions.has(ext.id) || (MODULES_SET as Set<string>).has(ext.id)) throw new Error(`extension "${ext.id}" is already registered`);
+    this.withdrawPlaceholders(ext.id);
     for (const t of ext.tools) if (this.tools.has(t.name)) throw new Error(`tool "${t.name}" already exists`);
     this.extensions.set(ext.id, ext);
-    const removeTools = this.registerTools(ext.id, ext.tools);
+    const removeTools = this.registerTools(ext.id, ext.tools.map((t) => ({ ...t, extension: true })));
     for (const l of this.onExtension) l(ext);
     return () => {
       removeTools();
@@ -365,11 +433,14 @@ export class FactoryHost {
     const handle = buildRemote(raw, this.pending);
     const removeInner = this.registerExtension(handle.registration);
     this.droppedExtensions.delete(raw.id);
+    this.known.remember(raw.id, raw.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, readOnly: t.readOnly })));
     const entry = {
       handle,
-      remove: () => {
+      remove: (away = false) => {
         removeInner();
         if (this.remotes.get(raw.id) === entry) this.remotes.delete(raw.id);
+        // Gone for now (unregistered at its own restart, or unreachable): keep its tools listed until it is back.
+        if (away) this.offerPlaceholders(raw.id);
       },
     };
     this.remotes.set(raw.id, entry);
@@ -386,7 +457,7 @@ export class FactoryHost {
     for (const [id, { handle, remove }] of [...this.remotes]) {
       if (handle.failures < MAX_FAILURES) await probe(handle);
       if (handle.failures >= MAX_FAILURES) {
-        remove();
+        remove(true);
         dropped.push(id);
         this.droppedExtensions.set(id, Date.now());
         console.error(`factory: extension "${id}" dropped, its callback is unreachable`);
@@ -414,6 +485,21 @@ export class FactoryHost {
     if (!rpc) throw new Error(`extension "${id}" has no rpc "${name}"`);
     const parsed = rpc.input.parse(input ?? {});
     return rpc.output.parse(await rpc.run(parsed, { callerId }));
+  }
+
+  /**
+   * A read-only rpc of an extension, for another plugin on the loopback endpoint (`POST /extensions/<id>/rpc/<name>`).
+   * An rpc not marked `readOnly` is refused (403), whatever it does.
+   */
+  async callReadOnlyRpc(id: string, name: string, input: unknown): Promise<unknown> {
+    const ext = this.extensions.get(id);
+    if (!ext) throw new HttpError(404, `extension "${id}" is not registered`);
+    const rpc = ext.rpc.find((r) => r.name === name);
+    if (!rpc) throw new HttpError(404, `extension "${id}" has no rpc "${name}"`);
+    if (rpc.readOnly !== true) throw new HttpError(403, `rpc "${name}" of extension "${id}" is not read-only`);
+    const parsed = rpc.input.safeParse(input ?? {});
+    if (!parsed.success) throw new HttpError(400, z.prettifyError(parsed.error));
+    return rpc.output.parse(await rpc.run(parsed.data, { callerId: "loopback" }));
   }
 
   /** Services an extension gets in its stage kinds and tools. */
@@ -482,7 +568,23 @@ export class FactoryHost {
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return { status: 403, body: { error: "forbidden host" } };
     const pathname = (req.url ?? "").split("?")[0];
 
-    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event") {
+    const rpcPath = /^\/extensions\/([a-z][a-z0-9-]*)\/rpc\/([a-z][a-z0-9_-]*)$/.exec(pathname);
+    if (rpcPath) {
+      const given = Buffer.from(this.bearer(req) ?? "");
+      const want = Buffer.from(this.endpointToken);
+      if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
+      if (req.method !== "POST") return { status: 405, body: { error: "POST only" } };
+      let body: any;
+      try {
+        const text = await readBody(req);
+        body = text ? JSON.parse(text) : {};
+      } catch (err) {
+        return { status: 400, body: { error: (err as Error).message } };
+      }
+      return { status: 200, body: { output: await this.callReadOnlyRpc(rpcPath[1], rpcPath[2], body?.input) } };
+    }
+
+    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event" || pathname === "/extensions/leases/keep") {
       const given = Buffer.from(this.bearer(req) ?? "");
       const want = Buffer.from(this.endpointToken);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
@@ -509,9 +611,21 @@ export class FactoryHost {
         if (this.extensionEvents.length > 500) this.extensionEvents.splice(0, this.extensionEvents.length - 500);
         return { status: 200, body: { ok: true } };
       }
+      if (pathname === "/extensions/leases/keep") {
+        // An extension that runs agents (Release Trains' job runner) keeps a live agent's leases while it waits.
+        if (!this.engines.leases || !this.enabled("leases")) return { status: 404, body: { error: "leases are off" } };
+        const ttl = Number(input?.ttlSeconds);
+        if (typeof input?.agentId !== "string" || !input.agentId || !Number.isFinite(ttl)) return { status: 400, body: { error: "agentId and ttlSeconds are required" } };
+        const by = typeof input?.by === "string" && input.by ? input.by.slice(0, 64) : "extension";
+        try {
+          return { status: 200, body: { kept: this.engines.leases.keep(input.agentId, ttl, by) } };
+        } catch (error) {
+          return { status: 400, body: { error: (error as Error).message } };
+        }
+      }
       if (pathname === "/extensions/unregister") {
         const known = typeof input?.id === "string" && this.remotes.get(input.id);
-        if (known) known.remove();
+        if (known) known.remove(true);
         return { status: 200, body: { ok: !!known } };
       }
       const token = pathname.split("/")[2];
@@ -522,7 +636,7 @@ export class FactoryHost {
         : { status: 404, body: { error: "no stage waits for this token" } };
     }
 
-    if (pathname === "/blueprints" || pathname === "/blueprints/start") {
+    if (pathname === "/blueprints" || pathname === "/blueprints/start" || pathname === "/blueprints/runs") {
       const given = Buffer.from(this.bearer(req) ?? "");
       const want = Buffer.from(this.endpointToken);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
@@ -530,6 +644,15 @@ export class FactoryHost {
       if (pathname === "/blueprints") {
         if (req.method !== "GET") return { status: 405, body: { error: "GET only" } };
         return { status: 200, body: { blueprints: this.blueprints.list() } };
+      }
+      if (pathname === "/blueprints/runs") {
+        if (req.method !== "GET") return { status: 405, body: { error: "GET only" } };
+        const q = new URLSearchParams((req.url ?? "").split("?")[1] ?? "");
+        const since = Number(q.get("since") ?? "0");
+        if (!Number.isFinite(since) || since < 0) return { status: 400, body: { error: "since must be epoch milliseconds" } };
+        const hasVar = q.get("has_var") ?? undefined;
+        if (hasVar !== undefined && !/^[a-z][a-z0-9_]*$/.test(hasVar)) return { status: 400, body: { error: "has_var must be a var name" } };
+        return { status: 200, body: { runs: this.blueprints.runs({ since, hasVar }) } };
       }
       if (req.method !== "POST") return { status: 405, body: { error: "POST only" } };
       let input: any;

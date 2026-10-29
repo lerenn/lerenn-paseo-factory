@@ -5,7 +5,7 @@ function make(over: Partial<ArchiveWorkspacePorts> = {}) {
   const ports: ArchiveWorkspacePorts = {
     workspaceOf: () => "ws1",
     liveAgentsIn: async () => [],
-    worktree: async () => ({ state: "clean", detail: "clean" }),
+    trace: async () => "clean",
     archiveWorkspace: vi.fn(async () => undefined),
     log: vi.fn(),
     ...over,
@@ -44,10 +44,16 @@ describe("archiveWorkspaceWithAgent", () => {
     expect(ports.archiveWorkspace).not.toHaveBeenCalled();
   });
 
-  it.each([["dirty"], ["unknown"]] as const)("keeps a %s worktree", async (state) => {
-    const ports = make({ worktree: async () => ({ state, detail: "2 uncommitted file(s)" }) });
-    expect(await archiveWorkspaceWithAgent(ports, "a1")).toBe("kept");
-    expect(ports.archiveWorkspace).not.toHaveBeenCalled();
+  it("archives a dirty workspace too, and says what was in it", async () => {
+    const ports = make({ trace: async () => "2 entries: M a.ts; ?? b.ts" });
+    expect(await archiveWorkspaceWithAgent(ports, "a1")).toBe("archived");
+    expect(ports.archiveWorkspace).toHaveBeenCalledWith("ws1");
+    expect(ports.log).toHaveBeenCalledWith(expect.stringContaining("M a.ts"));
+  });
+
+  it("archives even when the trace fails", async () => {
+    const ports = make({ trace: async () => { throw new Error("pod suspended"); } });
+    expect(await archiveWorkspaceWithAgent(ports, "a1")).toBe("archived");
   });
 
   it("does not throw when archiving fails", async () => {

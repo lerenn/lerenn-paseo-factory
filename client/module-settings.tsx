@@ -30,6 +30,7 @@ export const LEASES_FIELDS: SettingField[] = [
   { key: "retentionDays", label: "Audit retention (days)", kind: "number" },
   { key: "grantedTemplate", label: "Granted message", kind: "text" },
   { key: "lostTemplate", label: "Lost message", kind: "text" },
+  { key: "expiredTemplate", label: "Expired message (nobody else holds it)", kind: "text" },
 ];
 
 export const WARDEN_FIELDS: SettingField[] = [

@@ -54,6 +54,41 @@ describe("spawnAgent", () => {
     expect(agentCreate.mock.calls[0][0]).toMatchObject({ cwd: "/repo", labels: { "paseo.factory": "1" }, env: { A: "1" } });
   });
 
+  it("kubernetes: archives the workspace it created when the agent cannot be created, and rethrows the original error", async () => {
+    const archive = vi.fn(async (_id: string) => ({ error: null }));
+    const created: string[] = [];
+    const refused = new Error("Plugin paseo-factory agent.create.before failed: Role implementer is at its limit of 6 concurrent agents");
+    const paseo = {
+      workspaces: { archive, create: vi.fn(async () => ({ id: "ws9", agents: { create: vi.fn(async () => Promise.reject(refused)) } })) },
+      agents: {},
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await expect(spawnAgent(paseo as never, "kubernetes", { ...input, onWorkspaceCreated: (id) => created.push(id) })).rejects.toBe(refused);
+    expect(archive).toHaveBeenCalledWith("ws9");
+    expect(created).toEqual(["ws9"]);
+    expect(log.mock.calls.some(([l]) => String(l).includes("archived workspace ws9"))).toBe(true);
+    log.mockRestore();
+  });
+
+  it("kubernetes: a failing archive never masks the original error", async () => {
+    const refused = new Error("at its limit");
+    const paseo = {
+      workspaces: { archive: vi.fn(async () => Promise.reject(new Error("daemon down"))), create: vi.fn(async () => ({ id: "ws9", agents: { create: vi.fn(async () => Promise.reject(refused)) } })) },
+      agents: {},
+    };
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(spawnAgent(paseo as never, "kubernetes", input)).rejects.toBe(refused);
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("kubernetes: never archives a joined workspace when the agent cannot be created in it", async () => {
+    const archive = vi.fn(async () => ({ error: null }));
+    const paseo = { workspaces: { archive, ref: () => ({ agents: { create: async () => Promise.reject(new Error("gone")) } }) }, agents: {} };
+    await expect(spawnAgent(paseo as never, "kubernetes", { ...input, joinWorkspaceId: "shared" })).rejects.toThrow("gone");
+    expect(archive).not.toHaveBeenCalled();
+  });
+
   it("slugs obey Paseo's rule", () => {
     expect(slugFor("Supervisor", "ab12")).toBe("supervisor-ab12");
     expect(slugFor("PR Babysitter: ANY-1 Très long titre !!!", "ab12")).toMatch(/^[a-z0-9][a-z0-9-]*-ab12$/);

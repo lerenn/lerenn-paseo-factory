@@ -53,9 +53,10 @@ export class RoleLimits {
 
   /**
    * Take a slot for a new agent of `role`, or throw saying the role is full. `activity` reports
-   * the live state of a registered agent; those that are gone are forgotten.
+   * the live state of a registered agent; those that are gone are forgotten. `superseded` names agents that no longer
+   * hold a place (a Factory worker no active stage refers to): they are not counted even while a turn still runs.
    */
-  async reserve(role: string, max: number, activity: (agentId: string) => Promise<AgentActivity>): Promise<void> {
+  async reserve(role: string, max: number, activity: (agentId: string) => Promise<AgentActivity>, superseded?: (agentId: string) => boolean): Promise<void> {
     const cutoff = this.now() - RESERVATION_MS;
     this.reservations = this.reservations.filter((r) => r.at > cutoff);
     const agents = this.read();
@@ -63,6 +64,7 @@ export class RoleLimits {
     let active = 0;
     for (const [id, name] of Object.entries(agents)) {
       if (name !== role) continue;
+      if (superseded?.(id)) continue;
       const state = await activity(id);
       if (state === "active") active++;
       else if (state === "gone") gone.push(id);

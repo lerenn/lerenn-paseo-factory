@@ -37,6 +37,8 @@ export interface SupervisorPorts {
   restartExtension(id: string): Promise<string>;
   settings(): SupervisorSettings;
   defaultCwd(): string | undefined;
+  /** The Factory is paused for a provider usage limit: no automatic wake-up (the Supervisor would hit it too). */
+  quiet?(): boolean;
 }
 
 const INTRO =
@@ -78,7 +80,7 @@ type AskResult =
   | { status: "queued"; request: string; note: string }
   | { status: "disabled"; note: string };
 
-export const DISABLED_NOTE = "Supervisor disabled; the Assistant (@assistant) watches the Factory.";
+export const DISABLED_NOTE = "Supervisor disabled; its notices go to the blueprints events.mailTo (else the supervisor reportTo).";
 
 /** Issues mailed while the Supervisor is disabled: a lease that expired without a release, an extension that was dropped. */
 export function noticeOf(issue: Issue): { subject: string; body: string } | null {
@@ -114,6 +116,11 @@ export class Supervisor {
     }
   }
 
+  /** The Supervisor's settings, for the modules that route to it (the run PMs' escalation target). */
+  config(): SupervisorSettings {
+    return this.ports.settings();
+  }
+
   // ---- lifecycle ----
 
   /** Create the agent when there is none or it is gone, then deliver what waits for it. `restart` replaces a live one. */
@@ -128,7 +135,7 @@ export class Supervisor {
   /** An automatic trigger (a run started, a crash): wake the agent unless that is turned off. Never awaits. */
   wake(): void {
     const s = this.ports.settings();
-    if (!s.enabled || !s.autoStart) return;
+    if (!s.enabled || !s.autoStart || this.ports.quiet?.()) return;
     void this.ensure().catch((error) => console.error("supervisor: wake failed", error));
   }
 
@@ -229,12 +236,12 @@ export class Supervisor {
     const data = this.state.data;
     if (!data.agentId) {
       this.idleSince = null;
-      if (this.hasQueued()) await this.ensure();
+      if (this.hasQueued() && !this.ports.quiet?.()) await this.ensure();
       return;
     }
     if ((await this.ports.agentState(data.agentId)) === "gone") {
       await this.retire("gone");
-      if (this.hasQueued()) await this.ensure();
+      if (this.hasQueued() && !this.ports.quiet?.()) await this.ensure();
       return;
     }
     await this.flushPending();
@@ -467,7 +474,7 @@ export class Supervisor {
     if (!live) {
       data.pendingDigests.push(digest);
       this.state.save();
-      await this.ensure();
+      if (!this.ports.quiet?.()) await this.ensure();
       this.lastDigestAt = this.ports.now();
       return;
     }

@@ -138,7 +138,10 @@ export class Engine {
   // ---- answering (human) ----
 
   /** Records the answer once. A second answer is refused and changes nothing. */
-  answer(itemId: string, input: { optionId?: string; text?: string; comment?: string }, by: "human" | "assistant" = "human"): { ok: boolean; message: string | null; item: Item | null } {
+  /** Who besides trusted agents may answer an item (a run's PM, for its own `pm = true` gate): set by the Blueprints module. */
+  mayAnswer: ((agentId: string, itemId: string) => boolean) | null = null;
+
+  answer(itemId: string, input: { optionId?: string; text?: string; comment?: string }, by: "human" | "assistant" | "pm" = "human"): { ok: boolean; message: string | null; item: Item | null } {
     const item = this.store.get(itemId);
     const now = this.now();
     if (!item) return { ok: false, message: "No such item.", item: null };
@@ -162,7 +165,7 @@ export class Engine {
     item.delivery = "pending";
     item.readAt ??= now;
     item.endedAt = now;
-    this.store.log({ itemId, type: "answered", actor: by === "assistant" ? "assistant on behalf of the user" : "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
+    this.store.log({ itemId, type: "answered", actor: by === "assistant" ? "assistant on behalf of the user" : by === "pm" ? "the run's PM" : "human", detail: item.answer.optionId ?? clip(text ?? "", 200) }, now);
     this.store.save();
     this.resolved(item, "answered");
     return { ok: true, message: null, item };
@@ -258,7 +261,7 @@ export class Engine {
     const answer = a.optionId ? `${a.optionId}${label !== a.optionId ? ` (${label})` : ""}` : `"${a.text}"`;
     return render(s?.answerTemplate ?? "", {
       ...fallback,
-      by: a.by === "default" ? " by default after expiry" : a.by === "assistant" ? " by the Assistant on behalf of the user" : "",
+      by: a.by === "default" ? " by default after expiry" : a.by === "assistant" ? " by the Assistant on behalf of the user" : a.by === "pm" ? " by the run's PM" : "",
       answer,
       comment: item.comment ? `. Comment: ${item.comment}` : "",
     });

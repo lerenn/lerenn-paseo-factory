@@ -15,7 +15,7 @@ export type InboxOption = z.infer<typeof optionSchema>;
 export const answerSchema = z.object({
   optionId: z.string().nullable(),
   text: z.string().nullable(),
-  by: z.enum(["human", "default", "assistant"]),
+  by: z.enum(["human", "default", "assistant", "pm"]),
   at: z.number(),
 });
 export type Answer = z.infer<typeof answerSchema>;

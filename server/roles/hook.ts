@@ -15,6 +15,7 @@ export async function agentActivity(context: PluginHookContext, agentId: string)
   try {
     const found = await context.paseo.agents.ref(agentId).refresh();
     if (!found || found.agent.archivedAt) return "gone";
+    // An agent in error (or closed, or idle) is not working: it holds no place.
     return found.agent.status === "running" || found.agent.status === "initializing" ? "active" : "inactive";
   } catch {
     return "inactive";
@@ -33,7 +34,7 @@ function requestedRole(request: CreateRequest): string | undefined {
  * PASEO_AGENT_ROLE, look it up in the
  * git sources' role folders (`dirs`, in precedence order), enforce its concurrency limit and apply it.
  */
-export function agentCreateHook(dirs: () => Promise<string[]>, limits?: RoleLimits) {
+export function agentCreateHook(dirs: () => Promise<string[]>, limits?: RoleLimits, superseded?: (agentId: string) => boolean) {
   return async (
     { request }: { request: CreateRequest },
     context?: PluginHookContext,
@@ -51,7 +52,7 @@ export function agentCreateHook(dirs: () => Promise<string[]>, limits?: RoleLimi
     }
     const applied = applyRole(request, role);
     if (role.maxConcurrent && limits && context) {
-      await limits.reserve(role.name, role.maxConcurrent, (id) => agentActivity(context, id));
+      await limits.reserve(role.name, role.maxConcurrent, (id) => agentActivity(context, id), superseded);
     }
     return applied;
   };

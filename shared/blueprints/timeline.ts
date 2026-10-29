@@ -13,6 +13,8 @@ export interface Segment {
   workingMs: number;
   /** Time spent waiting for a person, the PM or a child run. */
   waitingMs: number;
+  /** Gate time the Assistant answered within QUICK_ASSISTANT_MS: not time spent waiting on a person (human decision d82771ac). */
+  assistantMs: number;
   /** Dispatches to a worker (the first one plus nudges and retries). */
   attempts: number;
   /** Failed turns retried for free. */
@@ -24,6 +26,10 @@ export interface Segment {
   verdict: string | null;
 }
 
+/** A gate the Assistant answered within this time did not wait on a person; a longer one did (it asked the human). */
+export const QUICK_ASSISTANT_MS = 10 * 60_000;
+
+const byAssistant = (h: Event) => h.event === "gate_answered" && / by assistant$/.test(h.detail ?? "");
 
 /**
  * Turn a run's saved history into per-stage segments: time per stage, attempts and retries, gate open and close
@@ -50,7 +56,7 @@ export function buildTimeline(history: readonly Event[], now: number, endedAt: n
       close(h.at);
       const n = (entries.get(h.stage) ?? 0) + 1;
       entries.set(h.stage, n);
-      cur = { stage: h.stage, entry: n, startedAt: h.at, endedAt: null, workingMs: 0, waitingMs: 0, attempts: 0, retries: 0, gateOpenedAt: null, gateClosedAt: null, escalations: [], verdict: null };
+      cur = { stage: h.stage, entry: n, startedAt: h.at, endedAt: null, workingMs: 0, waitingMs: 0, assistantMs: 0, attempts: 0, retries: 0, gateOpenedAt: null, gateClosedAt: null, escalations: [], verdict: null };
       out.push(cur);
       mark = h.at;
       waiting = false;
@@ -66,7 +72,8 @@ export function buildTimeline(history: readonly Event[], now: number, endedAt: n
       waiting = true;
       if (h.event === "gate_opened") seg.gateOpenedAt = h.at;
     } else if (h.event === "gate_answered" || h.event === "head_moved" || h.event === "merged" || h.event === "approval_reused") {
-      span(seg, mark, h.at, waiting);
+      if (waiting && byAssistant(h) && h.at - mark <= QUICK_ASSISTANT_MS) seg.assistantMs += Math.max(0, h.at - mark);
+      else span(seg, mark, h.at, waiting);
       mark = h.at;
       waiting = false;
       seg.gateClosedAt = h.at;

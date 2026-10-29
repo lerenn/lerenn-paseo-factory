@@ -66,7 +66,8 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
 
   const allRuns = runs.data?.runs ?? [];
   const active = allRuns.filter((r) => r.endedAt === null);
-  const bad = (r: (typeof active)[number]) => r.pmPending !== null || r.status === "paused" || (r.status === "running" && now - r.updatedAt > STALLED_MS);
+  // A run suspended with a reason is held on purpose: shown as "suspended", never as a warning (human decision f45ab3ba).
+  const bad = (r: (typeof active)[number]) => r.status !== "suspended" && (r.pmPending !== null || r.status === "paused" || (r.status === "running" && !r.waitingFor && now - r.updatedAt > STALLED_MS));
   const pending = (inbox.data?.items ?? []).filter((i) => i.status === "pending");
   const held = (leases.data?.leases ?? []).filter((l) => l.holder);
   const queued = (leases.data?.leases ?? []).reduce((n, l) => n + l.queue.length, 0);
@@ -91,10 +92,11 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
           ? card(
               "Blueprint runs",
               "blueprints",
-              `${active.length} active${active.some(bad) ? " · needs a look" : ""}`,
+              `${active.length} active${runs.data?.factorySuspended ? " · suspended" : active.some(bad) ? " · needs a look" : ""}`,
               <>
+                {runs.data?.factorySuspended ? line(`⚠ Factory suspended: ${runs.data.factorySuspended.reason}`, "factory-suspended", c.statusWarning) : null}
                 {active.length === 0 ? line("No active run.") : null}
-                {active.slice(0, 5).map((r) => line(`${bad(r) ? "⚠ " : ""}${r.blueprint} ${r.vars.ticket || r.id} · ${r.stage ?? "-"}${r.pmPending ? " · PM judgement pending" : r.waitingFor ? ` · ${r.waitingFor}` : ""}`, r.id, bad(r) ? c.statusWarning : undefined))}
+                {active.slice(0, 5).map((r) => line(`${bad(r) ? "⚠ " : ""}${r.blueprint} ${r.vars.ticket || r.id} · ${r.stage ?? "-"}${r.status === "suspended" ? ` · suspended${r.suspended?.reason ? `: ${r.suspended.reason}` : ""}` : r.pmPending ? " · PM judgement pending" : r.waitingFor ? ` · ${r.waitingFor}` : ""}`, r.id, bad(r) ? c.statusWarning : undefined))}
               </>,
               active.some(bad) ? "warn" : "ok",
             )

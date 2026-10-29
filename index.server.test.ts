@@ -54,6 +54,24 @@ describe("the factory MCP server", () => {
     expect((await mcp(endpoint.url, "bogus", { jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(401);
   });
 
+  it("lets an extension keep a live agent's leases over the endpoint", async () => {
+    const { create, open, rpc, ctx, dir } = boot();
+    const out = await create(request());
+    await open({ agentId: "a1", env: out.env });
+    const { endpoint } = await rpc["factory.overview"]({}, ctx);
+    const cap = out.env.PASEO_FACTORY_CAPABILITY;
+    await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lease_acquire", arguments: { name: "pr:x#1@abc", ttl: 60, mode: "takeover" } } });
+    const { token } = JSON.parse(readFileSync(`${dir}/endpoint.json`, "utf8"));
+    const keep = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/leases/keep`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    expect((await keep({ agentId: "a1", ttlSeconds: 1800 }, "wrong")).status).toBe(401);
+    expect((await keep({ ttlSeconds: 1800 })).status).toBe(400);
+    const res = await keep({ agentId: "a1", ttlSeconds: 1800, by: "release-trains" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kept: ["pr:x#1@abc"] });
+    const list = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lease_list", arguments: {} } });
+    expect(JSON.parse(list.body.result.content[0].text)[0].holder.expires_in_seconds).toBeGreaterThan(1700);
+  });
+
   it("a module switched off loses its hook injection and its tools", async () => {
     const { create, open, rpc, ctx } = boot({ factory: { modules: { leases: false } } });
     const out = await create(request());
@@ -100,9 +118,9 @@ describe("the blueprint start endpoint", () => {
 });
 
 describe("inbox_answer", () => {
-  it("is for agents labelled paseo.assistant=1 and is recorded as the Assistant's answer", async () => {
+  it("is for agents with a trusted label and is recorded as the Assistant's answer", async () => {
     const asker = "asker";
-    const b = bootPlugin({}, {
+    const b = bootPlugin({ factory: { trustedLabels: ["paseo.assistant=1"] } }, {
       agents: {
         list: async () => ({ entries: [{ agent: { id: "assistant", labels: { "paseo.assistant": "1" } } }, { agent: { id: "plain", labels: {} } }] }),
         ref: (id: string) => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {} } }),
@@ -224,6 +242,14 @@ describe("extensions", () => {
       expect(seen).toEqual([{ name: "Louis" }]);
       const listed = (await (await fetch(`${endpoint.url}/blueprints`, { headers: { authorization: `Bearer ${token}` } })).json()) as any;
       expect(listed.blueprints[0]).toMatchObject({ name: "demo", vars: [{ name: "who", required: false }] });
+      const getRuns = (path: string, auth = token) => fetch(`${endpoint.url}${path}`, { headers: { authorization: `Bearer ${auth}` } });
+      expect((await getRuns("/blueprints/runs", "nope")).status).toBe(401);
+      expect((await getRuns("/blueprints/runs?since=-1")).status).toBe(400);
+      const all = (await (await getRuns("/blueprints/runs?since=0&has_var=who")).json()) as any;
+      expect(all.runs).toEqual([expect.objectContaining({ id: first.runId, blueprint: "demo", status: "done", parent: null, vars: { who: "Louis" }, events: expect.any(Array), stages: expect.any(Object) })]);
+      expect(all.runs[0]).toMatchObject({ stage: "hello", waitingFor: null, pmPending: null, suspended: null, gate: null, escalations: [], agentId: null, role: null, prs: {} });
+      expect(((await (await getRuns("/blueprints/runs?since=0&has_var=slack_thread_ts")).json()) as any).runs).toEqual([]);
+      expect(((await (await getRuns(`/blueprints/runs?since=${Date.now() + 60_000}`)).json()) as any).runs).toEqual([]);
     } finally {
       delete process.env.FACTORY_BLUEPRINTS_DIR;
     }
@@ -290,6 +316,45 @@ describe("remote extensions (another plugin's process)", () => {
     expect(await rpc["factory.extension.call"]({ id: "release-trains", name: "board", input: { n: 3 } }, ctx)).toEqual({ ok: true, output: { lanes: 3 }, error: null });
     expect((await rpc["factory.overview"]({}, ctx)).extensions.map((e: any) => e.id)).toEqual(["release-trains"]);
     void token;
+  });
+
+  it("serves read-only rpcs on POST /extensions/<id>/rpc/<name>, and only those", async () => {
+    const ext = await extensionServer({
+      "/rpc/ticket-facts": (b) => ({ output: { facts: Object.fromEntries(b.input.keys.map((k: string) => [k, [{ label: "lane", value: "dev" }]])), by: b.callerId } }),
+      "/rpc/board": () => ({ output: { lanes: 1 } }),
+    });
+    const f = await factory();
+    expect((await f.register({ id: "releaser", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, rpc: [{ name: "ticket-facts", readOnly: true }, { name: "board" }] })).status).toBe(200);
+    const call = (p: string, body: object, auth = f.token) => fetch(`${f.endpoint.url}${p}`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    const ok = await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: ["ANY-1"] } });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ output: { facts: { "ANY-1": [{ label: "lane", value: "dev" }] }, by: "loopback" } });
+    expect((await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: [] } }, "wrong")).status).toBe(401);
+    expect((await call("/extensions/releaser/rpc/board", { input: {} })).status).toBe(403);
+    expect((await call("/extensions/releaser/rpc/nope", { input: {} })).status).toBe(404);
+    expect((await call("/extensions/missing/rpc/ticket-facts", { input: {} })).status).toBe(404);
+    expect((await fetch(`${f.endpoint.url}/extensions/releaser/rpc/ticket-facts`, { headers: { authorization: `Bearer ${f.token}` } })).status).toBe(405);
+    expect(ext.calls.filter((c) => c.path === "/rpc/board")).toEqual([]); // refused before the extension is reached
+  });
+
+  it("refuses an in-process rpc that is not read-only, and validates the input of one that is", async () => {
+    const f = await factory();
+    const reg = (globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void };
+    cleanups.push(
+      reg.registerExtension({
+        id: "local-facts",
+        version: "1",
+        tools: [],
+        rpc: [
+          { name: "facts", readOnly: true, input: z.object({ keys: z.array(z.string()).max(200) }), output: z.object({ n: z.number() }), run: (i: { keys: string[] }) => ({ n: i.keys.length }) },
+          { name: "poke", input: z.object({}), output: z.unknown(), run: () => "poked" },
+        ],
+      }),
+    );
+    const call = (name: string, input: unknown) => fetch(`${f.endpoint.url}/extensions/local-facts/rpc/${name}`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ input }) });
+    expect(await (await call("facts", { keys: ["A", "B"] })).json()).toEqual({ output: { n: 2 } });
+    expect((await call("facts", { keys: "A" })).status).toBe(400);
+    expect((await call("poke", {})).status).toBe(403);
   });
 
   it("completes a waiting stage through POST /stages/<token>/outcome", async () => {
@@ -466,6 +531,94 @@ describe("warden is for Factory agents only", () => {
     const listed = await b.rpc["warden.list"]({}, b.ctx);
     expect(listed.tasks.map((t: any) => t.agentId)).toContain("worker");
     expect((await b.rpc["warden.command"]({ agentId: "plain", args: "babysit" }, b.ctx)).message).toMatch(/Factory agents only/);
+  });
+});
+
+describe("extension tools for trusted agents and across restarts", () => {
+  async function extServer(handlers: Partial<Record<string, (body: any) => unknown>>) {
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const handler = handlers[req.url ?? ""];
+        res.writeHead(handler ? 200 : 404, { "content-type": "application/json" });
+        res.end(JSON.stringify(handler ? handler(raw ? JSON.parse(raw) : {}) : { error: "nope" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    cleanups.push(() => void server.close());
+    return `http://127.0.0.1:${(server.address() as any).port}`;
+  }
+  const agents = {
+    agents: {
+      list: async () => ({ entries: [{ agent: { id: "assistant", labels: { "paseo.assistant": "1" } } }, { agent: { id: "plain", labels: {} } }] }),
+      ref: () => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {} } }),
+    },
+  };
+  const registration = (url: string) => ({
+    id: "lanes",
+    version: "1",
+    callback: { url, token: "ext-secret-token" },
+    tools: [
+      { name: "lanes_board", description: "Read the board", readOnly: true },
+      { name: "lanes_drop", description: "Drop an item" },
+    ],
+  });
+  async function start(dir?: string) {
+    const b = bootPlugin({ factory: { trustedLabels: ["paseo.assistant=1"] } }, agents, dir);
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
+    const post = (p: string, body: object) => fetch(`${endpoint.url}${p}`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const login = async (id: string) => {
+      const out = await b.create(request());
+      await b.open({ agentId: id, env: out.env });
+      return out.env.PASEO_FACTORY_CAPABILITY as string;
+    };
+    const listed = async (cap: string) => (await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools as any[];
+    const call = async (cap: string, name: string) => (await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: {} } })).body.result;
+    return { b, post, login, listed, call };
+  }
+
+  it("offers a trusted agent an extension's read-only tools and neither lists nor runs its writes", async () => {
+    const url = await extServer({ "/tools/lanes_board": () => ({ result: { lanes: 4 } }), "/tools/lanes_drop": () => ({ result: "dropped" }) });
+    const f = await start();
+    cleanups.push(f.b.cleanup as () => void);
+    expect((await f.post("/extensions/register", registration(url))).status).toBe(200);
+    const [assistant, plain] = [await f.login("assistant"), await f.login("plain")];
+    const forAssistant = await f.listed(assistant);
+    expect(forAssistant.map((t) => t.name)).toContain("lanes_board");
+    expect(forAssistant.map((t) => t.name)).not.toContain("lanes_drop");
+    expect(forAssistant.find((t) => t.name === "lanes_board").annotations).toEqual({ readOnlyHint: true });
+    expect(JSON.parse((await f.call(assistant, "lanes_board")).content[0].text)).toEqual({ lanes: 4 });
+    const refused = await f.call(assistant, "lanes_drop");
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/not available to this agent/);
+    // Other agents keep both, under their own permission flow.
+    expect((await f.listed(plain)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    expect((await f.call(plain, "lanes_drop")).content[0].text).toBe("dropped");
+  });
+
+  it("keeps listing a remote extension's tools while it is away, also after a Factory restart", async () => {
+    const url = await extServer({ "/tools/lanes_board": () => ({ result: "live" }) });
+    const first = await start();
+    expect((await first.post("/extensions/register", registration(url))).status).toBe(200);
+    expect((await first.post("/extensions/unregister", { id: "lanes" })).status).toBe(200);
+    const plain = await first.login("plain");
+    expect((await first.listed(plain)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    const away = await first.call(plain, "lanes_board");
+    expect(away.isError).toBe(true);
+    expect(away.content[0].text).toMatch(/not connected to the Factory right now.*Try again in a minute/);
+    await (first.b.cleanup as () => Promise<void>)();
+
+    // A new Factory process: the tools are listed before the extension registers again, with the same access rule.
+    const second = await start(first.b.dir);
+    cleanups.push(second.b.cleanup as () => void);
+    const [assistant, plain2] = [await second.login("assistant"), await second.login("plain")];
+    expect((await second.listed(plain2)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    expect((await second.listed(assistant)).map((t) => t.name)).not.toContain("lanes_drop");
+    expect((await second.post("/extensions/register", registration(url))).status).toBe(200);
+    expect((await second.call(plain2, "lanes_board")).content[0].text).toBe("live");
+    expect((await second.listed(assistant)).filter((t) => t.name === "lanes_board")).toHaveLength(1);
   });
 });
 

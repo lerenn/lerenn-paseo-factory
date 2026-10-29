@@ -2,7 +2,7 @@ import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const settingsSchema = z.object({
-  /** Off: the Supervisor is never started or woken (no agent, no digests, no restarts by it); supervisor_ask answers that it is disabled, and expired leases and dropped extensions are mailed to the blueprints events.mailTo (the Assistant) instead. An agent that is already running is archived at the next digest tick. */
+  /** Off: the Supervisor is never started or woken (no agent, no digests, no restarts by it); supervisor_ask answers that it is disabled, and expired leases and dropped extensions are mailed to the blueprints events.mailTo (else reportTo) instead. An agent that is already running is archived at the next digest tick. */
   enabled: z.boolean().default(true),
   /** Wake the Supervisor on its own triggers (a run starts, a digest with new problems, an extension crash). Off: only asks, chat and "Wake now" wake it. */
   autoStart: z.boolean().default(true),
@@ -20,6 +20,8 @@ export const settingsSchema = z.object({
   idleArchiveMinutes: z.number().int().min(0).default(10),
   /** supervisor_ask waits this long for the answer before returning a pending request. */
   askTimeoutSeconds: z.number().int().min(5).max(600).default(120),
+  /** Address or alias (e.g. "@ops") that gets the Supervisor's flags, and the Factory notices while it is disabled and the Blueprints module is off. Empty: no mail. */
+  reportTo: z.string().default(""),
 });
 export type SupervisorSettings = z.output<typeof settingsSchema>;
 

@@ -1,23 +1,30 @@
+import { AttentionNotifier, attentionPoints } from "./attention";
+import { agentlessWorkspaces, factoryWorkspaceTitles, type ListedAgent, type ListedWorkspace } from "./orphans";
 import path from "node:path";
 import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
 import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
 import { ghDiff, ghFacts } from "./github";
+import { PrFactsCache } from "./pr-facts-cache";
+import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
-import { probeWorktree } from "./worktree";
+import { statusTrace } from "./worktree";
+import { suspendPod, wakePod } from "./pod-control";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
+import { startCrons } from "./crons";
+import { startUsageLimits } from "./usage-limit";
 import { retitleFactoryWorkspaces } from "../workspace-title";
-import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
+import { blueprintTools, INSTRUCTIONS, PM_TOOL_NAMES, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
-import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc } from "../../shared/blueprints/rpc";
-import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
+import { blueprintsSettings, DEFAULT_RETRO_PROMPT, type BlueprintsSettings } from "../../shared/blueprints/settings";
 
 /** What the Blueprints tab shows about a loaded blueprint. */
 function describe({ blueprint, text, source }: { blueprint: Blueprint; text: string; source: string }): BlueprintInfo {
@@ -57,6 +64,8 @@ function describe({ blueprint, text, source }: { blueprint: Blueprint; text: str
   };
 }
 
+const ORPHAN_SWEEP_MS = 5 * 60_000;
+
 export function startBlueprints(host: FactoryHost) {
   const { server } = host;
   const settings = server.registerSettings(blueprintsSettings);
@@ -66,7 +75,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "" }, retro: { enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT }, janitor: { enabled: false, dryRun: true, orphanSweep: true }, crons: { enabled: false, mailTo: "", schedules: [] } } as unknown as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
@@ -100,9 +109,33 @@ export function startBlueprints(host: FactoryHost) {
   };
   const agentRef = (id: string) => host.paseo.agents.ref(id);
 
+  const liveAgentsIn = async (workspaceId: string): Promise<string[] | null> => {
+    try {
+      const { entries } = await listAgents(host.paseo);
+      return (entries as { agent: { id: string; workspaceId?: string | null; archivedAt?: string | null; status?: string } }[])
+        .filter(({ agent: a }) => a.workspaceId === workspaceId && !a.archivedAt && a.status !== "closed")
+        .map(({ agent: a }) => a.id);
+    } catch {
+      return null;
+    }
+  };
+
+  /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
+  let spawning = 0;
+  // One cache for every PR lookup of the engine; GET /blueprints/runs only reads it (ADR "factory tickets view").
+  const prFacts = new PrFactsCache({ fetch: ghFacts });
+  let prunedAt = 0;
+  /** Forget the facts of PRs no stored run refers to any more (at most every 10 min). */
+  const prunePrFacts = () => {
+    if (Date.now() - prunedAt < 10 * 60_000) return;
+    prunedAt = Date.now();
+    prFacts.prune(new Set(store.all().flatMap(prUrlsOf)));
+  };
   const ports: Ports = {
     now: Date.now,
     async spawn(o) {
+      spawning++;
+      try {
       const cwd = o.cwd ?? cfg().defaultCwd;
       if (!cwd) throw new Error("No working directory: set defaultCwd in the Blueprints settings, or cwd on the stage.");
       const role = await host.loadRole(o.role);
@@ -116,8 +149,10 @@ export function startBlueprints(host: FactoryHost) {
         labels: o.labels,
         env: o.env,
         profile: role?.runtimeProfile,
+        // Recorded before the agent exists, so the orphan sweep finds the workspace even if the agent never comes.
+        onWorkspaceCreated: (id: string) => store.noteWorkspace(id, { at: Date.now(), run: o.labels["paseo.factory.run"] ?? null, title: o.workspaceTitle ?? o.title }),
       };
-      const runtime = o.local ? "local" : host.runtime;
+      const runtime = o.runtime ?? host.runtime;
       const { agentId, workspaceId } = await spawnAgent(host.paseo, runtime, { ...input, joinWorkspaceId: o.joinWorkspaceId }).catch((error: Error) => {
         // The shared pod is gone (archived, evicted): this worker gets a pod of its own and becomes the new shared one.
         if (!o.joinWorkspaceId) throw error;
@@ -125,6 +160,9 @@ export function startBlueprints(host: FactoryHost) {
         return spawnAgent(host.paseo, runtime, input);
       });
       return { agentId, workspaceId };
+      } finally {
+        spawning--;
+      }
     },
     async send(agentId, text) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
@@ -149,13 +187,18 @@ export function startBlueprints(host: FactoryHost) {
       const result = await host.paseo.workspaces.archive(workspaceId);
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
-    worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId),
+    trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
+    liveAgentsIn,
+    suspendWorkspace: suspendPod,
+    wakeWorkspace: wakePod,
     spend(runId) {
       const total = aggregate(spend.all().filter((r) => r.run === runId)).total;
       return total.turns ? { costUsd: total.costUsd, turns: total.turns } : null;
     },
     spendOfAgent: (agentId) => spend.all().filter((r) => r.agentId === agentId).reduce((n, r) => n + r.costUsd, 0),
     post: () => ({ eventsMailTo: cfg().events.mailTo, retro: cfg().retro, janitor: cfg().janitor }),
+    // While the Factory is paused for a usage limit no retro agent starts (it would hit the limit too); it starts after.
+    quiet: () => !!(engine.usageLimits?.enabled() && engine.usageLimits.globalHold()),
     ask(o) {
       const e = inbox();
       e.store.upsertAgent(`blueprint:${o.runId}`, { title: o.title });
@@ -193,7 +236,7 @@ export function startBlueprints(host: FactoryHost) {
       const task = w?.store.get(taskId);
       if (task && task.state === "active") w.finish(task, "done", result);
     },
-    prFacts: ghFacts,
+    prFacts: (url, opts) => prFacts.get(url, opts),
     tool: (name) => host.toolRunner(name),
     stageKind(kind) {
       for (const ext of host.listExtensions()) {
@@ -209,7 +252,14 @@ export function startBlueprints(host: FactoryHost) {
       const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);
       return needsCwd && !cfg().defaultCwd ? "Blueprints setting defaultCwd is not set: workers need a working directory. Set it in Factory > Blueprints > Settings." : null;
     },
-    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30 }),
+    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30, pm: cfg().pm }),
+    escalationTarget() {
+      const to = cfg().pm?.escalateTo?.trim();
+      if (to) return to;
+      const supervisor = (host.engines.supervisor as { config?(): { enabled: boolean; reportTo: string } } | undefined)?.config?.();
+      if (supervisor?.enabled && host.enabled("supervisor")) return "supervisor";
+      return supervisor?.reportTo?.trim() ?? "";
+    },
   };
   const engine = new Engine(store, ports);
   host.engines.blueprints = { engine, store, eventsMailTo: () => cfg().events.mailTo };
@@ -228,12 +278,34 @@ export function startBlueprints(host: FactoryHost) {
     return out;
   });
 
+  // Cron schedules (the Crons tab): crons/schedules.json of the git sources plus the settings' own, off until crons.enabled.
+  const crons = startCrons({
+    host,
+    engine,
+    store,
+    cfg,
+    ready,
+    catalogReady: async () => (await refresh()).blueprints.size > 0,
+    stateFile: (process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "crons.json"),
+  });
+
+  // Provider usage limits (Blueprints > Quota), off until usageLimit.enabled (decision f007d95a / b05f2c5c).
+  const usage = startUsageLimits({
+    host,
+    engine,
+    store,
+    cfg,
+    stateFile: (process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "usage-limit.json"),
+  });
+  host.engines.blueprints.usageLimits = usage.controller;
+
   const removeTools = host.registerTools("blueprints", blueprintTools({ engine, catalog: async () => (await refresh()).blueprints }));
   host.setInstructions("blueprints", INSTRUCTIONS);
   host.contribute({
     module: "blueprints",
     note: MODULE_NOTE,
     tools(request) {
+      if (request.env?.PASEO_FACTORY_STAGE === "pm") return PM_TOOL_NAMES;
       if (request.env?.PASEO_FACTORY_RUN) return WORKER_TOOL_NAMES;
       return request.env?.PASEO_FACTORY_BLUEPRINTS === "on" || request.env?.PASEO_AGENT_ROLE === cfg().pmRole ? TOOL_NAMES : null;
     },
@@ -255,6 +327,13 @@ export function startBlueprints(host: FactoryHost) {
         if (error instanceof UsageError) throw new HttpError(400, error.message);
         throw error;
       }
+    },
+    runs({ since, hasVar }) {
+      prunePrFacts();
+      return store
+        .all()
+        .filter((r) => r.updatedAt >= since && (!hasVar || !!r.vars[hasVar]?.trim()))
+        .map((r) => runSnapshot(r, (url) => prFacts.peek(url)));
     },
   };
 
@@ -291,17 +370,8 @@ export function startBlueprints(host: FactoryHost) {
       void archiveWorkspaceWithAgent(
         {
           workspaceOf: (id) => store.all().find((run) => run.agents?.[id])?.agents?.[id]?.workspaceId ?? null,
-          async liveAgentsIn(workspaceId) {
-            try {
-              const { entries } = await listAgents(host.paseo);
-              return (entries as { agent: { id: string; workspaceId?: string | null; archivedAt?: string | null; status?: string } }[])
-                .filter(({ agent: a }) => a.workspaceId === workspaceId && !a.archivedAt && a.status !== "closed")
-                .map(({ agent: a }) => a.id);
-            } catch {
-              return null;
-            }
-          },
-          worktree: (workspaceId) => probeWorktree(host.paseo, workspaceId).catch((e: Error) => ({ state: "unknown" as const, detail: e.message })),
+          liveAgentsIn,
+          trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
           archiveWorkspace: ports.archiveWorkspace!,
           log: (line) => console.log(line),
         },
@@ -310,8 +380,14 @@ export function startBlueprints(host: FactoryHost) {
     }),
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
-      void recordSpend(agent.id, turnId).finally(() => engine.observer.retroEnded?.(agent.id));
-      void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
+      void recordSpend(agent.id, turnId).finally(() => {
+        engine.observer.retroEnded?.(agent.id);
+        void engine.pmTurnEnded(agent.id);
+      });
+      if (outcome.kind !== "canceled") usage.probeEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined, code: outcome.kind === "failed" ? outcome.error.code : undefined });
+      void engine
+        .turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined, code: outcome.kind === "failed" ? outcome.error.code : undefined, provider: agent.provider ?? null })
+        .catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];
   const runVars = (id: string) => {
@@ -324,12 +400,81 @@ export function startBlueprints(host: FactoryHost) {
   });
   host.whenPaseo(() => void ready.then(() => engine.resumeAll()).catch((e) => console.error("blueprints: resume failed", e)));
 
+  // One mail per new attention point to the events address (human decision f45ab3ba).
+  const attention = new AttentionNotifier((process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "attention.json"), (p) =>
+    host.report(cfg().events.mailTo, { subject: p.subject, body: p.body, kind: "info" }),
+  );
+  const notify = async () => {
+    if (!cfg().events.mailTo?.trim() || store.suspended()) return;
+    const pending = host.enabled("inbox") && host.engines.inbox ? (host.engines.inbox as import("../inbox/engine").Engine).store.pending() : [];
+    await attention.tick(attentionPoints(store.all(), pending, Date.now()));
+  };
+
+  // The orphan sweep (every 5 minutes, human rule 2026-10-28): workers no live stage refers to, then agentless workspaces.
+  let sweptAt = 0;
+  let sweeping = false;
+  const sweep = async () => {
+    if (cfg().janitor.orphanSweep === false || store.suspended() || sweeping || spawning > 0 || Date.now() - sweptAt < ORPHAN_SWEEP_MS) return;
+    sweeping = true;
+    sweptAt = Date.now();
+    try {
+      const archived = await engine.sweepOrphans();
+      const [{ entries: agents }, { entries: workspaces }] = await Promise.all([
+        host.paseo.agents.list({ filter: { includeArchived: false, includeBackground: true } } as never) as unknown as Promise<{ entries: { agent: ListedAgent }[] }>,
+        host.paseo.workspaces.list() as unknown as Promise<{ entries: ListedWorkspace[] }>,
+      ]);
+      const runs = store.all();
+      const known = new Set(runs.flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.workspaceId).filter((id): id is string => !!id)));
+      // Forget the recorded workspaces that are gone (archived by the Factory, the spawn's clean-up or a person).
+      const listed = new Set(workspaces.map((w) => w.id));
+      store.forgetWorkspaces(Object.keys(store.createdWorkspaces()).filter((id) => !listed.has(id)));
+      const created = new Map(Object.entries(store.createdWorkspaces()).map(([id, w]) => [id, w.at] as [string, number]));
+      const found = agentlessWorkspaces(workspaces, agents.map((e) => e.agent), {
+        known,
+        created,
+        titles: factoryWorkspaceTitles(runs, cfg().pmRole),
+        now: Date.now(),
+        pmAgentIds: new Set(runs.map((r) => r.pmAgentId).filter((id): id is string => !!id)),
+        protect: new Set(runs.filter((r) => r.endedAt === null && r.sharedWorkspaceId).map((r) => r.sharedWorkspaceId!)),
+      });
+      for (const w of found) {
+        const title = (w.title || w.name || "").trim();
+        try {
+          await ports.archiveWorkspace!(w.id);
+        } catch (error) {
+          console.error(`blueprints: orphan sweep could not archive workspace ${w.id}`, error);
+          continue;
+        }
+        archived.push(w.id);
+        const recorded = store.createdWorkspaces()[w.id]?.run;
+        store.forgetWorkspaces([w.id]);
+        const run = runs.find((r) => r.id === recorded) ?? runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => r.vars.ticket && title.includes(r.vars.ticket));
+        if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
+        console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
+      }
+      if (archived.length) {
+        store.save();
+        console.log(`blueprints: orphan sweep archived ${archived.length}: ${archived.join(", ")}`);
+      }
+    } finally {
+      sweeping = false;
+    }
+  };
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   const loop = async () => {
     try {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
+      if (host.enabled("blueprints") && host.hasPaseo()) await usage.controller.tick().catch((e) => console.error("blueprints: usage-limit tick failed", e));
+      if (host.enabled("blueprints") && host.hasPaseo()) await notify();
+      if (host.enabled("blueprints") && host.hasPaseo() && !store.suspended()) {
+        if (engine.usageLimits?.enabled() && engine.usageLimits.globalHold()) {
+          if (crons.scheduler.skipWindow(Date.now())) console.log("blueprints: cron slots skipped while the Factory is paused for a usage limit");
+        } else await crons.tick().catch((e) => console.error("blueprints: cron tick failed", e));
+      }
+      if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
     }
@@ -352,6 +497,7 @@ export function startBlueprints(host: FactoryHost) {
       blueprints: [...c.blueprints.values()].map((entry) => describe(entry)),
       errors: c.errors.map((e) => ({ file: path.basename(e.file), message: e.message })),
       settings: current,
+      factorySuspended: store.suspended() ? { reason: store.suspended()!.reason, since: store.suspended()!.at, by: store.suspended()!.by } : null,
     };
   });
   server.handle(runDiffRpc, async ({ runId }, ctx) => {
@@ -404,6 +550,20 @@ export function startBlueprints(host: FactoryHost) {
     }
   });
 
+  server.handle(suspendRunsRpc, async ({ runId, all, resume, reason }, ctx) => {
+    host.capture(ctx);
+    try {
+      if (resume) {
+        if (all) engine.resumeAllSuspended();
+        else await engine.unsuspend(runId!);
+      } else if (all) await engine.suspendAll({ reason: reason ?? "suspended from the Blueprints tab", by: "user" });
+      else await engine.suspend(runId!, { reason: reason ?? "suspended from the Blueprints tab", by: "user" });
+      return { ok: true, message: null };
+    } catch (error) {
+      return { ok: false, message: (error as Error).message };
+    }
+  });
+
   return () => {
     stopped = true;
     if (timer) clearTimeout(timer);
@@ -411,6 +571,7 @@ export function startBlueprints(host: FactoryHost) {
     unlisten?.();
     unsubscribeSettings();
     removeTools();
+    usage.remove();
     host.blueprints = null;
   };
 }

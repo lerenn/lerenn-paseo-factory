@@ -73,11 +73,19 @@ export const gateStageSchema = z.strictObject({
   expires_in_minutes: z.number().min(1).optional(),
   /** An answer with the option id "hold" asks the same question again after this many minutes. */
   hold_minutes: z.number().min(1).optional(),
+  /** The run's on-demand PM is spawned when the gate opens and may answer it (and only it); the human can still answer it in the Inbox. */
+  pm: z.boolean().default(false),
   /**
    * "merge": a passive wait, no Inbox item. The gate completes with `on.merged` when every PR in `pr` is merged on GitHub (`on.head_moved` if a head moves first)
    * and with `on.expired` after `expires_in_minutes` (the engine's own timer, not an Inbox expiry). Someone merging is announced by the run's "waiting" mail.
    */
   wait: z.literal("merge").optional(),
+  /**
+   * With `wait = "merge"`: after this many minutes, a PR that is still open but neither in a merge queue nor tested (no CI run on
+   * its head) will not merge by itself: the gate follows `on.stalled` (for example back to the stage that dispatches CI) instead
+   * of waiting for `expires_in_minutes`.
+   */
+  stall_minutes: z.number().min(1).optional(),
 });
 
 export const callStageSchema = z.strictObject({
@@ -134,10 +142,12 @@ export const blueprintSchema = z
     description: z.string().default(""),
     /** First stage; `blueprint_start(at=...)` may enter elsewhere. Defaults to the first stage listed. */
     start: stageId.optional(),
-    /** Variables whose value a person or the PM must have checked for real (a Linear key); needs `<name>_confirmed = "true"` at start. */
+    /** Variables whose value a person or the PM must have checked for real (such as a ticket key); needs `<name>_confirmed = "true"` at start. */
     confirm: z.array(z.string()).default([]),
     /** Failed-run cap on the PM's single judgement call: at most this many extra attempts. */
     pm_extra_max: z.number().int().min(0).max(10).default(2),
+    /** Most runs of this blueprint active at once (pods are a quota); more wait as "queued" and start, oldest first, when one ends. */
+    max_active: z.number().int().min(1).optional(),
     vars: z.record(z.string(), varSchema).default({}),
     stage: z.array(z.unknown()).min(1),
   })

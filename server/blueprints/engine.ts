@@ -1,15 +1,28 @@
-import { flakeReason, flakeSummary } from "./flake";
+import { flakeReason, flakeSummary, isBusyError, isGitTimeout, isQuotaError, MAX_BUSY_RETRIES, MAX_GIT_TIMEOUTS, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
 import type { RunView, StageView } from "../../shared/blueprints/run";
-import type { Run, RunStore, StageState } from "./store";
+import type { Run, RunStore, StageState, UsageLimitHold } from "./store";
+import type { Classification, ProviderFailure } from "../../shared/blueprints/usage-limit";
 import { condition, render } from "./template";
 import { workspaceTitle } from "../workspace-title";
 import { PostRun } from "./post";
+import { buildDigest } from "./digest";
+import { escalationHow, PM_DEFAULTS, pmCalls, pmKey, pmLive, pmPrompt, pmTitle, type PmSettings } from "./pm";
+import type { PmCall, PmPoint } from "./store";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
+
+/** How long a worker may say it waits on a person or an outside system (no nudges meanwhile) before the run pauses for a person. */
+const WORKER_WAIT_CEILING_MS = 120 * 60_000;
+
+/** How long a stage waits for the extension that provides its kind to register (after a restart) before the run fails. */
+const KIND_WAIT_MS = 15 * 60_000;
+
+/** Polls in a row that must not see a queued PR in the queue before the merge gate asks again. */
+const LEFT_QUEUE_POLLS = 2;
 
 export interface PrFacts {
   url: string;
@@ -20,6 +33,11 @@ export interface PrFacts {
   mergeable: boolean | null;
   draft: boolean;
   review: string;
+  /** Auto-merge is on or the PR is in a merge queue: it merges by itself (absent: unknown). */
+  queued?: boolean;
+  /** Place in the merge queue (1 = next) and GitHub's estimate of the time left, in seconds (absent: not in a queue or unknown). */
+  queuePosition?: number;
+  queueEtaSeconds?: number;
 }
 
 export type GateState = {
@@ -31,7 +49,7 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; local?: boolean; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; /** Overrides the Blueprints runtime setting for this agent. */ runtime?: "kubernetes" | "local"; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
@@ -39,10 +57,18 @@ export interface Ports {
   report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   /** Settings of the event mails, the retro and the janitor. */
   post?(): PostSettings;
+  /** No model call should start now (the Factory is paused for a usage limit): the retro waits. */
+  quiet?(): boolean;
   /** Archive a workspace (the pod of a Kubernetes agent). */
   archiveWorkspace?(workspaceId: string): Promise<void>;
-  /** Is there unsaved work in the workspace's worktree? Anything but a sure "clean" keeps the workspace. */
-  worktree?(workspaceId: string): Promise<{ state: "clean" | "dirty" | "unknown"; detail: string }>;
+  /** Suspend the pod of a workspace (volume kept). `busy` says why it was refused (an agent is running in it). Absent: nothing to suspend. */
+  suspendWorkspace?(workspaceId: string, force: boolean): Promise<{ ok: boolean; message?: string }>;
+  /** Wake a suspended pod ahead of the prompt that would wake it anyway. */
+  wakeWorkspace?(workspaceId: string): Promise<void>;
+  /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
+  trace?(workspaceId: string): Promise<string>;
+  /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
+  liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
   spend?(runId: string): { costUsd: number; turns: number } | null;
   spendOfAgent?(agentId: string): number;
@@ -64,20 +90,40 @@ export interface Ports {
   withdraw(itemId: string, reason: string): void;
   wardenRegister(o: { agentId: string; task: string }): string | null;
   wardenDone(taskId: string, result: string): void;
-  prFacts(url: string): Promise<PrFacts>;
+  /**
+   * Facts of a PR, through the Factory's per-URL cache: served from memory when younger than `maxAgeMs` (default 2 min, merged
+   * and closed PRs for the life of the run); `maxAgeMs: 0` reads GitHub now (a gate that needs the current head).
+   */
+  prFacts(url: string, opts?: { maxAgeMs?: number }): Promise<PrFacts>;
   /** A Factory or extension tool by name, else null. */
   tool(name: string): ((args: Record<string, unknown>) => Promise<unknown> | unknown) | null;
   stageKind(kind: string): ((ctx: Omit<StageKindContext, "paseo" | "services" | "signal">) => Promise<StageOutcome>) | null;
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings> };
+  /** Where an on-demand PM escalates first: "supervisor", an agent address or alias, or "" (straight to the human). */
+  escalationTarget?(): string;
+}
+
+/** The usage-limit controller as the engine sees it (server/blueprints/usage-limit). Absent or disabled: nothing changes. */
+export interface UsageLimitHook {
+  enabled(): boolean;
+  classify(f: ProviderFailure): Classification;
+  /** When a run held on its own match resumes. */
+  resumeAtFor(resetAt: number | null): number;
+  /** A worker hit the limit; its run is already held. Called outside the run's chain. */
+  matched(e: { runId: string; agentId: string | null; provider: string | null; rule: string; evidence: string; resetAt: number | null }): void;
+  /** A failed turn nobody classified (not a usage limit, a flake or a known class): one alert per signature. */
+  unknown(e: { runId: string; agentId: string | null; failure: ProviderFailure }): void;
+  /** The whole Factory is held for a usage limit. */
+  globalHold(): { reason: string; resumeAt: number | null } | null;
 }
 
 export interface PostSettings {
   /** Who gets the event mails ("" = nobody). */
   eventsMailTo: string;
-  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean };
+  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean; prompt?: string };
   janitor: { enabled: boolean; dryRun: boolean };
 }
 
@@ -150,6 +196,8 @@ export class Engine {
   private readonly aborts = new Map<string, AbortController>();
 
   readonly observer: Observer;
+  /** Set by the Blueprints module when the usage-limit feature is wired. */
+  usageLimits: UsageLimitHook | null = null;
 
   constructor(
     readonly store: RunStore,
@@ -187,9 +235,14 @@ export class Engine {
   /** Validate the variables and create the run; the first stage is entered in the background. */
   start(input: StartInput): Run {
     if (input.idempotencyKey) {
+      // The same key joins the run it started; only a run that failed or was aborted lets the key start a new one.
       const existing = this.store.byKey(input.idempotencyKey);
-      if (existing) return existing;
+      if (existing && existing.status !== "failed" && existing.status !== "aborted") return existing;
     }
+    const held = this.store.suspended();
+    if (held) throw new UsageError(`The Factory is suspended (${held.reason}); resume it with blueprint_resume(all=true) before starting runs.`);
+    const limited = this.usageHold();
+    if (limited) throw new UsageError(`The Factory is paused for a provider usage limit (${limited.reason})${limited.resumeAt ? ` until about ${new Date(limited.resumeAt).toISOString()}` : ""}; no run starts until it resumes or a person lifts it (Blueprints > Quota).`);
     const loaded = this.ports.blueprint(input.blueprint);
     if (!loaded) throw new NotFoundError(`No blueprint "${input.blueprint}".`);
     const { blueprint: def, sha } = loaded;
@@ -222,6 +275,15 @@ export class Engine {
       history: [],
     };
     this.store.log(run, "started", first, `by ${input.requestedBy}${input.at ? ` at ${input.at}` : ""}`, now);
+    const active = def.max_active ? this.activeOf(def.name) : 0;
+    if (def.max_active && active >= def.max_active) {
+      run.queued = { first, at: now };
+      run.status = "waiting";
+      run.waitingFor = `queued: ${active} ${def.name} runs active (max_active ${def.max_active})`;
+      this.store.log(run, "queued", null, run.waitingFor, now);
+      this.store.add(run);
+      return run;
+    }
     run.stage = first;
     run.stages[first] = { ...freshStage(), status: "entering" };
     this.store.add(run);
@@ -232,6 +294,30 @@ export class Engine {
       console.error("blueprints: runStarted failed", error);
     }
     return run;
+  }
+
+  /** Runs of a blueprint that hold a slot under `max_active`: not ended, not queued. */
+  private activeOf(blueprint: string): number {
+    return this.store.active().filter((r) => r.blueprint === blueprint && !r.queued).length;
+  }
+
+  /** Starts queued runs, oldest first, while their blueprint has a free slot under `max_active`. */
+  private async dequeue(): Promise<void> {
+    if (this.store.suspended() || this.usageHold()) return;
+    const queued = this.store.active().filter((r) => r.queued).sort((a, b) => a.queued!.at - b.queued!.at);
+    for (const run of queued) {
+      const max = run.def.max_active ?? Infinity;
+      if (this.activeOf(run.blueprint) >= max) continue;
+      const first = run.queued!.first;
+      run.queued = null;
+      run.status = "running";
+      run.waitingFor = null;
+      run.stage = first;
+      run.stages[first] = { ...freshStage(), status: "entering" };
+      this.log(run, "dequeued", first, `a ${run.blueprint} slot is free`);
+      this.store.save();
+      await this.exclusive(run.id, () => this.enter(run, first)).catch((e) => this.crash(run, e));
+    }
   }
 
   private checkVars(def: Blueprint, given: Record<string, string>): Record<string, string> {
@@ -249,7 +335,7 @@ export class Engine {
     for (const name of Object.keys(given)) if (!(name in def.vars) && !name.endsWith("_confirmed")) throw new UsageError(`Unknown variable ${name}.`);
     for (const name of def.confirm) {
       if (out[name] && given[`${name}_confirmed`] !== "true") {
-        throw new UsageError(`${name} must be confirmed before this blueprint changes code: check it exists (Linear) and pass ${name}_confirmed=true.`);
+        throw new UsageError(`${name} must be confirmed before this blueprint changes code: check it exists for real and pass ${name}_confirmed=true.`);
       }
       if (!out[name]) throw new UsageError(`${name} is required and must be confirmed.`);
     }
@@ -311,12 +397,15 @@ export class Engine {
     if (target === "done") return this.finish(run, "done", null);
     if (target === "failed") return this.finish(run, "failed", `stage ${from}: ${why}`);
     run.prev = from;
+    const left = run.stages[from]?.agentId;
     run.stage = target;
     run.stages[target] ??= freshStage();
     run.stages[target].status = "entering";
     run.status = "running";
     run.waitingFor = null;
     this.store.save();
+    // The stage is done and the run moved on: its worker (and workspace) go, unless a stage that may still run reuses it.
+    if (left && from !== target && (this.stageDef(run, from).kind ?? "agent") === "agent" && !run.def.stage.some((s) => "agent" in s && s.agent === `reuse:${from}`)) await this.retire(run, from, left);
     await this.enter(run, target);
   }
 
@@ -326,6 +415,7 @@ export class Engine {
     run.error = error;
     run.endedAt = now;
     run.waitingFor = null;
+    run.suspended = null;
     run.pm.pending = null;
     this.log(run, status, run.stage, error);
     this.store.save();
@@ -349,10 +439,16 @@ export class Engine {
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
     const mailTo = this.ports.settings().runsMailTo?.trim();
     if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} ${status}`, body: `${text}\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
-    else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
+    else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x && !this.isPmAgent(run, x)))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
     if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
+    // A failed run gets a PM (a child's failure is judged by its parent's PM, at the parent's stage).
+    if (status === "failed" && !opts.quiet && !run.parent && this.pmMode()) {
+      const stage = run.stage ?? run.def.stage[0].id;
+      void this.exclusive(run.id, () => this.judge(run, "failed", stage, `The run failed at stage "${stage}": ${error ?? "no detail"}.`)).catch((e) => console.error(`blueprints: PM of failed run ${run.id}`, e));
+    }
     // The janitor (after the retro) replaces the blunt archive-everything switch.
     if (!this.ports.post?.().janitor.enabled && this.ports.settings().archiveOnFinish) for (const st of Object.values(run.stages)) if (st.agentId) void this.ports.archive(st.agentId).catch(() => undefined);
+    if (!this.ports.post?.().janitor.enabled) void this.retireWorkers(run).catch((e) => console.error(`blueprints: retiring workers of ${run.id} failed`, e));
     try {
       this.observer.finished(run);
     } catch (error) {
@@ -361,6 +457,7 @@ export class Engine {
   }
 
   private async childFinished(parent: Run, child: Run): Promise<void> {
+    if (parent.status === "suspended") return; // replayed when the parent is resumed
     const id = Object.entries(parent.stages).find(([, st]) => st.childRunId === child.id)?.[0];
     if (!id || parent.stage !== id) return;
     const st = parent.stages[id];
@@ -374,8 +471,8 @@ export class Engine {
 
   // ---- entering a stage ----
 
-  private async enter(run: Run, id: string): Promise<void> {
-    if (run.status === "done" || run.status === "failed" || run.status === "aborted") return;
+  private async enter(run: Run, id: string, opts: { attach?: string } = {}): Promise<void> {
+    if (run.status === "done" || run.status === "failed" || run.status === "aborted" || run.status === "suspended") return;
     const def = this.stageDef(run, id);
     const st = (run.stages[id] ??= freshStage());
     run.stage = id;
@@ -399,7 +496,7 @@ export class Engine {
     this.store.save();
     switch (kind) {
       case "agent":
-        return this.dispatch(run, id, "start");
+        return this.dispatch(run, id, "start", opts.attach ? { attach: opts.attach } : {});
       case "gate":
         return this.openGate(run, id, def as GateStage);
       case "call":
@@ -454,14 +551,31 @@ export class Engine {
   }
 
   /** Stop the run where it is with a reason, ask the human through the Inbox, and wait for `blueprint_resume`. */
-  private pause(run: Run, id: string, reason: string): void {
+  private pause(run: Run, id: string, reason: string, opts: { human?: boolean } = {}): void {
     run.status = "paused";
     run.error = reason;
     run.waitingFor = `a person: ${reason}`;
     this.log(run, "paused", id, reason);
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `paused for a person: ${reason}`, key: `${run.id}:paused:${id}:${run.history.length}` });
-    this.escalate(run, id, reason, "setup");
+    if (opts.human || !this.pmMode()) return this.escalate(run, id, reason, "setup");
+    // A resume decision: the run's PM first, the human when no PM takes it.
+    void this.exclusive(run.id, async () => {
+      if (run.status !== "paused" || run.stage !== id) return;
+      if (!(await this.judge(run, "resume", id, `The run is paused at stage "${id}": ${reason}.`))) this.escalate(run, id, reason, "setup");
+    }).catch((e) => this.crash(run, e));
+  }
+
+  /** The run is moving again: the questions asked of a person while it was stuck or paused no longer matter. */
+  private withdrawEscalations(run: Run, why: string): void {
+    for (const itemId of Object.keys(run.escalations ?? {})) {
+      try {
+        this.ports.withdraw(itemId, why);
+      } catch (error) {
+        console.error(`blueprints: withdrawing ${itemId} failed`, error);
+      }
+    }
+    run.escalations = {};
   }
 
   private escalate(run: Run, id: string, why: string, kind: "stuck" | "setup" = "stuck"): void {
@@ -512,30 +626,273 @@ export class Engine {
       await this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} needs PM`, body: `${this.runFacts(run)}\n${text}`, kind: "run" }).catch((e) => console.error("blueprints: PM mail failed", e));
       return;
     }
-    if (run.pmAgentId && (await this.ports.agentState(run.pmAgentId)) !== "gone") {
-      await this.ports.send(run.pmAgentId, text).catch((e) => console.error("blueprints: PM notice failed", e));
-      return;
+    // Otherwise an on-demand PM for this judgement key; none (no pm role, the per-run limit, a key already judged): the human.
+    const stage = run.pm.pending?.stage ?? run.stage ?? "?";
+    const detail = `Stage "${stage}" is exhausted: ${run.pm.pending?.reason ?? "out of attempts"}.\nLast summary: ${run.stages[stage]?.summary ?? "none"}\nThis is the run's ONE judgement on this stage: if it exhausts again after your extra attempts, the run fails and goes to the human.`;
+    if (await this.judge(run, "exhausted", stage, detail)) return;
+    const call = pmCalls(run)[pmKey(run.id, "exhausted", stage, run.stages[stage]?.runs ?? 0)];
+    const why = call?.state === "unavailable" ? (call.outcome ?? "spawn failed") : call ? "a PM already had this point" : `pm.maxPerRun (${this.pmSettings().maxPerRun}) reached`;
+    run.pm.pending = null;
+    this.pause(run, stage, `exhausted (${run.stages[stage]?.summary ?? "no summary"}) and no PM could be started: ${why}`, { human: true });
+  }
+
+  // ---- the on-demand PM ----
+
+  private pmSettings(): PmSettings {
+    return { ...PM_DEFAULTS, ...(this.ports.settings().pm ?? {}) };
+  }
+
+  /** With runs.notifyMailTo set, judgement requests are mailed there and no PM is spawned. */
+  private pmMode(): boolean {
+    return !this.ports.settings().runsMailTo?.trim();
+  }
+
+  private isPmAgent(run: Run, agentId: string): boolean {
+    return Object.values(run.pm.calls ?? {}).some((c) => c.agentId === agentId);
+  }
+
+  /** The run and call of a PM agent the Factory spawned. */
+  private pmCallOf(agentId: string): { run: Run; call: PmCall } | null {
+    for (const run of this.store.all()) for (const call of Object.values(run.pm.calls ?? {})) if (call.agentId === agentId) return { run, call };
+    return null;
+  }
+
+  /** The run a Factory PM was spawned for (it may act only on it and its child runs), or null for any other agent. */
+  pmRunOf(agentId: string): string | null {
+    return this.pmCallOf(agentId)?.run.id ?? null;
+  }
+
+  /** May this agent answer this Inbox item? Only the live PM of a `pm = true` gate, for that gate's item. */
+  pmMayAnswer(agentId: string, itemId: string): boolean {
+    const found = this.pmCallOf(agentId);
+    if (!found || !pmLive(found.call) || found.call.point !== "gate" || !itemId || found.call.gateItemId !== itemId) return false;
+    const def = found.run.def.stage.find((s) => s.id === found.call.stage);
+    return def?.kind === "gate" && (def as GateStage).pm === true;
+  }
+
+  /**
+   * A judgement point: spawn the PM of its key (`<run>:<point>:<stage>:<entry>`). True when a PM has it (just spawned, or one of
+   * the same key still live); false when the caller must go to the human: a key that already had its PM, the per-run limit, or
+   * no PM could be started.
+   */
+  private async judge(run: Run, point: PmPoint, stage: string, detail: string, extra: { gateItemId?: string } = {}): Promise<boolean> {
+    const key = pmKey(run.id, point, stage, run.stages[stage]?.runs ?? 0);
+    const calls = pmCalls(run);
+    if (calls[key]) return pmLive(calls[key]);
+    const s = this.pmSettings();
+    const count = Object.keys(calls).length;
+    if (count >= s.maxPerRun) {
+      this.log(run, "pm_limit", stage, `${count} PMs already (pm.maxPerRun ${s.maxPerRun}): ${point} goes to the human`);
+      this.store.save();
+      return false;
     }
+    const now = this.ports.now();
+    const call: PmCall = { key, point, stage, entry: run.stages[stage]?.runs ?? 0, agentId: null, startedAt: now, endedAt: null, state: "active", gateItemId: extra.gateItemId ?? null, escalation: null, outcome: null };
+    calls[key] = call;
+    this.store.save();
     const role = this.ports.settings().pmRole;
     try {
+      const prompt = pmPrompt({ run, call, detail, pmExtraMax: run.def.pm_extra_max, timeoutMinutes: s.timeoutMinutes, digest: buildDigest(run, { now, spend: this.ports.spend?.(run.id) ?? null, janitor: [] }), prFacts: await this.prFactLines(run) });
       const { agentId, workspaceId } = await this.ports.spawn({
-        idempotencyKey: `${run.id}:pm:${Object.keys(run.pm.judged).length}`,
+        idempotencyKey: `pm:${key}`,
         role,
-        prompt: text,
-        title: `PM ${run.blueprint} ${run.id}`,
+        prompt,
+        title: pmTitle(run, point),
         workspaceTitle: workspaceTitle(role, run.vars, `${run.blueprint} ${run.id}`),
         cwd: this.ports.settings().defaultCwd,
-        labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm" },
-        env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id },
+        labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm", "paseo.factory.pm.point": point },
+        env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: "pm" },
       });
+      call.agentId = agentId;
       run.pmAgentId = agentId;
       this.registerAgent(run, agentId, role, "pm", workspaceId);
+      this.log(run, "pm_spawned", stage, `${point}: ${agentId} (${key})`);
       this.store.save();
+      return true;
     } catch (error) {
-      // No PM to ask (no pm role, no working directory...): go straight to the human with the reason.
-      const stage = run.pm.pending?.stage ?? run.stage ?? "?";
-      run.pm.pending = null;
-      this.pause(run, stage, `exhausted (${run.stages[stage]?.summary ?? "no summary"}) and no PM could be started: ${(error as Error).message}`);
+      call.state = "unavailable";
+      call.endedAt = this.ports.now();
+      call.outcome = (error as Error).message;
+      this.log(run, "pm_unavailable", stage, `${point}: ${clip((error as Error).message, 300)}`);
+      this.store.save();
+      return false;
+    }
+  }
+
+  private async prFactLines(run: Run): Promise<string[]> {
+    const out: string[] = [];
+    for (const url of this.prUrls(run, undefined).slice(0, 10)) {
+      try {
+        const f = await this.ports.prFacts(url);
+        out.push(`- ${url}: ${f.state}${f.draft ? " (draft)" : ""}, head ${f.head.slice(0, 12)}, CI ${f.ci}, mergeable ${f.mergeable === null ? "unknown" : f.mergeable}, review ${f.review || "none"}`);
+      } catch (error) {
+        out.push(`- ${url}: facts unavailable (${(error as Error).message})`);
+      }
+    }
+    return out;
+  }
+
+  /** Is the point the PM was spawned for still waiting for a decision? */
+  private pointOpen(run: Run, call: PmCall): boolean {
+    switch (call.point) {
+      case "exhausted":
+        return run.status === "waiting" && run.pm.pending?.stage === call.stage;
+      case "resume":
+        return run.status === "paused" && run.stage === call.stage;
+      case "failed":
+        return run.status === "failed" && call.state !== "done";
+      case "gate":
+        return false; // the gate is in the Inbox for the human all along
+    }
+  }
+
+  /** The PM did not settle its point: ask the human as the engine did before PMs. */
+  private pmToHuman(run: Run, call: PmCall, why: string): void {
+    this.log(run, "pm_to_human", call.stage, `${call.point}: ${why}`);
+    if (call.point === "resume") this.escalate(run, call.stage, `${run.error ?? "paused"}; the PM: ${why}`, "setup");
+    else if (call.point === "exhausted") this.escalate(run, call.stage, `${run.pm.pending?.reason ?? "exhausted"}; the PM: ${why}`);
+    else if (call.point === "failed") this.escalate(run, call.stage, `the run failed (${run.error ?? "no detail"}); the PM: ${why}`);
+    this.store.save();
+  }
+
+  /** The PM's call is over: archive it (and its workspace); a point it left open goes to the human. */
+  private async endPm(run: Run, call: PmCall, state: PmCall["state"], why: string): Promise<void> {
+    if (call.endedAt !== null) return;
+    const handedOver = call.state === "handover";
+    call.state = state;
+    call.endedAt = this.ports.now();
+    call.outcome ??= why;
+    call.escalation = null;
+    this.log(run, "pm_ended", call.stage, `${call.point} ${call.agentId ?? "?"}: ${state} (${clip(why, 200)})`);
+    this.store.save();
+    if (call.agentId) {
+      if ((await this.ports.agentState(call.agentId).catch(() => "gone" as const)) !== "gone") await this.ports.archive(call.agentId).catch((e) => console.error(`blueprints: archiving PM ${call.agentId} failed`, e));
+      await this.archiveWorkspaceOf(run, call.agentId);
+    }
+    if (!handedOver && this.pointOpen(run, call)) this.pmToHuman(run, call, why);
+    this.store.save();
+  }
+
+  /** A PM's turn ended: it is archived, unless it waits for the answer to its escalation. Over-budget spend is flagged. */
+  pmTurnEnded(agentId: string): Promise<void> {
+    const found = this.pmCallOf(agentId);
+    if (!found || found.call.endedAt !== null) return Promise.resolve();
+    const { run, call } = found;
+    return this.exclusive(run.id, async () => {
+      if (call.endedAt !== null) return;
+      const cost = this.ports.spendOfAgent?.(agentId);
+      const max = this.pmSettings().maxUsd;
+      if (cost !== undefined && max > 0 && cost > max) this.log(run, "pm_over_budget", call.stage, `$${cost.toFixed(2)} > $${max.toFixed(2)} (${call.key})`);
+      if (call.state === "escalated") {
+        this.log(run, "pm_waiting", call.stage, `waiting for ${call.escalation?.target ?? "an answer"}`);
+        this.store.save();
+        return;
+      }
+      await this.endPm(run, call, call.state === "active" ? "done" : call.state, call.state === "active" ? "turn ended without blueprint_pm_done" : (call.outcome ?? "done"));
+    }).catch((e) => console.error(`blueprints: PM turn of ${agentId}`, e));
+  }
+
+  private requirePm(callerId: string, runId: string): { run: Run; call: PmCall } {
+    const found = this.pmCallOf(callerId);
+    if (!found || found.run.id !== runId || !pmLive(found.call)) throw new UsageError(`You are not the live PM of run ${runId}.`);
+    return found;
+  }
+
+  /** Tell the run's waiting worker, if there is one, what the PM is doing; it is marked waiting (no nudge, no attempt). */
+  private async tellWorker(run: Run, text: string): Promise<void> {
+    const id = run.stage;
+    const st = id ? run.stages[id] : undefined;
+    if (!id || !st?.agentId || (st.status !== "running" && st.status !== "waiting")) return;
+    if ((await this.ports.agentState(st.agentId).catch(() => "gone" as const)) === "gone") return;
+    st.workerWaitSince ??= this.ports.now();
+    run.waitingFor = clip(text, 300);
+    this.log(run, "worker_told", id, clip(text, 200));
+    this.store.save();
+    await this.ports.send(st.agentId, `Factory: ${text}. Wait for it; no attempt is used meanwhile.`).catch((e) => console.error(`blueprints: telling the worker of ${run.id} failed`, e));
+  }
+
+  /** blueprint_pm_escalate: step 1 to the escalation target, step 2 (or no target) to the human through a blocking inbox_ask. */
+  async pmEscalate(callerId: string, runId: string, input: { question: string; bestGuess: string; checked: string }): Promise<{ target: string; step: 1 | 2; how: string; wait_minutes: number | null }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      if (call.escalation?.step === 2) throw new UsageError("Your question is already with the human: wait for the Inbox answer.");
+      let step: 1 | 2 = call.escalation ? 2 : 1;
+      let target = step === 1 ? (this.ports.escalationTarget?.() ?? "").trim() : "";
+      if (!target) {
+        step = 2;
+        target = "human";
+      }
+      const wait = this.pmSettings().escalateTimeoutMinutes;
+      call.escalation = { step, target, at: this.ports.now(), question: clip(input.question, 2000) };
+      call.state = "escalated";
+      this.log(run, "pm_escalated", call.stage, `step ${step} to ${target}: ${clip(input.question, 200)} (best guess: ${clip(input.bestGuess, 120)})`);
+      this.store.save();
+      await this.tellWorker(run, step === 1 ? `the run's PM asked ${target} about: ${clip(input.question, 150)}; waiting up to ${wait} min` : `the run's PM asked the human about: ${clip(input.question, 150)}`);
+      return { target, step, how: escalationHow({ run, call, target, step, question: input.question, bestGuess: input.bestGuess, checked: input.checked, waitMinutes: wait }), wait_minutes: step === 1 ? wait : null };
+    });
+  }
+
+  /** blueprint_pm_answer: the answer the PM got to its escalation, with who gave it. */
+  async pmAnswer(callerId: string, runId: string, input: { answer: string; by: string }): Promise<{ ok: true }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      if (!call.escalation) throw new UsageError("You have no escalation waiting for an answer.");
+      this.log(run, "pm_answer", call.stage, `${clip(input.by, 80)} (step ${call.escalation.step}): ${clip(input.answer, 300)}`);
+      call.escalation = null;
+      call.state = "active";
+      call.startedAt = this.ports.now(); // a fresh pm.timeoutMinutes to act on the answer
+      this.store.save();
+      return { ok: true as const };
+    });
+  }
+
+  /** blueprint_pm_done: the PM's decision (or its handover to the human); it is archived when its turn ends. */
+  async pmDone(callerId: string, runId: string, input: { summary: string; handover?: boolean }): Promise<{ ok: true; archived_at_turn_end: true }> {
+    const { run, call } = this.requirePm(callerId, runId);
+    return this.exclusive(run.id, async () => {
+      call.escalation = null;
+      call.state = input.handover ? "handover" : "done";
+      call.outcome = clip(input.summary, 1000);
+      this.log(run, input.handover ? "pm_handover" : "pm_done", call.stage, `${call.point}: ${clip(input.summary, 300)}`);
+      if (input.handover && this.pointOpen(run, { ...call, state: "active" })) this.pmToHuman(run, call, `handed over: ${clip(input.summary, 300)}`);
+      this.store.save();
+      return { ok: true as const, archived_at_turn_end: true as const };
+    });
+  }
+
+  /** Timeouts of the PMs: a turn past pm.timeoutMinutes, an escalation past pm.escalateTimeoutMinutes, a PM that is gone. */
+  private async pmTick(now: number): Promise<void> {
+    const s = this.pmSettings();
+    for (const run of this.store.all()) {
+      for (const call of Object.values(run.pm.calls ?? {})) {
+        if (call.endedAt !== null || call.state === "unavailable") continue;
+        try {
+          await this.exclusive(run.id, async () => {
+            if (call.endedAt !== null) return;
+            const state = call.agentId ? await this.ports.agentState(call.agentId).catch(() => "gone" as const) : "gone";
+            // Decided, and its turn is over (a turn_ended that a restart lost): archive it now.
+            if (call.state === "done" || call.state === "handover") return state === "running" ? undefined : this.endPm(run, call, call.state, call.outcome ?? call.state);
+            if (state === "gone") return this.endPm(run, call, "gone", "the PM agent is gone");
+            if (call.state === "active" && now - call.startedAt >= s.timeoutMinutes * 60_000) {
+              this.log(run, "pm_timeout", call.stage, `${call.point}: no decision in ${s.timeoutMinutes} min`);
+              return this.endPm(run, call, "timeout", `no decision in ${s.timeoutMinutes} min`);
+            }
+            const esc = call.escalation;
+            if (call.state === "escalated" && esc?.step === 1 && now - esc.at >= s.escalateTimeoutMinutes * 60_000) {
+              this.log(run, "pm_escalation_timeout", call.stage, `${esc.target} did not answer in ${s.escalateTimeoutMinutes} min: the human is next`);
+              call.escalation = { ...esc, step: 2, target: "human", at: now };
+              this.store.save();
+              await this.tellWorker(run, `the run's PM got no answer from ${esc.target}; it asks the human now about: ${clip(esc.question, 150)}`);
+              if (call.agentId)
+                await this.ports
+                  .send(call.agentId, `Factory: ${esc.target} did not answer in ${s.escalateTimeoutMinutes} min. ${escalationHow({ run, call, target: "human", step: 2, question: esc.question, bestGuess: "your best guess", checked: "what you checked", waitMinutes: 0 })}`)
+                  .catch((e) => console.error(`blueprints: PM ${call.agentId} not told`, e));
+            }
+          });
+        } catch (error) {
+          console.error(`blueprints: PM tick of ${run.id} failed`, error);
+        }
+      }
     }
   }
 
@@ -555,6 +912,7 @@ export class Engine {
       run.pm.pending = null;
       run.status = "running";
       run.waitingFor = null;
+      this.withdrawEscalations(run, "PM judged the stage");
       const st = run.stages[stage];
       if (input.to) {
         const target = (run.stages[input.to] ??= freshStage());
@@ -575,18 +933,123 @@ export class Engine {
     });
   }
 
-  /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
-  async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
-    const run = this.require(runId);
-    return this.exclusive(run.id, () => this.doResume(run, input));
+  // ---- suspending ----
+
+  /** Wake the pod of a worker (best effort: the prompt that follows wakes it anyway). */
+  private async wakePod(run: Run, agentId: string): Promise<void> {
+    const workspaceId = run.agents?.[agentId]?.workspaceId;
+    if (!workspaceId || !this.ports.wakeWorkspace) return;
+    await this.ports.wakeWorkspace(workspaceId).catch((e) => console.error(`blueprints: waking ${workspaceId} failed`, e));
   }
 
-  private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string }): Promise<Run> {
+  /**
+   * Hold a run: no worker is spawned or prompted, no stage is retried, no attempt is used, and open gates (Inbox items) stay as they
+   * are. The pod of the stage's worker is suspended (volume kept) and the worker agent is kept, not archived.
+   */
+  async suspend(runId: string, input: { reason: string; by: string; force?: boolean; usageLimit?: UsageLimitHold }): Promise<Run> {
+    const run = this.require(runId);
+    return this.exclusive(run.id, () => this.doSuspend(run, input));
+  }
+
+  private async doSuspend(run: Run, input: { reason: string; by: string; force?: boolean; usageLimit?: UsageLimitHold }): Promise<Run> {
+    if (run.status === "done" || run.status === "failed" || run.status === "aborted") throw new UsageError(`Run ${run.id} is already ${run.status}.`);
+    if (run.status === "suspended") return run;
+    const now = this.ports.now();
+    const pods: string[] = [];
+    run.suspended = { reason: input.reason, at: now, by: input.by, prevStatus: run.status, pods, ...(input.usageLimit ? { usageLimit: input.usageLimit } : {}) };
+    run.status = "suspended";
+    // The Warden would prompt a quiet worker: its watch ends here and the stage registers a new one when it is woken.
+    for (const st of Object.values(run.stages)) {
+      if (st.wardenTask) {
+        this.ports.wardenDone(st.wardenTask, "run suspended");
+        st.wardenTask = null;
+      }
+    }
+    this.log(run, "suspended", run.stage, `${input.reason} (by ${input.by})`);
+    this.store.save();
+    const st = run.stage ? run.stages[run.stage] : undefined;
+    const def = run.stage ? this.stageDef(run, run.stage) : undefined;
+    const workspaceId = st?.agentId ? run.agents?.[st.agentId]?.workspaceId : null;
+    if (st?.status === "running" && (def?.kind ?? "agent") === "agent" && st.agentId) {
+      if (!workspaceId) pods.push(`worker ${st.agentId}: local, not prompted any more`);
+      else if (!this.ports.suspendWorkspace) pods.push(`worker ${st.agentId}: pod ${workspaceId} not suspended (no Kubernetes Runtime handle)`);
+      else {
+        const out = await this.ports.suspendWorkspace(workspaceId, !!input.force).catch((e: Error) => ({ ok: false, message: e.message }));
+        pods.push(`worker ${st.agentId}: pod ${workspaceId} ${out.ok ? "suspended" : `not suspended (${out.message ?? "refused"})`}`);
+      }
+      this.store.save();
+    }
+    return run;
+  }
+
+  /** Suspend the whole Factory: the state survives a reload, runs started later are refused, and every live run is suspended. */
+  async suspendAll(input: { reason: string; by: string; force?: boolean }): Promise<Run[]> {
+    if (!this.store.suspended()) this.store.setSuspended({ reason: input.reason, at: this.ports.now(), by: input.by });
+    const out: Run[] = [];
+    for (const run of this.store.all().filter((r) => r.status === "running" || r.status === "waiting" || r.status === "paused")) {
+      out.push(await this.suspend(run.id, input).catch((e) => {
+        console.error(`blueprints: suspending ${run.id} failed`, e);
+        return run;
+      }));
+    }
+    return out;
+  }
+
+  /** Continue a suspended run at the same stage and attempt count. */
+  async unsuspend(runId: string, input: { note?: string } = {}): Promise<Run> {
+    const run = this.require(runId);
+    return this.exclusive(run.id, () => this.doUnsuspend(run, input));
+  }
+
+  private async doUnsuspend(run: Run, input: { note?: string }): Promise<Run> {
+    if (run.status !== "suspended") throw new UsageError(`Run ${run.id} is ${run.status}, not suspended.`);
+    const usage = !!run.suspended?.usageLimit;
+    run.status = run.suspended?.prevStatus ?? "running";
+    run.suspended = null;
+    const id = run.stage;
+    const st = id ? run.stages[id] : undefined;
+    if (input.note && st) st.notes.push(input.note);
+    if (usage && st) st.wakeReason = "usage_limit";
+    this.log(run, "unsuspended", id, input.note ?? null);
+    this.store.save();
+    if (id && st) await this.replay(run, id, st, { resumed: true });
+    return run;
+  }
+
+  /** Resume every suspended run, at most `concurrency` at a time; the Factory-wide hold is lifted first. `done` settles when all are going. */
+  resumeAllSuspended(input: { concurrency?: number; note?: string } = {}): { runs: string[]; done: Promise<void> } {
+    this.store.setSuspended(null);
+    const queue = this.store.all().filter((r) => r.status === "suspended").map((r) => r.id);
+    const runs = [...queue];
+    const width = Math.max(1, Math.min(input.concurrency ?? 2, queue.length || 1));
+    const worker = async () => {
+      for (let id = queue.shift(); id; id = queue.shift()) await this.unsuspend(id, { note: input.note }).catch((e) => console.error(`blueprints: resuming ${id} failed`, e));
+    };
+    return { runs, done: Promise.all(Array.from({ length: width }, worker)).then(() => undefined) };
+  }
+
+  /** After a person decided: continue a failed, paused or PM-waiting run at a stage with fresh attempts. */
+  async resume(runId: string, input: { stage?: string; extraAttempts?: number; note?: string; attachAgent?: string }): Promise<Run> {
+    const run = this.require(runId);
+    return this.exclusive(run.id, () => (run.status === "suspended" ? this.doUnsuspend(run, { note: input.note }) : this.doResume(run, input)));
+  }
+
+  private async doResume(run: Run, input: { stage?: string; extraAttempts?: number; note?: string; attachAgent?: string }): Promise<Run> {
     {
       if (run.status === "done" || run.status === "aborted") throw new UsageError(`Run ${run.id} is ${run.status}; start a new one.`);
       const stage = input.stage ?? run.pm.pending?.stage ?? run.stage;
       if (!stage) throw new UsageError("Name the stage to resume at.");
-      this.stageDef(run, stage);
+      const def = this.stageDef(run, stage);
+      const attach = input.attachAgent;
+      if (attach) {
+        if ((def.kind ?? "agent") !== "agent") throw new UsageError(`Stage ${stage} is not an agent stage: there is no worker to attach.`);
+        const known = run.agents?.[attach];
+        if (!known) throw new UsageError(`Agent ${attach} is not a worker of run ${run.id}.`);
+        if (known.role !== (def as AgentStage).role) throw new UsageError(`Agent ${attach} runs as ${known.role}, stage ${stage} needs ${(def as AgentStage).role}.`);
+        if ((await this.ports.agentState(attach)) === "gone") throw new UsageError(`Agent ${attach} is gone; resume without attach_agent to get a new worker.`);
+        const busy = this.store.active().find((r) => Object.entries(r.stages).some(([sid, other]) => (r.id !== run.id || sid !== stage) && other.agentId === attach && (other.status === "running" || other.status === "entering")));
+        if (busy) throw new UsageError(`Agent ${attach} is the worker of another running stage (run ${busy.id}).`);
+      }
       const st = (run.stages[stage] ??= freshStage());
       st.extra += Math.max(0, input.extraAttempts ?? 0);
       if (input.note) st.notes.push(input.note);
@@ -595,11 +1058,12 @@ export class Engine {
       run.endedAt = null;
       run.pm.pending = null;
       run.waitingFor = null;
+      this.withdrawEscalations(run, "run resumed");
       this.log(run, "resumed", stage, input.note ?? null);
       st.status = "entering";
       st.attempts = 0;
       this.store.save();
-      await this.enter(run, stage);
+      await this.enter(run, stage, attach ? { attach } : {});
       return run;
     }
   }
@@ -615,9 +1079,13 @@ export class Engine {
 
   // ---- agent stages ----
 
-  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry", facts: string): string {
+  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry" | "wake", facts: string): string {
     const parts: string[] = [];
-    if (why === "nudge") {
+    if (why === "wake" && st.wakeReason === "usage_limit") {
+      parts.push(`Factory: the provider usage limit was lifted and run ${run.id} is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
+    } else if (why === "wake") {
+      parts.push(`Factory: run ${run.id} was suspended and is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
+    } else if (why === "nudge") {
       parts.push(`Factory: you ended your turn without giving a verdict for stage "${id}" of run ${run.id}. Finish the work if needed, then call blueprint_verdict. Do not end your turn without it.`);
     } else {
       parts.push(this.r(run, def.prompt));
@@ -659,9 +1127,152 @@ export class Engine {
     return [...out];
   }
 
-  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry", opts: { free?: boolean; fresh?: boolean } = {}): Promise<void> {
+  /**
+   * Archive the worker a stage no longer uses, unless another stage still holds it. One that is mid-turn is archived when
+   * its turn ends (`turnEnded`), not cut off.
+   */
+  private async retire(run: Run, stage: string, agentId: string): Promise<void> {
+    if (Object.entries(run.stages).some(([sid, other]) => sid !== stage && other.agentId === agentId && (other.status === "running" || other.status === "entering" || other.status === "waiting"))) return;
+    if (run.pmAgentId === agentId) return;
+    const state = await this.ports.agentState(agentId).catch(() => "gone" as const);
+    if (state === "running") {
+      const list = (run.retiring ??= []);
+      if (!list.includes(agentId)) list.push(agentId);
+      this.log(run, "retiring", stage, `${agentId} is mid-turn: archived when its turn ends`);
+      this.store.save();
+      return;
+    }
+    if (state !== "gone") await this.ports.archive(agentId).catch((e) => console.error(`blueprints: archiving ${agentId} failed`, e));
+    await this.archiveWorkspaceOf(run, agentId);
+  }
+
+  /**
+   * Archive the workspace (pod, volume, Sandbox object) of a worker that was just archived, or the Kubernetes quota fills up with
+   * suspended pods. Dirty or unpushed work does not keep it (human rule 2026-10-28: "force the archive of workspace after the
+   * deletion of the agent, even if there is still code"); the history records `git status --short` when the pod answers in 5 s.
+   * Only a workspace that is still in use is left (the run's shared workspace while the run goes, an agent of a live stage or
+   * another live agent in it): the orphan sweep archives it once it is not.
+   */
+  private async archiveWorkspaceOf(run: Run, agentId: string): Promise<void> {
+    const ws = run.agents?.[agentId]?.workspaceId;
+    if (!ws || run.agents?.[agentId]?.workspaceArchived || !this.ports.archiveWorkspace) return;
+    try {
+      if (run.sharedWorkspaceId === ws && run.endedAt === null) return;
+      const inUse = Object.entries(run.agents ?? {}).some(
+        ([id, a]) => id !== agentId && a.workspaceId === ws && (run.pmAgentId === id || Object.values(run.stages).some((st) => st.agentId === id && (st.status === "running" || st.status === "entering" || st.status === "waiting"))),
+      );
+      if (inUse) return;
+      if (this.ports.liveAgentsIn) {
+        const live = (await this.ports.liveAgentsIn(ws))?.filter((id) => id !== agentId);
+        if (!live || live.length) return;
+      }
+      const trace = await this.traceOf(ws);
+      await this.ports.archiveWorkspace(ws);
+      for (const a of Object.values(run.agents ?? {})) if (a.workspaceId === ws) a.workspaceArchived = true;
+      this.log(run, "workspace_archived", null, `${ws} of ${agentId} (worktree: ${trace})`);
+    } catch (error) {
+      console.error(`blueprints: archiving workspace ${ws} of ${agentId} failed (the orphan sweep retries)`, error);
+    }
+  }
+
+  /** `git status --short` for the history: 5 s at most, whatever the port does. */
+  private async traceOf(ws: string): Promise<string> {
+    if (!this.ports.trace) return "not traced";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([this.ports.trace(ws), new Promise<string>((resolve) => (timer = setTimeout(() => resolve("no answer (5 s)"), 5_000)))]);
+    } catch {
+      return "no answer";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The run ended: its workers (not the PM) and their workspaces are of no use any more. The janitor does this after the retro when it is on. */
+  private async retireWorkers(run: Run): Promise<void> {
+    for (const id of Object.keys(run.agents ?? {})) {
+      if (id === run.pmAgentId) continue;
+      const state = await this.ports.agentState(id).catch(() => "gone" as const);
+      if (state === "running") {
+        const list = (run.retiring ??= []);
+        if (!list.includes(id)) list.push(id);
+        this.log(run, "retiring", null, `${id} is mid-turn: archived when its turn ends`);
+        this.store.save();
+        continue;
+      }
+      if (state !== "gone") await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
+      await this.archiveWorkspaceOf(run, id);
+    }
+  }
+
+  /**
+   * The orphan sweep (every 5 minutes, human request 2026-10-28): archive the Factory's workers that no stage of an active
+   * run refers to any more (replaced, superseded, or of a run that ended), and their workspaces, dirty or not. The PM, every
+   * active stage's current agent (a later stage may reuse it), a mid-turn worker and a retro still writing are left alone.
+   * Each archive is logged in the run's history. Returns what it archived.
+   */
+  async sweepOrphans(): Promise<string[]> {
+    const done: string[] = [];
+    for (const run of this.store.all()) {
+      const current = new Set<string>();
+      if (run.pmAgentId) current.add(run.pmAgentId);
+      if (run.endedAt === null) for (const st of Object.values(run.stages)) if (st.agentId) current.add(st.agentId);
+      if (run.post?.phase === "retro" && run.post.retro?.agentId) current.add(run.post.retro.agentId);
+      for (const [id, a] of Object.entries(run.agents ?? {})) {
+        if (current.has(id) || a.workspaceArchived || run.retiring?.includes(id)) continue;
+        const state = await this.ports.agentState(id).catch(() => "gone" as const);
+        if (state === "running") continue;
+        if (state !== "gone") {
+          try {
+            await this.ports.archive(id);
+          } catch (error) {
+            console.error(`blueprints: orphan sweep could not archive ${id}`, error);
+            continue;
+          }
+          this.log(run, "orphan_archived", a.stage, `${id} (${a.role}): no stage of the run refers to it`);
+          done.push(id);
+        }
+        if (!a.workspaceId) continue;
+        await this.archiveWorkspaceOf(run, id);
+        if (run.agents?.[id]?.workspaceArchived) done.push(a.workspaceId);
+      }
+      this.store.save();
+    }
+    return done;
+  }
+
+  /** Archive the retired workers of `agentId`'s run whose turn is over (`agentId` only, or all of them when absent). */
+  private async flushRetired(agentId?: string): Promise<void> {
+    for (const run of this.store.all()) {
+      if (!run.retiring?.length) continue;
+      for (const id of [...run.retiring]) {
+        if (agentId && id !== agentId) continue;
+        if (!agentId && (await this.ports.agentState(id).catch(() => "gone" as const)) === "running") continue;
+        run.retiring = run.retiring.filter((x) => x !== id);
+        this.store.save();
+        await this.ports.archive(id).catch((e) => console.error(`blueprints: archiving ${id} failed`, e));
+        await this.archiveWorkspaceOf(run, id);
+      }
+    }
+  }
+
+  /**
+   * Is this a worker the Factory spawned that no live stage of its run refers to any more? Such an agent does not count
+   * against its role's `maxConcurrent`. An agent the Factory does not know is never superseded.
+   */
+  isSuperseded(agentId: string): boolean {
+    const run = this.store.all().find((r) => r.agents?.[agentId]);
+    if (!run) return false;
+    if (run.endedAt !== null) return true;
+    if (run.pmAgentId === agentId) return false;
+    return !Object.values(run.stages).some((st) => st.agentId === agentId && (st.status === "running" || st.status === "entering" || st.status === "waiting"));
+  }
+
+  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } = {}): Promise<void> {
+    if (run.status === "suspended") return;
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
+    if (why === "start" || why === "retry") st.workerWaitSince = null;
     if (!opts.free) st.attempts += 1;
     if (st.attempts > def.max_attempts + st.extra) return this.exhausted(run, id, `${st.attempts - 1} attempts used (max_attempts ${def.max_attempts})`);
     st.status = "entering";
@@ -669,21 +1280,35 @@ export class Engine {
     this.store.save();
 
     const facts = await this.prFactsBlock(run, def);
-    const prompt = this.composePrompt(run, id, def, st, why, facts);
+    let prompt = this.composePrompt(run, id, def, st, why, facts);
+    if (why === "wake") st.wakeReason = null;
     const reuse = /^reuse:(.+)$/.exec(def.agent)?.[1];
     // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
     let target: string | null = why === "start" ? null : st.agentId;
     if (reuse) target = run.stages[reuse]?.agentId ?? null;
     if (opts.fresh) target = null; // an infrastructure flake: the worker's pod is not to be trusted
+    if (opts.attach) target = opts.attach; // the Assistant chose a live worker for this stage
     if (target && (await this.ports.agentState(target)) === "gone") target = null;
+    if (why === "wake") {
+      // Wake the pod ahead of the prompt; a worker that is gone gets a fresh start with the original prompt instead.
+      if (target) await this.wakePod(run, target);
+      else prompt = this.composePrompt(run, id, def, st, "retry", facts);
+    }
 
     try {
       if (target) {
+        const previous = st.agentId;
         st.agentId = target;
+        if (opts.attach) {
+          this.registerAgent(run, target, def.role, id, run.agents?.[target]?.workspaceId);
+          this.log(run, "attached", id, `${target}${previous && previous !== target ? ` (instead of ${previous})` : ""}`);
+          if (previous && previous !== target) await this.retire(run, id, previous);
+        }
         await this.ports.send(target, prompt);
         this.log(run, "sent", id, `to ${target}${reuse ? ` (reuse of ${reuse})` : ""}`);
       } else {
-        const replaced = !!(reuse ? run.stages[reuse]?.agentId : st.agentId);
+        const old = reuse ? run.stages[reuse]?.agentId : st.agentId;
+        const replaced = !!old;
         const share = !!this.ports.settings().shareWorkspace && def.workspace === "run";
         const spawned = await this.ports.spawn({
           idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}`,
@@ -706,11 +1331,53 @@ export class Engine {
         this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
         if (share && spawned.workspaceId) run.sharedWorkspaceId = spawned.workspaceId;
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
+        // The worker this one replaces is of no use any more (and counts against the role's limit while it lives).
+        if (old && old !== spawned.agentId && (!reuse || opts.archiveOld)) await this.retire(run, id, old);
       }
     } catch (error) {
+      // No room in the namespace (quota on pods, sandboxes...), or a daemon too loaded to answer a plugin hook in time: nothing is
+      // wrong with the stage, so no attempt is used and nobody is asked (a busy daemon only up to MAX_BUSY_RETRIES times).
+      const quota = isQuotaError((error as Error).message);
+      const gitTimeout = !quota && isGitTimeout((error as Error).message);
+      if (gitTimeout && (st.quotaRetry?.n ?? 0) + 1 >= MAX_GIT_TIMEOUTS) {
+        if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
+        st.summary = `the daemon's git timed out ${(st.quotaRetry?.n ?? 0) + 1} times in a row starting the worker: ${clip((error as Error).message, 300)}`;
+        st.quotaRetry = null;
+        this.log(run, "git_timeout_pause", id, st.summary);
+        const mailTo = this.ports.post?.().eventsMailTo?.trim();
+        if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)}: git timed out repeatedly at ${id}`, body: `${st.summary}\nThe run is paused; resume it once the daemon's git answers.\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
+        return this.pause(run, id, st.summary);
+      }
+      const busy = !quota && isBusyError((error as Error).message) && (st.quotaRetry?.n ?? 0) < MAX_BUSY_RETRIES;
+      if (quota || busy) {
+        const n = (st.quotaRetry?.n ?? 0) + 1;
+        const wait = quotaBackoffMs(n);
+        if (!opts.free) st.attempts = Math.max(0, st.attempts - 1);
+        st.quotaRetry = { n, at: this.ports.now() + wait, why, opts: { free: opts.free, fresh: opts.fresh, archiveOld: opts.archiveOld, attach: opts.attach } };
+        st.summary = `${quota ? "waiting for cluster quota" : "the daemon is busy"} (retry ${n} in ${Math.round(wait / 60_000)} min)`;
+        this.log(run, quota ? "quota_wait" : "busy_wait", id, `${clip((error as Error).message, 300)}; no attempt used, retry ${n} in ${Math.round(wait / 60_000)} min`);
+        this.store.save();
+        return;
+      }
       const flake = flakeReason((error as Error).message);
+      // Two pod starts in a row that failed: alert instead of spending more retries (human decision d82771ac).
+      if (flake && POD_START_FLAKES.has(flake)) {
+        st.podStartFailures = (st.podStartFailures ?? 0) + 1;
+        if (st.podStartFailures >= MAX_POD_START_FAILURES) {
+          const message = (error as Error).message;
+          st.attempts = Math.max(0, st.attempts - 1);
+          st.summary = `the worker's pod failed to start ${st.podStartFailures} times in a row (${flake}): ${clip(message, 300)}`;
+          this.log(run, "pod_start_failed", id, st.summary);
+          st.podStartFailures = 0;
+          const mailTo = this.ports.post?.().eventsMailTo?.trim();
+          if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)}: pod start failed twice at ${id}`, body: `${st.summary}\nThe run is paused; resume it once the cluster is healthy.\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
+          return this.pause(run, id, st.summary);
+        }
+      }
       if (flake && this.takeFlake(run, id, flake, (error as Error).message)) {
-        return this.dispatch(run, id, "retry", { free: true, fresh: true });
+        // A nudge or wake-up that never reached a worker whose session is gone costs nothing: the fresh worker is the same attempt.
+        if (flake === SESSION_GONE && !opts.free && (why === "nudge" || why === "wake")) st.attempts = Math.max(0, st.attempts - 1);
+        return this.dispatch(run, id, "retry", { free: true, fresh: true, archiveOld: flake === SESSION_GONE });
       }
       // A worker that cannot even be started is a setup problem (working directory, role, provider), not a failed
       // attempt: retrying burns the caps in milliseconds. Pause the run with the reason and tell a person.
@@ -721,6 +1388,8 @@ export class Engine {
       return this.pause(run, id, st.summary);
     }
     st.status = "running";
+    st.quotaRetry = null;
+    st.podStartFailures = 0;
     if (st.wardenTask) this.ports.wardenDone(st.wardenTask, "redispatched");
     st.wardenTask = st.agentId ? this.ports.wardenRegister({ agentId: st.agentId, task: `blueprint ${run.blueprint} run ${run.id} stage ${id}: call blueprint_verdict when done` }) : null;
     this.store.save();
@@ -742,12 +1411,22 @@ export class Engine {
   }
 
   /** A turn failed or the worker vanished. Infrastructure failures are retried for free (see takeFlake), then it is an attempt. */
-  private async agentFailed(run: Run, id: string, detail: string): Promise<void> {
+  private async agentFailed(run: Run, id: string, detail: string, failure?: ProviderFailure): Promise<void> {
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
+    const ul = failure && this.usageLimits?.enabled() ? this.usageLimits : null;
+    const c = ul ? ul.classify(failure!) : null;
+    if (ul && c?.kind === "usage_limit") return this.holdForUsageLimit(run, id, failure!, c);
     const reason = flakeReason(detail);
+    if (ul && c?.kind === "other" && c.rule === null && !reason && !isBusyError(detail)) {
+      try {
+        ul.unknown({ runId: run.id, agentId: st.agentId, failure: failure! });
+      } catch (error) {
+        console.error("blueprints: usage-limit alert failed", error);
+      }
+    }
     if (reason) {
-      if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true });
+      if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true, archiveOld: reason === SESSION_GONE });
     } else if (st.flakes < def.flake_retries) {
       // Legacy: a stage that sets flake_retries retries any failed turn (provider errors) for free.
       st.flakes += 1;
@@ -757,8 +1436,34 @@ export class Engine {
     return this.dispatch(run, id, "nudge");
   }
 
+  /**
+   * A provider usage limit: the run is held ("paused: quota") at the same stage and attempt count; no attempt, flake, nudge or
+   * Inbox item. The controller is told outside the run's chain (it may hold other runs, or the whole Factory).
+   */
+  private async holdForUsageLimit(run: Run, id: string, failure: ProviderFailure, c: Extract<Classification, { kind: "usage_limit" }>): Promise<void> {
+    const ul = this.usageLimits!;
+    const st = run.stages[id];
+    const global = ul.globalHold();
+    const hold: UsageLimitHold = { source: global ? "global" : "own", rule: c.rule, evidence: c.evidence, provider: failure.provider ?? null, agentId: st.agentId, resetAt: c.resetAt, resumeAt: global ? null : ul.resumeAtFor(c.resetAt) };
+    this.log(run, "usage_limit", id, `${c.rule}${c.resetAt ? `, resets ${new Date(c.resetAt).toISOString()}` : ""}: ${c.evidence}`);
+    await this.doSuspend(run, { reason: `paused: quota (${c.rule})`, by: "factory", usageLimit: hold });
+    const event = { runId: run.id, agentId: st.agentId, provider: failure.provider ?? null, rule: c.rule, evidence: c.evidence, resetAt: c.resetAt };
+    setImmediate(() => {
+      try {
+        ul.matched(event);
+      } catch (error) {
+        console.error("blueprints: usage-limit match failed", error);
+      }
+    });
+  }
+
+  private usageHold(): { reason: string; resumeAt: number | null } | null {
+    return this.usageLimits?.enabled() ? this.usageLimits.globalHold() : null;
+  }
+
   /** The stage's worker ended a turn. A verdict already given makes this a no-op. */
-  turnEnded(agentId: string, outcome: { kind: "completed" | "failed" | "canceled"; message?: string }): Promise<void> {
+  turnEnded(agentId: string, outcome: { kind: "completed" | "failed" | "canceled"; message?: string; code?: string; provider?: string | null }): Promise<void> {
+    if (this.store.all().some((r) => r.retiring?.includes(agentId))) return this.flushRetired(agentId);
     const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === agentId && r.stages[r.stage].status === "running");
     if (!run) return Promise.resolve();
     return this.exclusive(run.id, async () => {
@@ -766,15 +1471,49 @@ export class Engine {
       if (!id || run.stages[id]?.agentId !== agentId || run.stages[id].status !== "running" || run.status !== "running") return;
       const st = run.stages[id];
       if (outcome.kind === "canceled") return; // someone interrupted it on purpose
-      st.lastNudgeAt = this.ports.now();
+      const now = this.ports.now();
+      st.lastNudgeAt = now;
+      if (outcome.kind === "completed" && st.workerWaitSince) {
+        // A worker that declared a wait (blueprint_waiting) ends its turn on purpose and is woken by its events: no nudge, no
+        // attempt. Past the ceiling, a person is asked, as on the tick (decision f1cd49be).
+        if (now - st.workerWaitSince < WORKER_WAIT_CEILING_MS) {
+          this.log(run, "worker_waiting_turn_end", id, run.waitingFor ?? "an outside system");
+          this.store.save();
+          return;
+        }
+        const why = `waited ${Math.round((now - st.workerWaitSince) / 60_000)} min on: ${run.waitingFor ?? "an outside system"}`;
+        st.workerWaitSince = null;
+        this.log(run, "worker_wait_ceiling", id, why);
+        return this.pause(run, id, why);
+      }
       this.log(run, "turn_ended", id, outcome.kind === "failed" ? `failed: ${outcome.message ?? ""}` : "no verdict");
-      if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed");
+      if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed", { message: outcome.message ?? "", code: outcome.code ?? null, provider: outcome.provider ?? null });
       return this.dispatch(run, id, "nudge");
     }).catch((e) => this.crash(run, e));
   }
 
   /** A worker's verdict. The caller must be the stage's current worker. */
+  /**
+   * A worker says its stage is waiting on a person or an outside system (a review, a merge queue) and that it watches for it:
+   * the run shows `waitingFor` and is not "stalled" while it waits. Cleared by the next verdict or transition. Human decision c11d3b3e.
+   */
+  workerWaiting(callerId: string, reason: string): { stage: string } {
+    const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === callerId && r.stages[r.stage].status === "running");
+    if (!run) throw new UsageError("You are not the worker of a running stage.");
+    const text = clip(reason.trim() || "waiting", 300);
+    const st = run.stages[run.stage!];
+    st.workerWaitSince ??= this.ports.now();
+    if (run.waitingFor !== text) {
+      run.waitingFor = text;
+      this.log(run, "worker_waiting", run.stage, text);
+    }
+    this.store.save();
+    return { stage: run.stage! };
+  }
+
   async verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {
+    const held = this.store.all().find((r) => r.status === "suspended" && (!input.run || r.id === input.run) && r.stage && r.stages[r.stage]?.agentId === callerId);
+    if (held) throw new UsageError(`Run ${held.id} is suspended${held.suspended ? ` (${held.suspended.reason})` : ""}: your verdict is not taken until it is resumed. Stop now; you are woken on resume.`);
     const candidates = this.store.active().filter((r) => (!input.run || r.id === input.run) && r.stage && (!input.stage || r.stage === input.stage) && r.stages[r.stage]?.agentId === callerId);
     if (candidates.length === 0) throw new UsageError("You are not the worker of a running stage" + (input.run ? ` of run ${input.run}` : "") + ".");
     const run = candidates[0];
@@ -782,14 +1521,28 @@ export class Engine {
       const id = run.stage!;
       const st = run.stages[id];
       const def = this.stageDef(run, id);
-      if (st.status !== "running" || st.agentId !== callerId) throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      if (st.agentId !== callerId) throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      if (st.status !== "running") {
+        // A stage that was paused or exhausted while its (latest) worker is still alive: that worker finished after all.
+        if (st.status !== "entering" && st.status !== "exhausted") throw new UsageError(`Stage ${id} is not waiting for a verdict (it is ${st.status}).`);
+      }
+      const late = st.status !== "running";
       const allowed = stageVerdicts(def);
       if (!allowed.includes(input.verdict)) throw new UsageError(`Verdict "${input.verdict}" is not one of [${allowed.join(", ")}].`);
       const data = input.data ?? {};
       await this.verifyFacts(run, def as AgentStage, input.verdict, data);
+      if (late) {
+        this.log(run, "late_verdict", id, `accepted from ${callerId}, the latest worker of a stage that was ${st.status}`);
+        this.withdrawEscalations(run, "the stage's worker gave its verdict");
+        run.pm.pending = null;
+        run.status = "running";
+        run.error = null;
+        run.waitingFor = null;
+      }
       st.verdict = input.verdict;
-      st.summary = input.summary ? clip(input.summary, 2000) : null;
+      st.summary = input.summary ? clip(input.summary, 4000) : null;
       st.data = data;
+      st.workerWaitSince = null;
       st.status = "done";
       st.endedAt = this.ports.now();
       if (st.wardenTask) {
@@ -815,12 +1568,13 @@ export class Engine {
     for (const url of toCheck) {
       let f: PrFacts;
       try {
-        f = await this.ports.prFacts(url);
+        f = await this.ports.prFacts(url, { maxAgeMs: 0 });
       } catch (error) {
         throw new UsageError(`Cannot verify ${url} on GitHub (${(error as Error).message}); try again.`);
       }
       if (!f.exists) throw new UsageError(`GitHub has no pull request ${url}.`);
-      if (checks.includes("open") && f.state !== "open") throw new UsageError(`GitHub says ${url} is ${f.state}, not open.`);
+      // "open" guards against a PR closed without merging; a merged one is the goal, not an error (bp-a4ee2a1b could not report done).
+      if (checks.includes("open") && f.state === "closed") throw new UsageError(`GitHub says ${url} is closed without merging, not open.`);
       if (checks.includes("ci_green") && f.ci !== "green") throw new UsageError(`GitHub says CI on ${url} (head ${f.head.slice(0, 12)}) is ${f.ci}, not green. Fix it before reporting "${verdict}".`);
       if (checks.includes("mergeable") && f.mergeable !== true) throw new UsageError(`GitHub says ${url} is not mergeable (${f.mergeable === null ? "unknown" : "conflicts"}).`);
     }
@@ -848,7 +1602,7 @@ export class Engine {
     let facts = "";
     if (def.pr) {
       for (const url of this.r(run, def.pr).split(",").map((s) => s.trim()).filter(Boolean)) {
-        const f = await this.ports.prFacts(url);
+        const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
         heads[url] = f.head;
         facts += `\n- ${url} @ ${f.head.slice(0, 12)}: ${f.state}, CI ${f.ci}`;
       }
@@ -874,6 +1628,10 @@ export class Engine {
     this.log(run, "gate_opened", id, itemId);
     this.store.save();
     this.notify(run, { kind: "waiting", stage: id, reason: `gate: ${clip(this.r(run, def.question), 300)} (inbox ${itemId})`, key: `${run.id}:gate:${itemId}` });
+    if (def.pm && this.pmMode()) {
+      const choices = options.length ? ` Options: ${options.map((o) => `${o.id} (${o.label})`).join(", ")}.` : " It takes a free-text answer.";
+      await this.judge(run, "gate", id, `Gate "${id}" waits for an answer (inbox item ${itemId}): ${clip(this.r(run, def.question), 1000)}.${choices}${context ? `\nContext: ${clip(context, 2000)}` : ""}`, { gateItemId: itemId });
+    }
   }
 
   /** `wait = "merge"`: nothing is asked; `tick` completes the gate when the PRs are merged, or on its timeout. */
@@ -985,7 +1743,17 @@ export class Engine {
     const st = run.stages[id];
     const heads = st.gate!.heads;
     for (const [url, head] of Object.entries(heads)) {
-      const f = await this.ports.prFacts(url);
+      const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
+      if (answer === "merged" && f.state === "open" && f.queued) {
+        // In the merge queue: wait for the merge on GitHub instead of asking "merged?" again (human decision d82771ac).
+        this.log(run, "merge_queued", id, `${url} is in the merge queue: waiting for the merge, no new question`);
+        st.gate = { ...st.gate!, itemId: "", passive: true, queued: true, openedAt: this.ports.now() };
+        st.status = "waiting";
+        run.status = "waiting";
+        run.waitingFor = `merge queue (${url})`;
+        this.store.save();
+        return "refused";
+      }
       if (answer === "merged" && f.state !== "merged") {
         this.log(run, "merge_not_seen", id, `${url} is ${f.state} on GitHub`);
         st.status = "entering";
@@ -1080,6 +1848,18 @@ export class Engine {
 
   private async startChild(run: Run, id: string, def: BlueprintStage): Promise<void> {
     const st = run.stages[id];
+    // A resumed or re-entered stage re-attaches to its live child instead of starting a second one:
+    // the idempotency key counts entries, so a new entry alone would not join it. An ended child is not
+    // re-attached: its outcome already reached the parent when it ended, and re-entering after it means a new run.
+    const live = this.store.all().find((r) => r.parent?.runId === run.id && r.parent.stageId === id && r.status !== "done" && r.status !== "failed" && r.status !== "aborted");
+    if (live) {
+      st.childRunId = live.id;
+      st.status = "waiting";
+      run.waitingFor = `child run ${live.id}`;
+      this.log(run, "child_reattached", id, live.id);
+      this.store.save();
+      return;
+    }
     const vars = Object.fromEntries(Object.entries(def.vars).map(([k, v]) => [k, this.r(run, v)]));
     const confirmed = Object.fromEntries(Object.entries(run.vars).filter(([k]) => k.endsWith("_confirmed")));
     let child: Run;
@@ -1103,8 +1883,25 @@ export class Engine {
     const st = run.stages[id];
     const handler = this.ports.stageKind(def.kind ?? "");
     if (!handler) {
+      // After a restart of the Factory (or of the plugin that provides the kind), the extension registers again a little later:
+      // wait for it instead of failing the run (bp-6a9e18ab failed at wait-pins on "train" during an update).
+      const now = this.ports.now();
+      st.kindWaitSince ??= now;
+      if (now - st.kindWaitSince < KIND_WAIT_MS) {
+        if (st.status !== "entering" || run.waitingFor?.startsWith("extension") !== true) this.log(run, "kind_waiting", id, def.kind ?? "");
+        st.status = "entering";
+        run.status = "running";
+        run.waitingFor = `extension for stage kind "${def.kind}" (not registered yet)`;
+        this.store.save();
+        return;
+      }
+      st.kindWaitSince = null;
       this.log(run, "no_such_kind", id, def.kind ?? "");
-      return this.finish(run, "failed", `stage ${id}: no extension provides the stage kind "${def.kind}"`);
+      return this.finish(run, "failed", `stage ${id}: no extension provides the stage kind "${def.kind}" (waited ${Math.round(KIND_WAIT_MS / 60_000)} min)`);
+    }
+    if (st.kindWaitSince) {
+      st.kindWaitSince = null;
+      if (run.waitingFor?.startsWith("extension for stage kind")) run.waitingFor = null;
     }
     st.status = "running";
     this.store.save();
@@ -1133,35 +1930,45 @@ export class Engine {
 
   /** Replays what a restart interrupted. */
   async resumeAll(): Promise<void> {
+    await this.flushRetired().catch((e) => console.error("blueprints: archiving retired workers failed", e));
     for (const run of this.store.active()) {
       await this.exclusive(run.id, async () => {
         const id = run.stage;
         if (!id) return;
         const st = run.stages[id];
         if (!st) return;
-        // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
-        if (run.pm.pending && !(await this.hasLivePm(run))) {
-          await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
-          return;
-        }
-        if (st.status === "entering") {
-          const def = this.stageDef(run, id);
-          if ((def.kind ?? "agent") === "agent" && st.runs > 0) await this.dispatch(run, id, "retry", { free: true });
-          else await this.enter(run, id);
-        } else if (st.status === "waiting" && st.gate?.itemId) {
-          const gate = this.ports.gate(st.gate.itemId);
-          if (gate && gate.status !== "pending") await this.handleGate(run, st.gate.itemId);
-        } else if (st.status === "waiting" && st.childRunId) {
-          const child = this.store.get(st.childRunId);
-          if (child && (child.status === "done" || child.status === "failed" || child.status === "aborted")) await this.childFinished(run, child);
-        } else if (st.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent") {
-          const state = st.agentId ? await this.ports.agentState(st.agentId) : "gone";
-          if (state === "gone") await this.agentFailed(run, id, "worker gone after restart");
-          else if (state === "idle") await this.dispatch(run, id, "nudge");
-        } else if (st.status === "running") {
-          await this.enter(run, id); // an extension stage or call: run again (idempotent by contract)
-        }
+        await this.replay(run, id, st, {});
       }).catch((e) => this.crash(run, e));
+    }
+  }
+
+  /** Redo the effect of the stage's state: after a restart, or when a suspended run is resumed (then no attempt is used). */
+  private async replay(run: Run, id: string, st: StageState, opts: { resumed?: boolean }): Promise<void> {
+    // A judgement was asked of a PM that is gone (or never existed): find one, or go to the human.
+    if (run.pm.pending && !(await this.hasLivePm(run)) && !pmCalls(run)[pmKey(run.id, "exhausted", run.pm.pending.stage, run.stages[run.pm.pending.stage]?.runs ?? 0)]) {
+      await this.notifyPm(run, this.pmText(run, run.pm.pending.stage, run.pm.pending.reason));
+      return;
+    }
+    if (st.status === "entering") {
+      const def = this.stageDef(run, id);
+      if ((def.kind ?? "agent") === "agent" && st.runs > 0) await this.dispatch(run, id, "retry", { free: true });
+      else await this.enter(run, id);
+    } else if (st.status === "waiting" && st.gate?.itemId) {
+      const gate = this.ports.gate(st.gate.itemId);
+      if (gate && gate.status !== "pending") await this.handleGate(run, st.gate.itemId);
+    } else if (st.status === "waiting" && st.childRunId) {
+      const child = this.store.get(st.childRunId);
+      if (child && (child.status === "done" || child.status === "failed" || child.status === "aborted")) await this.childFinished(run, child);
+    } else if (st.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent") {
+      const state = st.agentId ? await this.ports.agentState(st.agentId) : "gone";
+      if (opts.resumed) {
+        if (state === "gone") await this.dispatch(run, id, "retry", { free: true, fresh: true });
+        else if (state === "idle") await this.dispatch(run, id, "wake", { free: true });
+        // a worker still in its turn (a local one, or a busy pod that was not suspended) carries on by itself
+      } else if (state === "gone") await this.agentFailed(run, id, "worker gone after restart");
+      else if (state === "idle") await this.dispatch(run, id, "nudge");
+    } else if (st.status === "running") {
+      await this.enter(run, id); // an extension stage or call: run again (idempotent by contract)
     }
   }
 
@@ -1169,13 +1976,27 @@ export class Engine {
   async tick(): Promise<void> {
     const now = this.ports.now();
     this.observer.tick?.();
+    await this.dequeue().catch((e) => console.error("blueprints: dequeue failed", e));
+    await this.pmTick(now).catch((e) => console.error("blueprints: PM tick failed", e));
     for (const run of this.store.active()) {
       const id = run.stage;
       if (!id) continue;
       const st = run.stages[id];
       if (!st) continue;
       try {
-        if (st.status === "waiting" && !st.gate && st.reopenAt && now >= st.reopenAt) {
+        if (st.status === "entering" && st.kindWaitSince && run.status === "running") {
+          await this.exclusive(run.id, async () => {
+            if (run.stage !== id || st.status !== "entering" || !st.kindWaitSince) return;
+            await this.runExtension(run, id, this.stageDef(run, id));
+          });
+        } else if (st.status === "entering" && st.quotaRetry && now >= st.quotaRetry.at && run.status === "running") {
+          await this.exclusive(run.id, async () => {
+            const q = st.quotaRetry;
+            if (run.stage !== id || st.status !== "entering" || !q || now < q.at) return;
+            this.log(run, "quota_retry", id, `retry ${q.n}`);
+            await this.dispatch(run, id, q.why, q.opts);
+          });
+        } else if (st.status === "waiting" && !st.gate && st.reopenAt && now >= st.reopenAt) {
           await this.exclusive(run.id, async () => {
             if (run.stage !== id || st.status !== "waiting" || st.gate || !st.reopenAt) return;
             st.reopenAt = null;
@@ -1189,6 +2010,20 @@ export class Engine {
           if (st.gate?.passive) await this.expireMergeWait(run, id);
         } else if (st.status === "waiting" && st.gate?.itemId) this.remindGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
+          // A worker that said it waits on a person or an outside system (a review) watches it with events: no nudges, no attempts,
+          // until the ceiling; then a person is asked (decision f1cd49be: babysit was nudged every minute while Codex had not answered).
+          if (st.workerWaitSince) {
+            if (now - st.workerWaitSince < WORKER_WAIT_CEILING_MS) continue;
+            await this.exclusive(run.id, async () => {
+              if (run.stage !== id || st.status !== "running" || !st.workerWaitSince) return;
+              const mins = Math.round((now - st.workerWaitSince) / 60_000);
+              const why = `waited ${mins} min on: ${run.waitingFor ?? "an outside system"}`;
+              st.workerWaitSince = null;
+              this.log(run, "worker_wait_ceiling", id, why);
+              await this.pause(run, id, why);
+            });
+            continue;
+          }
           const grace = this.ports.settings().idleGraceSeconds * 1000;
           if (now - (st.lastNudgeAt ?? st.startedAt ?? now) < grace) continue;
           const state = await this.ports.agentState(st.agentId);
@@ -1213,10 +2048,33 @@ export class Engine {
     const def = this.stageDef(run, id) as GateStage;
     const heads = st.gate!.heads;
     let merged = 0;
+    let queuedNow = false;
+    const places: string[] = [];
     for (const [url, head] of Object.entries(heads)) {
-      const f = await this.ports.prFacts(url);
+      // A queued PR is read fresh: LEFT_QUEUE_POLLS counts distinct reads, not one cached answer seen twice.
+      const f = await this.ports.prFacts(url, st.gate?.queued ? { maxAgeMs: 0 } : undefined);
+      if (f.state === "open" && f.queued) queuedNow = true;
+      if (f.state === "open" && f.queuePosition !== undefined) {
+        places.push(`${url} #${f.queuePosition}${f.queueEtaSeconds !== undefined ? `, ETA ~${Math.max(1, Math.round(f.queueEtaSeconds / 60))} min` : ""}`);
+      }
       if (f.state === "merged") merged += 1;
-      else if (f.state === "open" && f.head !== head) {
+      else if (st.gate?.queued && f.state === "open" && f.queued !== false) st.gate.notQueuedPolls = 0;
+      else if (st.gate?.queued && f.state === "open" && (st.gate.notQueuedPolls = (st.gate.notQueuedPolls ?? 0) + 1) < LEFT_QUEUE_POLLS) {
+        // One poll that does not see the PR in the queue is not "left the queue": GitHub's answer flips while it moves the PR.
+        this.store.save();
+        return;
+      } else if (st.gate?.queued && (f.state !== "open" || f.queued === false)) {
+        // left the merge queue without merging: ask the person again
+        await this.exclusive(run.id, async () => {
+          if (run.stage !== id || st.status !== "waiting" || !st.gate?.queued) return;
+          this.log(run, "merge_not_seen", id, `${url} left the merge queue (${f.state})`);
+          st.gate = null;
+          st.status = "entering";
+          run.status = "running";
+          await this.openGate(run, id, def);
+        });
+        return;
+      } else if (f.state === "open" && f.head !== head) {
         await this.exclusive(run.id, async () => {
           if (run.stage !== id || st.status !== "waiting" || !st.gate) return;
           if (st.gate.itemId) this.ports.withdraw(st.gate.itemId, `head of ${url} moved to ${f.head.slice(0, 12)}`);
@@ -1226,6 +2084,44 @@ export class Engine {
           run.status = "running";
           this.log(run, "head_moved", id, `${url} ${head.slice(0, 12)} -> ${f.head.slice(0, 12)}`);
           await this.go(run, id, def.on.head_moved ?? id, "head moved");
+        });
+        return;
+      }
+    }
+    // The run's status says where the PRs stand in the queue.
+    if (st.gate && places.length) {
+      const where = `merge queue: ${places.join("; ")}`;
+      if (run.waitingFor !== where) {
+        run.waitingFor = where;
+        this.store.save();
+      }
+    }
+    // Queued but still not merged after `stall_minutes` (15 by default): say so once, keep waiting; never a new question.
+    if ((st.gate?.queued || (st.gate?.passive && queuedNow)) && st.gate && !st.gate.slowNoticed && merged < Object.keys(heads).length && this.ports.now() - (st.gate.openedAt ?? this.ports.now()) >= (def.stall_minutes ?? 15) * 60_000) {
+      st.gate.slowNoticed = true;
+      const mins = Math.round((this.ports.now() - (st.gate.openedAt ?? this.ports.now())) / 60_000);
+      this.log(run, "merge_queue_slow", id, `still in the merge queue after ${mins} min`);
+      this.notify(run, { kind: "waiting", stage: id, reason: `still in the merge queue after ${mins} min: ${places.length ? places.join("; ") : Object.keys(heads).join(", ")}`, key: `${run.id}:queue-slow:${id}:${st.runs}` });
+      this.store.save();
+    }
+    // A passive merge wait whose PRs are neither queued nor tested after `stall_minutes` will never merge by itself.
+    if (st.gate?.passive && def.stall_minutes && def.on.stalled && merged < Object.keys(heads).length && this.ports.now() - (st.gate.openedAt ?? this.ports.now()) >= def.stall_minutes * 60_000) {
+      const stuck: string[] = [];
+      for (const url of Object.keys(heads)) {
+        const f = await this.ports.prFacts(url);
+        if (f.state === "open" && !f.queued && (f.ci === "none" || f.ci === "red")) stuck.push(`${url} (${f.ci === "none" ? "no CI run on its head" : "CI red"}, not in the merge queue)`);
+      }
+      if (stuck.length) {
+        await this.exclusive(run.id, async () => {
+          if (run.stage !== id || st.status !== "waiting" || !st.gate?.passive) return;
+          st.status = "done";
+          st.verdict = "stalled";
+          st.summary = `not merging by itself after ${def.stall_minutes} min: ${stuck.join("; ")}`;
+          st.gate = null;
+          run.status = "running";
+          run.waitingFor = null;
+          this.log(run, "merge_stalled", id, st.summary);
+          await this.go(run, id, def.on.stalled!, "merge wait stalled");
         });
         return;
       }
@@ -1319,7 +2215,11 @@ export class Engine {
       endedAt: run.endedAt,
       error: run.error,
       waitingFor: run.waitingFor,
+      suspended: run.suspended
+        ? { reason: run.suspended.reason, since: run.suspended.at, by: run.suspended.by, pods: run.suspended.pods, quota: run.suspended.usageLimit ? { source: run.suspended.usageLimit.source, rule: run.suspended.usageLimit.rule, resumeAt: run.suspended.usageLimit.resumeAt } : null }
+        : null,
       pmPending: run.pm.pending,
+      escalations: Object.keys(run.escalations ?? {}),
       parent: run.parent,
       stages,
       history: run.history.slice(-200),
@@ -1328,3 +2228,7 @@ export class Engine {
 }
 
 export { TERMINALS };
+
+/** Flake reasons that mean the worker's pod never came up. */
+const POD_START_FLAKES = new Set(["pod did not start", "pod not ready", "bridge.mjs not written", "container not found"]);
+const MAX_POD_START_FAILURES = 2;

@@ -1,50 +1,31 @@
 import type { Paseo } from "../host";
 
 /**
- * Run in the workspace's shell. The marker line carries the counts of uncommitted entries and of commits on a local branch (or HEAD)
- * that no remote has; every way this can go wrong prints ERR, never a count, so a broken check cannot read as "clean".
+ * A trace for the run history, never a gate: `git status --short` of the workspace, read in a short-lived terminal. A workspace is
+ * archived whatever it holds (human rule 2026-10-28), so this only records what was thrown away. Every failure, and the timeout,
+ * is an answer ("no answer"), not an error.
  */
-export const PROBE_SCRIPT = [
-  "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo FACTORY_PROBE ERR not-a-git-worktree; exit 0; }",
-  "d=$(git status --porcelain 2>/dev/null) || { echo FACTORY_PROBE ERR git-status; exit 0; }",
-  "u=$(git log HEAD --branches --not --remotes --oneline 2>/dev/null) || { echo FACTORY_PROBE ERR git-log; exit 0; }",
-  'echo "FACTORY_PROBE OK $(printf %s "$d" | grep -c .) $(printf %s "$u" | grep -c .)"',
-].join("\n");
-
-export type Probe = { state: "clean" | "dirty" | "unknown"; detail: string };
-
-/** The echoed script never matches: it has no "OK <n> <n>" or "ERR <word>" right after the marker. */
-export function parseProbe(lines: readonly string[]): Probe {
-  for (const line of lines) {
-    const ok = /^FACTORY_PROBE OK (\d+) (\d+)\s*$/.exec(line.trim());
-    if (ok) {
-      const [dirty, unpushed] = [Number(ok[1]), Number(ok[2])];
-      if (dirty === 0 && unpushed === 0) return { state: "clean", detail: "clean, nothing unpushed" };
-      return { state: "dirty", detail: [dirty ? `${dirty} uncommitted file(s)` : "", unpushed ? `${unpushed} unpushed commit(s)` : ""].filter(Boolean).join(", ") };
-    }
-    const err = /^FACTORY_PROBE ERR ([a-z-]+)\s*$/.exec(line.trim());
-    if (err) return { state: "unknown", detail: err[1] };
-  }
-  return { state: "unknown", detail: "no answer from the worktree" };
-}
-
-/** Run the probe in a short-lived terminal of the workspace. Anything unexpected is "unknown". */
-export async function probeWorktree(paseo: Paseo, workspaceId: string, timeoutMs = 30_000): Promise<Probe> {
+export async function statusTrace(paseo: Paseo, workspaceId: string, timeoutMs = 5_000): Promise<string> {
   let terminal: Awaited<ReturnType<Paseo["terminals"]["create"]>> | null = null;
+  const until = Date.now() + timeoutMs;
+  const left = () => Math.max(0, until - Date.now());
+  const within = <T>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), left()))]);
   try {
-    terminal = await paseo.terminals.create({ workspaceId, name: "factory-janitor", command: "sh", args: ["-c", PROBE_SCRIPT] });
-    const until = Date.now() + timeoutMs;
-    let last: Probe = { state: "unknown", detail: "no answer from the worktree" };
-    while (Date.now() < until) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const captured = await terminal.capture({ stripAnsi: true });
-      last = parseProbe(captured.lines);
-      if (last.detail !== "no answer from the worktree") return last;
+    terminal = await within(paseo.terminals.create({ workspaceId, name: "factory-trace", command: "sh", args: ["-c", "echo FACTORY_TRACE_BEGIN; git status --short 2>&1; echo FACTORY_TRACE_END"] }));
+    while (left() > 0) {
+      await new Promise((r) => setTimeout(r, 500));
+      const lines = (await within(terminal.capture({ stripAnsi: true }))).lines.map((l) => l.trimEnd());
+      const end = lines.lastIndexOf("FACTORY_TRACE_END");
+      const begin = lines.lastIndexOf("FACTORY_TRACE_BEGIN", end);
+      if (end > begin && begin >= 0) {
+        const files = lines.slice(begin + 1, end).filter(Boolean);
+        return files.length ? `${files.length} entries: ${files.slice(0, 10).join("; ")}${files.length > 10 ? "; …" : ""}` : "clean";
+      }
     }
-    return last;
+    return "no answer (5 s)";
   } catch (error) {
-    return { state: "unknown", detail: (error as Error).message };
+    return `no answer (${(error as Error).message})`;
   } finally {
-    await terminal?.kill().catch(() => undefined);
+    void terminal?.kill().catch(() => undefined);
   }
 }

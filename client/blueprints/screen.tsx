@@ -4,13 +4,16 @@ import { TranscriptPeek } from "../transcript-peek";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, startRunRpc } from "../../shared/blueprints/rpc";
+import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
 import type { RunView, StageView } from "../../shared/blueprints/run";
 import { buildTimeline, formatDuration } from "../../shared/blueprints/timeline";
 import { blueprintsSettings } from "../../shared/blueprints/settings";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { SubTabs } from "../subtabs";
 import { BlueprintGraph } from "./graph";
+import { CronsTab } from "./crons";
+import { QuotaTab } from "./quota";
+import { BLUEPRINTS_SUBTABS } from "./tabs";
 
 type Colors = PluginScreenProps["theme"]["colors"];
 
@@ -24,6 +27,7 @@ function statusColor(status: string, c: Colors): string {
       return c.statusDanger;
     case "waiting":
     case "paused":
+    case "suspended":
       return c.statusWarning;
     case "running":
     case "entering":
@@ -39,15 +43,14 @@ function ago(now: number, at: number): string {
 }
 
 /** Runs that need a person or the PM: waiting on a PM judgement, failed, or paused. */
-export function needsAttention(run: RunView): boolean {
-  return run.pmPending !== null || run.status === "failed" || run.status === "paused";
-}
+export { needsAttention } from "./attention";
+import { needsAttention } from "./attention";
 
 /** PRs of a run with their diff summary; fetched only once the card is open. */
 function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }) {
   const call = useRpc(runDiffRpc);
   const q = useQuery({ queryKey: ["blueprints", "diff", runId], queryFn: () => call({ runId }), staleTime: 30_000 });
-  const label = (url: string) => url.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/, "$1#$2");
+  const label = (url: string) => url.replace(/^https?:\/\/[^/]+\//, "");
   if (!q.data || q.data.prs.length === 0) return null;
   return (
     <View style={{ gap: 2 }}>
@@ -63,15 +66,17 @@ function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }
   );
 }
 
-export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProps) {
+/** `focus`: a run to show expanded (an extension tab's `open({tab: "blueprints", runId})`). */
+export function BlueprintsScreen({ theme, layout, navigation, focus }: PluginScreenProps & { focus?: string }) {
   const list = useRpc(listRunsRpc);
   const startCall = useRpc(startRunRpc);
   const abortCall = useRpc(abortRunRpc);
   const resumeCall = useRpc(retryRunRpc);
+  const suspendCall = useRpc(suspendRunsRpc);
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [showFinished, setShowFinished] = useState(true);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => (focus ? { [focus]: true } : {}));
   const [picked, setPicked] = useState<string | null>(null);
   const [startOpen, setStartOpen] = useState(false);
   const [tabKey, setTabKey] = useState(0);
@@ -102,6 +107,14 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   const resume = useMutation({
     mutationFn: (run: RunView) =>
       resumeCall({ runId: run.id, stage: resumeStage[run.id]?.trim() || run.pmPending?.stage || undefined, extraAttempts: Number(resumeExtra[run.id] ?? "1") || 0 }),
+    onSuccess: (r) => {
+      setMessage(r.ok ? null : r.message);
+      refresh();
+    },
+  });
+
+  const suspend = useMutation({
+    mutationFn: (o: { runId?: string; all?: boolean; resume?: boolean }) => suspendCall(o),
     onSuccess: (r) => {
       setMessage(r.ok ? null : r.message);
       refresh();
@@ -152,7 +165,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   };
 
   const renderRun = (run: RunView) => {
-    const active = run.status === "running" || run.status === "waiting";
+    const active = run.status === "running" || run.status === "waiting" || run.status === "paused" || run.status === "suspended";
     const canResume = run.status === "failed" || run.status === "paused" || run.pmPending !== null;
     const varEntries = Object.entries(run.vars).filter(([, v]) => v !== "").sort(([a], [b]) => (a === "ticket" ? -1 : b === "ticket" ? 1 : 0));
     const open = expanded[run.id];
@@ -174,6 +187,12 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         <View style={s.line}>{run.stages.map((st) => stageChip(st, st.id === run.stage))}</View>
         {run.stage ? <Text style={s.text}>Stage: {run.stage}</Text> : null}
         {run.waitingFor ? <Text style={s.muted}>Waiting for {run.waitingFor}</Text> : null}
+        {run.suspended ? (
+          <>
+            <Text style={[s.text, { color: c.statusWarning }]} selectable>Suspended {ago(now, run.suspended.since)} by {run.suspended.by}: {run.suspended.reason}</Text>
+            {run.suspended.pods.map((p) => <Text key={p} style={s.muted} selectable>{p}</Text>)}
+          </>
+        ) : null}
         {run.pmPending ? <Text style={[s.text, { color: c.statusWarning }]}>PM judgement pending on {run.pmPending.stage}: {run.pmPending.reason}</Text> : null}
         {run.error ? <Text style={[s.text, { color: c.statusDanger }]} selectable>{run.error}</Text> : null}
         {run.parent ? <Text style={s.muted}>Child of {run.parent.runId} (stage {run.parent.stageId})</Text> : null}
@@ -208,7 +227,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
                   {seg.verdict ? ` → ${seg.verdict}` : seg.endedAt === null ? " · running" : ""}
                 </Text>
                 <Text style={s.muted} selectable>
-                  working {formatDuration(seg.workingMs)} · waiting {formatDuration(seg.waitingMs)} · {seg.attempts} dispatch{seg.attempts === 1 ? "" : "es"}
+                  working {formatDuration(seg.workingMs)} · waiting {formatDuration(seg.waitingMs)}{seg.assistantMs ? ` · answered by the Assistant in ${formatDuration(seg.assistantMs)}` : ""} · {seg.attempts} dispatch{seg.attempts === 1 ? "" : "es"}
                   {seg.retries ? ` · ${seg.retries} retr${seg.retries === 1 ? "y" : "ies"}` : ""}
                   {seg.gateOpenedAt !== null ? ` · gate opened ${ago(now, seg.gateOpenedAt)}${seg.gateClosedAt !== null ? `, closed ${ago(now, seg.gateClosedAt)}` : ", still open"}` : ""}
                 </Text>
@@ -252,6 +271,15 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         ) : null}
         {active ? (
           <View style={s.line}>
+            {run.status === "suspended" ? (
+              <Pressable style={s.button} onPress={() => suspend.mutate({ runId: run.id, resume: true })}>
+                <Text style={s.text}>Resume</Text>
+              </Pressable>
+            ) : (
+              <Pressable style={s.button} onPress={() => suspend.mutate({ runId: run.id })}>
+                <Text style={s.text}>Suspend</Text>
+              </Pressable>
+            )}
             <Pressable style={s.button} onPress={() => abort.mutate(run.id)}>
               <Text style={[s.text, { color: c.statusDanger }]}>Abort</Text>
             </Pressable>
@@ -320,6 +348,17 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
     <ScrollView style={s.screen} contentContainerStyle={s.body}>
       {query.isError ? <Text style={s.muted}>Could not load: {String(query.error)}</Text> : null}
       {message ? <Text style={s.text}>{message}</Text> : null}
+      {data?.factorySuspended ? (
+        <View style={s.warn}>
+          <Text style={[s.text, { fontWeight: "700" }]}>The Factory is suspended</Text>
+          <Text style={s.muted} selectable>{data.factorySuspended.reason} · {ago(now, data.factorySuspended.since)} by {data.factorySuspended.by}. No run starts and nothing is respawned until it is resumed.</Text>
+          <View style={s.line}>
+            <Pressable style={s.button} onPress={() => suspend.mutate({ all: true, resume: true })}>
+              <Text style={s.text}>Resume all</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
       <View style={s.line}>
         <Pressable style={s.button} onPress={() => setStartOpen((v) => !v)}>
           <Text style={s.text}>{startOpen ? "Close" : "Start a run"}</Text>
@@ -327,6 +366,11 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         <Pressable style={s.button} onPress={() => setShowFinished((v) => !v)}>
           <Text style={s.muted}>{showFinished ? "Hide finished" : "Show finished"}</Text>
         </Pressable>
+        {data?.factorySuspended ? null : (
+          <Pressable style={s.button} onPress={() => suspend.mutate({ all: true })}>
+            <Text style={s.muted}>Suspend all</Text>
+          </Pressable>
+        )}
         {errors.length > 0 ? <Text style={[s.muted, { color: c.statusWarning }]}>{errors.length} blueprint file{errors.length > 1 ? "s" : ""} with errors (see Templates)</Text> : null}
       </View>
       {startOpen ? startForm : null}
@@ -361,8 +405,8 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             {d.gate.noteTo ? ` · answer added to notes of ${d.gate.noteTo}` : ""}
           </Text>
         ) : null}
-        {d.facts ? <Text style={s.muted}>GitHub facts shown to the worker; data.pr_urls checked on GitHub</Text> : null}
-        {Object.entries(d.verify).map(([v, facts]) => <Text key={v} style={s.muted}>verdict {v} needs on GitHub: {facts.join(", ")}</Text>)}
+        {d.facts ? <Text style={s.muted}>PR facts shown to the worker; data.pr_urls checked</Text> : null}
+        {Object.entries(d.verify).map(([v, facts]) => <Text key={v} style={s.muted}>verdict {v} needs: {facts.join(", ")}</Text>)}
         {d.usesLease ? <Text style={s.muted}>uses a lease (see its role)</Text> : null}
         {keys.length > 0 ? <Text style={s.text} selectable>{keys.map((k) => edge(d, k)).join("   ")}</Text> : null}
       </View>
@@ -423,6 +467,8 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
           <SettingsInput label="Poll interval (seconds)" hint="How often PR gates are polled and idle workers checked." initialValue={String(settings.values.pollSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, pollSeconds: Math.round(Number(v)) }, settings.revision)} />
           <SettingsInput label="Idle grace (seconds)" hint="A worker idle this long without a verdict gets nudged." initialValue={String(settings.values.idleGraceSeconds)} onChangeText={(v) => Number(v) >= 10 && void settings.save({ ...settings.values, idleGraceSeconds: Math.round(Number(v)) }, settings.revision)} />
           <SettingsSwitch label="Archive workers when a run finishes" value={settings.values.archiveOnFinish} onValueChange={(on) => void settings.save({ ...settings.values, archiveOnFinish: on }, settings.revision)} />
+          <SettingsSwitch label="Crons" hint="Start blueprints on the cron schedules of the Crons sub-tab. Off by default: switch it on once no other scheduler starts the same blueprints." value={settings.values.crons.enabled} onValueChange={(on) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, enabled: on } }, settings.revision)} />
+          <SettingsInput label="Cron pause mail" hint="Agents Mail address told when a schedule pauses after failed runs (a schedule's mailTo wins). Empty: only logged." initialValue={settings.values.crons.mailTo} onChangeText={(v) => void settings.save({ ...settings.values, crons: { ...settings.values.crons, mailTo: v.trim() } }, settings.revision)} placeholder="@assistant" />
           {settings.saveError ? <Text style={{ color: c.statusDanger }}>{settings.saveError}</Text> : null}
         </SettingsCard>
       ) : (
@@ -438,11 +484,17 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
         key={tabKey}
         theme={theme}
         initial={tabKey > 0 ? "runs" : undefined}
-        tabs={[
-          { key: "runs", label: "Runs", badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
-          { key: "templates", label: "Templates", badge: errors.length || undefined, render: templatesTab },
-          { key: "settings", label: "Settings", render: settingsTab },
-        ]}
+        tabs={BLUEPRINTS_SUBTABS.map(({ key, label }) => ({
+          key,
+          label,
+          ...{
+            runs: { badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
+            templates: { badge: errors.length || undefined, render: templatesTab },
+            crons: { render: () => <CronsTab theme={theme} layout={layout} /> },
+            quota: { render: () => <QuotaTab theme={theme} layout={layout} /> },
+            settings: { render: settingsTab },
+          }[key],
+        }))}
       />
     </View>
   );

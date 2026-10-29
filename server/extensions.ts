@@ -45,6 +45,11 @@ export interface ExtensionRegistration {
 export interface ExtensionRpc {
   /** Lowercase letters, digits, '-' and '_' like tool names. */
   name: string;
+  /**
+   * Safe for other plugins to read: no side effect, no secret in the output. Only read-only rpcs are reachable over the
+   * Factory's loopback endpoint (`POST /extensions/<id>/rpc/<name>`, bearer = endpoint token), so one extension can read another's facts.
+   */
+  readOnly?: boolean;
   input: z.ZodType;
   output: z.ZodType;
   run(input: any, call: { callerId: string }): Promise<unknown> | unknown;

@@ -28,13 +28,12 @@ description: What this role is for.
 systemPrompt: |
   You are ...
 # model: claude-sonnet-5-5
-# mcpServers: [linear]        # names known to the MCP proxy plugin
+# mcpServers: [my-server]     # names known to the MCP proxy plugin
 # maxConcurrent: 3
 # env:
 #   LOG_LEVEL: debug
 #   API_TOKEN: \${API_TOKEN}     # secrets: reference the daemon's env, never write them here
-# plugins:
-#   kubeTemplate: default
+# plugins:                    # per-plugin options, by plugin name
 #   warder: on
 `;
 

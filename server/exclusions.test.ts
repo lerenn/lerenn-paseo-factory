@@ -3,7 +3,7 @@ import { agentExcluded, pathExcluded, setExclusions } from "./exclusions";
 import { listAgents } from "./list-agents";
 import { spawnAgent } from "./spawn-agent";
 
-const MONO = "/home/paseo/src/github.com/anyshift-io/anyshift-monorepo";
+const MONO = "/home/me/src/github.com/example/secret-project";
 afterEach(() => setExclusions({ paths: [], agents: [] }));
 
 describe("exclusions", () => {

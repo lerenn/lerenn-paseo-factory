@@ -2,6 +2,7 @@ import { z } from "zod";
 import { UsageError, type Engine } from "./engine";
 import type { Item } from "./store";
 import { itemStatusSchema } from "../../shared/inbox/item";
+import { isTrusted } from "../trust";
 
 export interface ToolContext {
   engine: Engine;
@@ -11,11 +12,9 @@ export interface ToolContext {
   labels?: () => Promise<Record<string, string>>;
 }
 
-/** Agents with this label (the Assistant plugin's) may see and answer every pending item, on the user's behalf. */
-export const ASSISTANT_LABEL = "paseo.assistant";
-
+/** Agents with a trusted label (factory setting `trustedLabels`) may see and answer every pending item, on the user's behalf. */
 async function isAssistant(ctx: ToolContext): Promise<boolean> {
-  return (await ctx.labels?.())?.[ASSISTANT_LABEL] === "1";
+  return isTrusted(await ctx.labels?.());
 }
 
 export interface ToolDef {
@@ -119,7 +118,7 @@ export const TOOLS: ToolDef[] = [
   {
     name: "inbox_pending",
     description:
-      "Pending inbox items waiting for the human, across all agents, with their options. Only for agents labelled paseo.assistant=1 (the Assistant plugin); other agents see their own pending items.",
+      "Pending inbox items waiting for the human, across all agents, with their options. Only for an agent with a trusted label (factory setting trustedLabels); other agents see their own pending items.",
     input: z.object({}),
     async run(_input, ctx) {
       const assistant = await isAssistant(ctx);
@@ -133,7 +132,8 @@ export const TOOLS: ToolDef[] = [
   {
     name: "inbox_answer",
     description:
-      "Answer a pending item on behalf of the user. Only for agents labelled paseo.assistant=1 (the Assistant plugin); the answer is recorded as \"answered by the Assistant on behalf of the user\". " +
+      "Answer a pending item on behalf of the user. Only for an agent with a trusted label (factory setting trustedLabels); the answer is recorded as \"answered by the Assistant on behalf of the user\". " +
+      "A run's PM may answer the one pm = true gate it was spawned for, and nothing else. " +
       "`answer` is an option id, or free text for items that take it. Answer only what the user said; never decide for him.",
     input: z.object({
       item: z.string().describe("The item id from inbox_pending."),
@@ -141,21 +141,25 @@ export const TOOLS: ToolDef[] = [
       comment: z.string().max(2000).optional(),
     }),
     async run({ item, answer, comment }, ctx) {
-      if (!(await isAssistant(ctx))) throw new UsageError("inbox_answer is for the Assistant only (agents labelled paseo.assistant=1).");
+      const trusted = await isAssistant(ctx);
+      if (!trusted && !ctx.engine.mayAnswer?.(ctx.callerId, item)) throw new UsageError("inbox_answer is only for an agent with a trusted label (factory setting trustedLabels), or a run's PM for the pm = true gate it was spawned for.");
       const found = ctx.engine.store.get(item);
       if (!found) throw new UsageError(`No inbox item "${item}".`);
       const isOption = found.options.some((o) => o.id === answer);
-      const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, "assistant");
+      const by = trusted ? "assistant" : "pm";
+      const result = ctx.engine.answer(item, isOption ? { optionId: answer, comment } : { text: answer, comment }, by);
       if (!result.ok) throw new UsageError(result.message ?? "Not answered.");
-      return { ...summary(result.item!), recorded_as: "answered by the Assistant on behalf of the user" };
+      return { ...summary(result.item!), recorded_as: trusted ? "answered by the Assistant on behalf of the user" : "answered by the run's PM" };
     },
   },
   {
     name: "inbox_withdraw",
-    description: "Take back one of your pending questions that no longer matters.",
+    description:
+      "Take back one of your pending questions that no longer matters. An agent with a trusted label may also withdraw the Factory's own items (asker `blueprint:<run>`), such as an escalation of a run that is running again.",
     input: z.object({ item_id: z.string(), reason: z.string().max(500).optional() }),
-    run({ item_id, reason }, ctx) {
-      const item = own(item_id, ctx);
+    async run({ item_id, reason }, ctx) {
+      const found = ctx.engine.store.get(item_id);
+      const item = found?.agentId.startsWith("blueprint:") && (await isAssistant(ctx)) ? found : own(item_id, ctx);
       ctx.engine.withdraw(item, ctx.callerId, reason ?? null);
       return summary(item);
     },

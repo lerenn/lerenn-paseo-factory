@@ -53,7 +53,7 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string }
     for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
   };
   const startAt = async (at: string) => {
-    const run = engine.start({ blueprint: "ticket", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "x", at });
+    const run = engine.start({ blueprint: "ticket", vars: { ticket: "ABC-1", ticket_confirmed: "true" }, requestedBy: "x", at });
     run.stages.investigate = { ...run.stages.investigate, status: "done", data: { criteria: "1. works" }, summary: "inv" } as never;
     run.stages.implement = { ...run.stages.implement, status: "done", notes: [], runs: 1, attempts: 0, extra: 0, flakes: 0, data: { pr_urls: [PR] } } as never;
     await settle();
@@ -197,5 +197,24 @@ describe("criteria gate reminders", () => {
 
   it("defaults: 30 minutes", () => {
     expect(settingsSchema.parse({}).gates).toEqual({ criteriaReminderMinutes: 30 });
+  });
+});
+
+describe("merge wait and the merge queue", () => {
+  it("shows the PR's queue position and ETA, and says once when it is still queued after 15 min", async () => {
+    const t = setup();
+    const run = await t.startAt("qa");
+    await t.verdict("agent-1", "pending_merge", "needs the merged code");
+    t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2, queueEtaSeconds: 300 };
+    await t.tick();
+    expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR} #2, ETA ~5 min`);
+    const slow = () => t.mails.filter((m) => m.body.includes("still in the merge queue"));
+    expect(slow()).toHaveLength(0);
+    t.advance(16 * 60_000);
+    await t.tick();
+    await t.tick();
+    expect(slow()).toHaveLength(1);
+    expect(slow()[0]!.body).toContain("#2, ETA ~5 min");
+    expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
   });
 });

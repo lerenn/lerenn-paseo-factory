@@ -1,19 +1,18 @@
-import type { Probe } from "./worktree";
-
 export interface ArchiveWorkspacePorts {
   /** The workspace (pod) the Factory created or joined for this agent; null when it is not a Factory agent or runs locally. */
   workspaceOf(agentId: string): string | null;
   /** Ids of the agents still alive (not archived, not closed) in the workspace, or null when they could not be listed. */
   liveAgentsIn(workspaceId: string): Promise<string[] | null>;
-  worktree(workspaceId: string): Promise<Probe>;
+  /** `git status --short` of the workspace for the log (5 s at most, never throws); not a condition. */
+  trace(workspaceId: string): Promise<string>;
   archiveWorkspace(workspaceId: string): Promise<void>;
   log(line: string): void;
 }
 
 /**
  * An agent the Factory spawned was archived (by the Factory, by itself or by a person): archive its workspace too, or the pod and its
- * volume leak against the quota. Only a workspace the Factory created or joined for it, with no other live agent left and a clean
- * worktree (nothing uncommitted or unpushed, same check as the janitor). Anything doubtful is kept.
+ * volume leak against the quota. Only a workspace the Factory created or joined for it, and with no other live agent left (the
+ * orphan sweep takes it later otherwise). Dirty or unpushed work does not keep it (human rule 2026-10-28).
  */
 export async function archiveWorkspaceWithAgent(ports: ArchiveWorkspacePorts, agentId: string): Promise<"archived" | "kept" | "skipped"> {
   const workspaceId = ports.workspaceOf(agentId);
@@ -26,10 +25,9 @@ export async function archiveWorkspaceWithAgent(ports: ArchiveWorkspacePorts, ag
     const live = (await ports.liveAgentsIn(workspaceId))?.filter((id) => id !== agentId);
     if (!live) return keep("could not list its agents");
     if (live.length) return keep(`${live.length} live agent(s) remain`);
-    const probe = await ports.worktree(workspaceId);
-    if (probe.state !== "clean") return keep(probe.detail);
+    const trace = await ports.trace(workspaceId).catch(() => "no answer");
     await ports.archiveWorkspace(workspaceId);
-    ports.log(`factory: archived workspace ${workspaceId} with agent ${agentId}`);
+    ports.log(`factory: archived workspace ${workspaceId} with agent ${agentId} (worktree: ${trace})`);
     return "archived";
   } catch (error) {
     return keep(`archive failed: ${(error as Error).message}`);
