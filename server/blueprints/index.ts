@@ -1,4 +1,3 @@
-import { SlackNotifier, slackApi } from "./slack";
 import { AttentionNotifier, attentionPoints } from "./attention";
 import { agentlessWorkspaces, type ListedAgent, type ListedWorkspace } from "./orphans";
 import path from "node:path";
@@ -282,6 +281,24 @@ export function startBlueprints(host: FactoryHost) {
         throw error;
       }
     },
+    runs({ since, hasVar }) {
+      return store
+        .all()
+        .filter((r) => r.updatedAt >= since && (!hasVar || !!r.vars[hasVar]?.trim()))
+        .map((r) => ({
+          id: r.id,
+          blueprint: r.blueprint,
+          status: r.status,
+          parent: r.parent,
+          vars: r.vars,
+          updatedAt: r.updatedAt,
+          endedAt: r.endedAt,
+          stages: Object.fromEntries(
+            Object.entries(r.stages).map(([id, st]) => [id, { status: st.status, verdict: st.verdict, summary: st.summary, data: st.data }]),
+          ),
+          events: [...new Set(r.history.map((h) => h.event))],
+        }));
+    },
   };
 
   /** Usage of a turn of an agent the Factory spawned (Paseo reports lastUsage per turn). */
@@ -393,15 +410,6 @@ export function startBlueprints(host: FactoryHost) {
     }
   };
 
-  // Slack feedback in the alert's thread (human decision f36893f5).
-  const slack = new SlackNotifier((process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "slack.json"), slackApi(() => cfg().slack?.tokenFile ?? "/etc/paseo/secrets/slack-factory-bot/token"));
-  const notifySlack = async () => {
-    const channels = cfg().slack?.channels ?? [];
-    if (!channels.length) return;
-    const week = Date.now() - 7 * 24 * 3600_000;
-    await slack.tick(store.all().filter((r) => r.updatedAt > week && r.vars.slack_thread_ts), channels);
-  };
-
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   const loop = async () => {
@@ -409,7 +417,6 @@ export function startBlueprints(host: FactoryHost) {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
       if (host.enabled("blueprints") && host.hasPaseo()) await notify();
-      if (host.enabled("blueprints")) await notifySlack().catch((e) => console.error("blueprints: Slack feedback failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
