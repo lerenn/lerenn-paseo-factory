@@ -67,6 +67,20 @@ export const settingsSchema = z.object({
       orphanSweep: z.boolean().default(true),
     })
     .default({ enabled: false, dryRun: true, orphanSweep: true }),
+  /**
+   * Cron schedules that start blueprints (the Crons tab). Schedules come from `crons/schedules.json` in each git source and
+   * from `schedules` here (these win on a repeated id). Off by default: switch it on once no other scheduler starts the same
+   * blueprints.
+   */
+  crons: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Agents Mail address told when a schedule pauses (a schedule's own `mailTo` wins). Empty: only logged. */
+      mailTo: z.string().default(""),
+      /** Extra schedules, same entries as schedules.json; a bad entry is left out and shown in the Crons tab. */
+      schedules: z.array(z.unknown()).default([]),
+    })
+    .default({ enabled: false, mailTo: "", schedules: [] }),
 });
 export type BlueprintsSettings = z.output<typeof settingsSchema>;
 
