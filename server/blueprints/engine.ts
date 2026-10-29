@@ -1148,7 +1148,21 @@ export class Engine {
       if (!id || run.stages[id]?.agentId !== agentId || run.stages[id].status !== "running" || run.status !== "running") return;
       const st = run.stages[id];
       if (outcome.kind === "canceled") return; // someone interrupted it on purpose
-      st.lastNudgeAt = this.ports.now();
+      const now = this.ports.now();
+      st.lastNudgeAt = now;
+      if (outcome.kind === "completed" && st.workerWaitSince) {
+        // A worker that declared a wait (blueprint_waiting) ends its turn on purpose and is woken by its events: no nudge, no
+        // attempt. Past the ceiling, a person is asked, as on the tick (decision f1cd49be).
+        if (now - st.workerWaitSince < WORKER_WAIT_CEILING_MS) {
+          this.log(run, "worker_waiting_turn_end", id, run.waitingFor ?? "an outside system");
+          this.store.save();
+          return;
+        }
+        const why = `waited ${Math.round((now - st.workerWaitSince) / 60_000)} min on: ${run.waitingFor ?? "an outside system"}`;
+        st.workerWaitSince = null;
+        this.log(run, "worker_wait_ceiling", id, why);
+        return this.pause(run, id, why);
+      }
       this.log(run, "turn_ended", id, outcome.kind === "failed" ? `failed: ${outcome.message ?? ""}` : "no verdict");
       if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed");
       return this.dispatch(run, id, "nudge");
