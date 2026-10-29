@@ -1,6 +1,7 @@
-// Workspaces in a project the Factory spawns workers in that no live agent is in (a dispatch that failed after the workspace was
-// made, a crash, an agent closed or archived behind the Factory's back): archived at once (human rule 2026-10-28), whatever
-// their title and whatever their worktree holds. The PM, the Assistant and any workspace with a live agent are never taken.
+// Workspaces a Factory run created or joined that no agent is in any more (a dispatch that failed after the workspace was made,
+// a crash, an agent archived or deleted behind the Factory's back): archived at once (human rule 2026-10-28), whatever their
+// title and whatever their worktree holds. A closed agent (a pod agent that finished its turn) is resumable, so it still holds its
+// workspace: only archived or deleted agents free one. A workspace no run knows (coordinators, daemon ops, one-shots) is never taken.
 import { pathExcluded } from "../exclusions";
 
 export interface ListedWorkspace {
@@ -25,9 +26,8 @@ export function agentlessWorkspaces(
   workspaces: ListedWorkspace[],
   agents: ListedAgent[],
   o: {
-    /** Projects (ids) and project roots (paths) the Factory spawns workers in. */
-    projects: Set<string>;
-    roots: Set<string>;
+    /** Ids of the workspaces a Factory run created or joined: the only ones that may be taken. */
+    known: Set<string>;
     /** The PMs' agent ids: their workspace is never touched, live or not. */
     pmAgentIds: Set<string>;
     /** Workspaces to leave alone (the run's shared workspace, a spawn in progress). */
@@ -39,11 +39,11 @@ export function agentlessWorkspaces(
   for (const a of agents) {
     if (!a.workspaceId) continue;
     if ((a.id && o.pmAgentIds.has(a.id)) || a.labels?.["paseo.assistant"]) keep.add(a.workspaceId);
-    if (!a.archivedAt && a.status !== "closed") live.add(a.workspaceId);
+    if (!a.archivedAt) live.add(a.workspaceId);
   }
   return workspaces.filter((w) => {
     if (live.has(w.id) || keep.has(w.id)) return false;
-    if (!(w.projectId && o.projects.has(w.projectId)) && !(w.projectRootPath && o.roots.has(w.projectRootPath))) return false;
+    if (!o.known.has(w.id)) return false;
     return !pathExcluded(w.workspaceDirectory ?? w.projectRootPath);
   });
 }
