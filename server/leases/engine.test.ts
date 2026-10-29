@@ -85,6 +85,35 @@ describe("queue mode", () => {
     expect(engine.acquire("a", "qa", 60, "queue").lease.handover).toBe(2);
   });
 
+  it("tells a holder whose lease lapsed with nobody waiting that it may take it again", async () => {
+    const { engine, sent, advance } = setup();
+    const a = engine.acquire("a", "pr:o/r#1@abc", 60, "takeover");
+    advance(61_000);
+    await engine.tick();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toMatch(/nobody else holds it/);
+    expect(sent[0]!.text).toMatch(/take it again with lease_acquire/);
+    expect(() => engine.renew("a", "pr:o/r#1@abc", a.lease.handover)).toThrow(/nobody else holds it.*take it again/);
+    expect(engine.acquire("a", "pr:o/r#1@abc", 60, "queue")).toMatchObject({ status: "held" });
+  });
+
+  it("tells a stale holder to stop only when another agent holds the lease", () => {
+    const { engine, advance } = setup();
+    const a = engine.acquire("a", "qa", 60, "queue");
+    advance(61_000);
+    engine.acquire("b", "qa", 60, "queue");
+    expect(() => engine.renew("a", "qa", a.lease.handover)).toThrow(/held by another agent.*stop working/);
+  });
+
+  it("points a holder with an old token to its current one", () => {
+    const { engine, advance } = setup();
+    const first = engine.acquire("a", "qa", 60, "queue").lease.handover;
+    advance(61_000);
+    const second = engine.acquire("a", "qa", 60, "queue").lease.handover;
+    expect(() => engine.renew("a", "qa", first)).toThrow(new RegExp(`you hold it with token ${second}`));
+    expect(engine.renew("a", "qa", second).holder?.agentId).toBe("a");
+  });
+
   it("lets a waiter leave the queue", () => {
     const { engine } = setup();
     engine.acquire("a", "qa", 60, "queue");
@@ -248,5 +277,30 @@ describe("views", () => {
     expect(v[0]!.holder?.agentTitle).toBe("QA agent");
     expect(v[0]!.queue).toHaveLength(1);
     expect(engine.count()).toEqual({ held: 2, waiting: 1 });
+  });
+});
+
+describe("keep (an extension vouches for a live agent)", () => {
+  it("extends every lease the agent holds, never shortens one and never takes one", () => {
+    const { engine, advance, store } = setup();
+    engine.acquire("a", "pr:o/r#1@abc", 60, "takeover");
+    engine.acquire("a", "long", 7200, "queue");
+    engine.acquire("b", "other", 60, "queue");
+    expect(engine.keep("a", 1800, "release-trains").sort()).toEqual(["long", "pr:o/r#1@abc"]);
+    advance(1700_000);
+    expect(engine.store.lease("pr:o/r#1@abc")!.holder?.agentId).toBe("a");
+    expect(engine.store.lease("long")!.holder!.expiresAt).toBe(1_000_000 + 7200_000);
+    expect(engine.views().find((v) => v.name === "other")).toBeUndefined();
+    expect(store.events().some((e) => e.type === "renewed" && e.actor === "release-trains")).toBe(true);
+    expect(engine.keep("c", 1800, "x")).toEqual([]);
+    expect(() => engine.keep("a", 0, "x")).toThrow(UsageError);
+  });
+
+  it("does not revive a lease that already lapsed", () => {
+    const { engine, advance } = setup();
+    engine.acquire("a", "qa", 60, "queue");
+    advance(61_000);
+    expect(engine.keep("a", 1800, "x")).toEqual([]);
+    expect(engine.views()).toEqual([]);
   });
 });

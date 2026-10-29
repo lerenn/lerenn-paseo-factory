@@ -74,7 +74,7 @@ The Overview tab (first, default) is a read-only dashboard: blueprint runs (fail
 
 ## Activity, diffs, transcripts
 
-The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalations, leases, Inbox items, merges and deploys) with filters by type, blueprint and role. Extensions add events with `POST /extensions/event` `{ id, type: "merge"|"deploy"|..., title, detail?, link? }` (bearer = endpoint token). Run cards show each PR's diff summary (files, +/−, read with `gh pr view`) and a link to the full diff, and an expandable read-only "latest messages" peek of the stage's agent (also in Roles › Agents).
+The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalations, leases, Inbox items, merges and deploys) with filters by type, blueprint and role. Extensions add events with `POST /extensions/event` `{ id, type: "merge"|"deploy"|..., title, detail?, link? }` (bearer = endpoint token). An extension that runs agents keeps a live agent's leases with `POST /extensions/leases/keep` `{ agentId, ttlSeconds, by? }` (same bearer): every lease the agent holds lasts at least `ttlSeconds` more; it never shortens or takes one. A lease that lapses with nobody waiting tells its holder it may take it again (`expiredTemplate`); one taken over or handed to a waiter tells it to stop. Run cards show each PR's diff summary (files, +/−, read with `gh pr view`) and a link to the full diff, and an expandable read-only "latest messages" peek of the stage's agent (also in Roles › Agents).
 
 ## Start endpoint (Events plugin)
 

@@ -33,7 +33,7 @@ export interface Outgoing {
   id: string;
   agentId: string;
   lease: string;
-  kind: "granted" | "lost";
+  kind: "granted" | "lost" | "expired";
   text: string;
   status: "pending" | "sent" | "failed" | "undeliverable";
   attempts: number;

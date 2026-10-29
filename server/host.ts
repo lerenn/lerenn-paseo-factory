@@ -522,7 +522,7 @@ export class FactoryHost {
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return { status: 403, body: { error: "forbidden host" } };
     const pathname = (req.url ?? "").split("?")[0];
 
-    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event") {
+    if (pathname === "/extensions/register" || /^\/stages\/[^/]+\/outcome$/.test(pathname) || pathname === "/extensions/unregister" || pathname === "/extensions/event" || pathname === "/extensions/leases/keep") {
       const given = Buffer.from(this.bearer(req) ?? "");
       const want = Buffer.from(this.endpointToken);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
@@ -548,6 +548,18 @@ export class FactoryHost {
         this.extensionEvents.push({ at: Date.now(), extension: input.id, type: String(input.type ?? "extension"), title: input.title.slice(0, 300), detail: typeof input.detail === "string" ? input.detail.slice(0, 1000) : null, link: input.link ?? null });
         if (this.extensionEvents.length > 500) this.extensionEvents.splice(0, this.extensionEvents.length - 500);
         return { status: 200, body: { ok: true } };
+      }
+      if (pathname === "/extensions/leases/keep") {
+        // An extension that runs agents (Release Trains' job runner) keeps a live agent's leases while it waits.
+        if (!this.engines.leases || !this.enabled("leases")) return { status: 404, body: { error: "leases are off" } };
+        const ttl = Number(input?.ttlSeconds);
+        if (typeof input?.agentId !== "string" || !input.agentId || !Number.isFinite(ttl)) return { status: 400, body: { error: "agentId and ttlSeconds are required" } };
+        const by = typeof input?.by === "string" && input.by ? input.by.slice(0, 64) : "extension";
+        try {
+          return { status: 200, body: { kept: this.engines.leases.keep(input.agentId, ttl, by) } };
+        } catch (error) {
+          return { status: 400, body: { error: (error as Error).message } };
+        }
       }
       if (pathname === "/extensions/unregister") {
         const known = typeof input?.id === "string" && this.remotes.get(input.id);

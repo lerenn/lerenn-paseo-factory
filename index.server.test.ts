@@ -54,6 +54,24 @@ describe("the factory MCP server", () => {
     expect((await mcp(endpoint.url, "bogus", { jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(401);
   });
 
+  it("lets an extension keep a live agent's leases over the endpoint", async () => {
+    const { create, open, rpc, ctx, dir } = boot();
+    const out = await create(request());
+    await open({ agentId: "a1", env: out.env });
+    const { endpoint } = await rpc["factory.overview"]({}, ctx);
+    const cap = out.env.PASEO_FACTORY_CAPABILITY;
+    await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lease_acquire", arguments: { name: "pr:x#1@abc", ttl: 60, mode: "takeover" } } });
+    const { token } = JSON.parse(readFileSync(`${dir}/endpoint.json`, "utf8"));
+    const keep = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/leases/keep`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    expect((await keep({ agentId: "a1", ttlSeconds: 1800 }, "wrong")).status).toBe(401);
+    expect((await keep({ ttlSeconds: 1800 })).status).toBe(400);
+    const res = await keep({ agentId: "a1", ttlSeconds: 1800, by: "release-trains" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ kept: ["pr:x#1@abc"] });
+    const list = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lease_list", arguments: {} } });
+    expect(JSON.parse(list.body.result.content[0].text)[0].holder.expires_in_seconds).toBeGreaterThan(1700);
+  });
+
   it("a module switched off loses its hook injection and its tools", async () => {
     const { create, open, rpc, ctx } = boot({ factory: { modules: { leases: false } } });
     const out = await create(request());
