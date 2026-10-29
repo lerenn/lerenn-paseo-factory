@@ -11,6 +11,7 @@ import { createReporter } from "./report";
 import { setExclusions } from "./exclusions";
 import { setTrustedLabels } from "./trust";
 import { factorySettings, factorySettingsSchema, type FactorySettings, type ModuleId } from "../shared/settings";
+import { KnownExtensions, placeholderTools } from "./known-extensions";
 import { McpServer } from "./mcp";
 import { SessionStore } from "./sessions";
 import type { CallContext, HostTool } from "./tools";
@@ -88,7 +89,10 @@ export class FactoryHost {
   private readonly contributions: Contribution[] = [];
   private readonly createHooks: BeforeCreate[] = [];
   private readonly extensions = new Map<string, Extension>();
-  private readonly remotes = new Map<string, { handle: RemoteHandle; remove: () => void }>();
+  private readonly remotes = new Map<string, { handle: RemoteHandle; remove: (away?: boolean) => void }>();
+  /** Remote extensions' tools as they last registered, offered while they are away (see known-extensions.ts). */
+  private readonly known: KnownExtensions;
+  private readonly placeholders = new Map<string, () => void>();
   private readonly pending = new PendingOutcomes();
   /** Events extensions report (merges, deploys, ...): a ring shown in the Activity tab. */
   readonly extensionEvents: import("./activity").ExtensionEvent[] = [];
@@ -124,8 +128,10 @@ export class FactoryHost {
   /** Information for an agent: through Agents Mail when it is there, else sent directly. */
   readonly report = createReporter({ send: (id, text) => this.paseo.agents.ref(id).send(text, { activeTurnBehavior: "steer" }) as Promise<void> });
 
-  constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null } = {}) {
+  constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null; knownExtensionsFile?: string | null } = {}) {
     this.sessions = new SessionStore(opts.sessionsFile === undefined ? path.join(dataDir(), "sessions.json") : opts.sessionsFile);
+    this.known = new KnownExtensions(opts.knownExtensionsFile === undefined ? path.join(dataDir(), "extensions.json") : opts.knownExtensionsFile);
+    for (const id of this.known.ids()) this.offerPlaceholders(id);
     setExclusions({ paths: factorySettingsSchema.parse({}).excludePaths, agents: [] });
     setTrustedLabels(factorySettingsSchema.parse({}).trustedLabels);
     const settings = server.registerSettings(factorySettings);
@@ -277,7 +283,19 @@ export class FactoryHost {
   }
 
   private visible(tool: HostTool): boolean {
-    return this.enabled(tool.owner) || this.extensions.has(tool.owner);
+    return this.enabled(tool.owner) || this.extensions.has(tool.owner) || this.placeholders.has(tool.owner);
+  }
+
+  /** List a known remote extension's tools while it is not registered; a call answers "try again in a minute". */
+  private offerPlaceholders(id: string): void {
+    if (this.placeholders.has(id) || this.extensions.has(id)) return;
+    const tools = placeholderTools(id, this.known.tools(id)).filter((t) => !this.tools.has(t.name));
+    this.placeholders.set(id, this.registerTools(id, tools));
+  }
+
+  private withdrawPlaceholders(id: string): void {
+    this.placeholders.get(id)?.();
+    this.placeholders.delete(id);
   }
 
   private source() {
@@ -362,9 +380,10 @@ export class FactoryHost {
     for (const r of ext.rpc) if (!/^[a-z][a-z0-9_-]*$/.test(r.name)) throw new Error(`rpc name "${r.name}" must be lowercase letters, digits, '-' and '_'`);
     if (!/^[a-z][a-z0-9-]*$/.test(ext.id)) throw new Error(`extension id "${ext.id}" must be lowercase letters, digits and '-'`);
     if (this.extensions.has(ext.id) || (MODULES_SET as Set<string>).has(ext.id)) throw new Error(`extension "${ext.id}" is already registered`);
+    this.withdrawPlaceholders(ext.id);
     for (const t of ext.tools) if (this.tools.has(t.name)) throw new Error(`tool "${t.name}" already exists`);
     this.extensions.set(ext.id, ext);
-    const removeTools = this.registerTools(ext.id, ext.tools);
+    const removeTools = this.registerTools(ext.id, ext.tools.map((t) => ({ ...t, extension: true })));
     for (const l of this.onExtension) l(ext);
     return () => {
       removeTools();
@@ -383,11 +402,14 @@ export class FactoryHost {
     const handle = buildRemote(raw, this.pending);
     const removeInner = this.registerExtension(handle.registration);
     this.droppedExtensions.delete(raw.id);
+    this.known.remember(raw.id, raw.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, readOnly: t.readOnly })));
     const entry = {
       handle,
-      remove: () => {
+      remove: (away = false) => {
         removeInner();
         if (this.remotes.get(raw.id) === entry) this.remotes.delete(raw.id);
+        // Gone for now (unregistered at its own restart, or unreachable): keep its tools listed until it is back.
+        if (away) this.offerPlaceholders(raw.id);
       },
     };
     this.remotes.set(raw.id, entry);
@@ -404,7 +426,7 @@ export class FactoryHost {
     for (const [id, { handle, remove }] of [...this.remotes]) {
       if (handle.failures < MAX_FAILURES) await probe(handle);
       if (handle.failures >= MAX_FAILURES) {
-        remove();
+        remove(true);
         dropped.push(id);
         this.droppedExtensions.set(id, Date.now());
         console.error(`factory: extension "${id}" dropped, its callback is unreachable`);
@@ -529,7 +551,7 @@ export class FactoryHost {
       }
       if (pathname === "/extensions/unregister") {
         const known = typeof input?.id === "string" && this.remotes.get(input.id);
-        if (known) known.remove();
+        if (known) known.remove(true);
         return { status: 200, body: { ok: !!known } };
       }
       const token = pathname.split("/")[2];

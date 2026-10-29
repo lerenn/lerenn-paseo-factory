@@ -7,8 +7,14 @@ import { isTrusted } from "./trust";
 function allowed(t: HostTool, labels: Record<string, string>): boolean {
   if (t.requiresLabel && labels[t.requiresLabel.key] !== t.requiresLabel.value) return false;
   if (t.requiresTrusted && !isTrusted(labels)) return false;
+  // Trusted agents act for the human without asking (bypassPermissions): they get an extension's reads, not its
+  // writes, which stay with the extension's own agents or with agents a person confirms each call for.
+  if (t.extension && !t.readOnly && isTrusted(labels)) return false;
   return true;
 }
+
+/** Whether calling the tool needs the caller's labels. */
+const gated = (t: HostTool) => !!(t.requiresLabel || t.requiresTrusted || (t.extension && !t.readOnly));
 
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -60,13 +66,18 @@ export class McpServer {
         const labels = await ctx.labels();
         const visible = this.source.tools().filter((t) => allowed(t, labels));
         return reply({
-          tools: visible.map((t) => ({ name: t.name, description: t.description, inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }) })),
+          tools: visible.map((t) => ({
+            name: t.name,
+            description: t.description,
+            inputSchema: t.jsonSchema ?? z.toJSONSchema(t.input, { io: "input" }),
+            ...(t.readOnly ? { annotations: { readOnlyHint: true } } : {}),
+          })),
         });
       }
       case "tools/call": {
         const tool = [...this.source.tools(), ...this.source.aliases()].find((t) => t.name === req.params?.name);
         if (!tool) return fail(-32602, `Unknown tool: ${req.params?.name}`);
-        if ((tool.requiresLabel || tool.requiresTrusted) && !allowed(tool, await ctx.labels())) {
+        if (gated(tool) && !allowed(tool, await ctx.labels())) {
           return reply(textResult(`${tool.name} is not available to this agent.`, true));
         }
         const parsed = tool.input.safeParse(req.params?.arguments ?? {});

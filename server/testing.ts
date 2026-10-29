@@ -23,8 +23,9 @@ import contribute from "../index.server";
 type Handler = (input: any, ctx: any) => any;
 
 /** The whole plugin on a fake server: handlers by name, a fake daemon SDK, a private data folder. */
-export function bootPlugin(settings: Record<string, object> = {}, paseoOverrides: Record<string, unknown> = {}) {
-  const dir = mkdtempSync(path.join(tmpdir(), "factory-"));
+export function bootPlugin(settings: Record<string, object> = {}, paseoOverrides: Record<string, unknown> = {}, reuseDir?: string) {
+  /** `reuseDir`: the folder of an earlier boot, to start again on its state (a Factory restart). */
+  const dir = reuseDir ?? mkdtempSync(path.join(tmpdir(), "factory-"));
   process.env.FACTORY_PORT = "0";
   process.env.FACTORY_DATA = path.join(dir, "data");
   process.env.FACTORY_ENDPOINT = path.join(dir, "endpoint.json");

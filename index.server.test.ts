@@ -476,6 +476,94 @@ describe("warden is for Factory agents only", () => {
   });
 });
 
+describe("extension tools for trusted agents and across restarts", () => {
+  async function extServer(handlers: Partial<Record<string, (body: any) => unknown>>) {
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const handler = handlers[req.url ?? ""];
+        res.writeHead(handler ? 200 : 404, { "content-type": "application/json" });
+        res.end(JSON.stringify(handler ? handler(raw ? JSON.parse(raw) : {}) : { error: "nope" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    cleanups.push(() => void server.close());
+    return `http://127.0.0.1:${(server.address() as any).port}`;
+  }
+  const agents = {
+    agents: {
+      list: async () => ({ entries: [{ agent: { id: "assistant", labels: { "paseo.assistant": "1" } } }, { agent: { id: "plain", labels: {} } }] }),
+      ref: () => ({ send: async () => {}, refresh: async () => ({ agent: { archivedAt: null, status: "idle" } }), timeline: { subscribe: () => () => {} } }),
+    },
+  };
+  const registration = (url: string) => ({
+    id: "lanes",
+    version: "1",
+    callback: { url, token: "ext-secret-token" },
+    tools: [
+      { name: "lanes_board", description: "Read the board", readOnly: true },
+      { name: "lanes_drop", description: "Drop an item" },
+    ],
+  });
+  async function start(dir?: string) {
+    const b = bootPlugin({ factory: { trustedLabels: ["paseo.assistant=1"] } }, agents, dir);
+    const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
+    const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
+    const post = (p: string, body: object) => fetch(`${endpoint.url}${p}`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const login = async (id: string) => {
+      const out = await b.create(request());
+      await b.open({ agentId: id, env: out.env });
+      return out.env.PASEO_FACTORY_CAPABILITY as string;
+    };
+    const listed = async (cap: string) => (await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 1, method: "tools/list" })).body.result.tools as any[];
+    const call = async (cap: string, name: string) => (await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: {} } })).body.result;
+    return { b, post, login, listed, call };
+  }
+
+  it("offers a trusted agent an extension's read-only tools and neither lists nor runs its writes", async () => {
+    const url = await extServer({ "/tools/lanes_board": () => ({ result: { lanes: 4 } }), "/tools/lanes_drop": () => ({ result: "dropped" }) });
+    const f = await start();
+    cleanups.push(f.b.cleanup as () => void);
+    expect((await f.post("/extensions/register", registration(url))).status).toBe(200);
+    const [assistant, plain] = [await f.login("assistant"), await f.login("plain")];
+    const forAssistant = await f.listed(assistant);
+    expect(forAssistant.map((t) => t.name)).toContain("lanes_board");
+    expect(forAssistant.map((t) => t.name)).not.toContain("lanes_drop");
+    expect(forAssistant.find((t) => t.name === "lanes_board").annotations).toEqual({ readOnlyHint: true });
+    expect(JSON.parse((await f.call(assistant, "lanes_board")).content[0].text)).toEqual({ lanes: 4 });
+    const refused = await f.call(assistant, "lanes_drop");
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/not available to this agent/);
+    // Other agents keep both, under their own permission flow.
+    expect((await f.listed(plain)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    expect((await f.call(plain, "lanes_drop")).content[0].text).toBe("dropped");
+  });
+
+  it("keeps listing a remote extension's tools while it is away, also after a Factory restart", async () => {
+    const url = await extServer({ "/tools/lanes_board": () => ({ result: "live" }) });
+    const first = await start();
+    expect((await first.post("/extensions/register", registration(url))).status).toBe(200);
+    expect((await first.post("/extensions/unregister", { id: "lanes" })).status).toBe(200);
+    const plain = await first.login("plain");
+    expect((await first.listed(plain)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    const away = await first.call(plain, "lanes_board");
+    expect(away.isError).toBe(true);
+    expect(away.content[0].text).toMatch(/not connected to the Factory right now.*Try again in a minute/);
+    await (first.b.cleanup as () => Promise<void>)();
+
+    // A new Factory process: the tools are listed before the extension registers again, with the same access rule.
+    const second = await start(first.b.dir);
+    cleanups.push(second.b.cleanup as () => void);
+    const [assistant, plain2] = [await second.login("assistant"), await second.login("plain")];
+    expect((await second.listed(plain2)).map((t) => t.name)).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    expect((await second.listed(assistant)).map((t) => t.name)).not.toContain("lanes_drop");
+    expect((await second.post("/extensions/register", registration(url))).status).toBe(200);
+    expect((await second.call(plain2, "lanes_board")).content[0].text).toBe("live");
+    expect((await second.listed(assistant)).filter((t) => t.name === "lanes_board")).toHaveLength(1);
+  });
+});
+
 describe("the Supervisor", () => {
   it("is reachable by every agent through supervisor_ask / supervisor_status, while reply and restart are its own", async () => {
     process.env.FACTORY_DEFAULT_CWD = "/work";

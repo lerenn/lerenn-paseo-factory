@@ -25,6 +25,10 @@ export interface HostTool {
   requiresLabel?: { key: string; value: string };
   /** Only agents carrying one of the factory `trustedLabels` see and may call the tool. */
   requiresTrusted?: boolean;
+  /** Changes nothing (advertised as the MCP `readOnlyHint`). An extension's tools that are not read-only are not offered to trusted agents. */
+  readOnly?: boolean;
+  /** Served for an extension (set by the host). */
+  extension?: boolean;
   run(input: any, ctx: CallContext): Promise<unknown> | unknown;
 }
 
