@@ -14,6 +14,7 @@ import { GitSourcesSection } from "./git-sources";
 import { ActivityScreen } from "./activity";
 import { OverviewScreen } from "./overview";
 import { SupervisorScreen } from "./supervisor/screen";
+import { UsageLimitBanner } from "./blueprints/quota";
 import { subscribeTabs, tabFor } from "./registry";
 import { builtinTabs } from "./tabs";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
@@ -138,6 +139,7 @@ export function FactoryScreen(props: PluginScreenProps) {
         ) : null}
       </View>
       {query.data?.endpoint.error ? <Text style={{ color: c.statusDanger, padding: 10 }}>{query.data.endpoint.error}</Text> : null}
+      {modules?.blueprints ? <UsageLimitBanner theme={theme} onOpen={() => setPicked("blueprints")} /> : null}
       <View style={{ flex: 1 }}>{body}</View>
     </View>
   );

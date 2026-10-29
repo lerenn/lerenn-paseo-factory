@@ -165,7 +165,9 @@ export function startWarden(host: FactoryHost) {
   const loop = async () => {
     try {
       await reconcile();
-      await engine.tick();
+      // While the Factory is paused for a provider usage limit, Warden pings nobody (a ping would only fail on the limit).
+      const usage = host.engines.blueprints?.usageLimits as { enabled(): boolean; globalHold(): unknown } | undefined;
+      if (!(usage?.enabled() && usage.globalHold())) await engine.tick();
     } catch (error) {
       console.error("warden: tick failed", error);
     }

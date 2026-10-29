@@ -12,6 +12,7 @@ import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { SubTabs } from "../subtabs";
 import { BlueprintGraph } from "./graph";
 import { CronsTab } from "./crons";
+import { QuotaTab } from "./quota";
 import { BLUEPRINTS_SUBTABS } from "./tabs";
 
 type Colors = PluginScreenProps["theme"]["colors"];
@@ -489,6 +490,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             runs: { badge: runs.filter((r) => r.endedAt === null).length, render: runsTab },
             templates: { badge: errors.length || undefined, render: templatesTab },
             crons: { render: () => <CronsTab theme={theme} layout={layout} /> },
+            quota: { render: () => <QuotaTab theme={theme} layout={layout} /> },
             settings: { render: settingsTab },
           }[key],
         }))}
