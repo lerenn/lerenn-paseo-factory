@@ -34,8 +34,31 @@ export const settingsSchema = z.object({
   shareWorkspace: z.boolean().default(false),
   /** Infrastructure failures of a worker (exit 137/143, pod did not start, container not found, evicted...) retried per stage entry with a fresh pod, without using an attempt. A stage's own `flake_retries` raises it. */
   flakeRetries: z.number().int().min(0).default(3),
-  /** Notices of a run that ended or needs a PM judgement. Empty: a message to the agent that started the run (as before). An address or alias (e.g. @pm): one mail there instead, no live message. */
+  /**
+   * Notices of a run that ended or needs a PM judgement. Empty: the run's end is reported to the agent that started it, and every
+   * judgement point spawns an on-demand PM (see `pm`). An address or alias (e.g. @assistant): one mail there instead, no live
+   * message, and no PM is spawned.
+   */
   runs: z.object({ notifyMailTo: z.string().default("") }).default({ notifyMailTo: "" }),
+  /**
+   * The on-demand PM of a run (role `pmRole`), spawned at a judgement point (an exhausted stage, a failed run, a `pm = true` gate,
+   * a paused run waiting for a resume decision) and archived when its turn ends. Only used while `runs.notifyMailTo` is empty:
+   * set, judgement requests are mailed there instead.
+   */
+  pm: z
+    .object({
+      /** PMs spawned per run at most; past it the human is asked. */
+      maxPerRun: z.number().int().min(0).default(4),
+      /** Spend of one PM above this is flagged in the run history (a turn cannot be cut short). */
+      maxUsd: z.number().min(0).default(0.5),
+      /** A PM still deciding after this long is archived and the point goes to the human. */
+      timeoutMinutes: z.number().min(1).default(10),
+      /** Where a PM escalates first: an agent address or alias. Empty: the Supervisor while it is enabled, else its `reportTo`; neither: the human. */
+      escalateTo: z.string().default(""),
+      /** An escalation unanswered this long goes to the human through the Inbox (a blocking inbox_ask). */
+      escalateTimeoutMinutes: z.number().min(1).default(30),
+    })
+    .default({ maxPerRun: 4, maxUsd: 0.5, timeoutMinutes: 10, escalateTo: "", escalateTimeoutMinutes: 30 }),
   /** Gates waiting for a person. */
   gates: z.object({ criteriaReminderMinutes: z.number().min(0).default(30) }).default({ criteriaReminderMinutes: 30 }),
   /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. Empty: no mail. */

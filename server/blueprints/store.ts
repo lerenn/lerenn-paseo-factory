@@ -83,7 +83,12 @@ export interface Run {
   error: string | null;
   waitingFor: string | null;
   parent: { runId: string; stageId: string } | null;
-  pm: { judged: Record<string, { at: number; decision: string }>; pending: { stage: string; reason: string } | null };
+  pm: {
+    judged: Record<string, { at: number; decision: string }>;
+    pending: { stage: string; reason: string } | null;
+    /** The on-demand PMs of the run, by judgement key `<run>:<point>:<stage>:<entry>` (one per key). Absent in older saved runs. */
+    calls?: Record<string, PmCall>;
+  };
   history: HistoryEvent[];
   /** Inbox items asking a person about a stuck or paused run: item id -> the stage and what was asked. */
   escalations?: Record<string, { stage: string; kind: "stuck" | "setup" }>;
@@ -101,6 +106,28 @@ export interface Run {
   suspended?: { reason: string; at: number; by: string; prevStatus: RunStatus; pods: string[] } | null;
   /** What happened after the run ended: event mails already sent, the retro, the janitor. */
   post?: PostState;
+}
+
+/** Where the engine asks for a judgement: an exhausted stage, a failed run, a `pm = true` gate, a resume decision. */
+export type PmPoint = "exhausted" | "failed" | "gate" | "resume";
+
+/** One on-demand PM: spawned for one judgement key, archived when its turn ends (or on its timeout). */
+export interface PmCall {
+  key: string;
+  point: PmPoint;
+  stage: string;
+  entry: number;
+  agentId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  /** "active": deciding; "escalated": waiting for an answer to its escalation (kept alive); then how it ended. */
+  state: "active" | "escalated" | "done" | "handover" | "timeout" | "gone" | "unavailable";
+  /** The Inbox item of a `pm = true` gate: the only item this PM may answer. */
+  gateItemId?: string | null;
+  /** The PM's escalation: step 1 to the escalation target, step 2 to the human through the Inbox. */
+  escalation?: { step: 1 | 2; target: string; at: number; question: string } | null;
+  /** What the PM decided (blueprint_pm_done) or why the call ended. */
+  outcome?: string | null;
 }
 
 export interface SpawnedAgent {

@@ -25,6 +25,8 @@ export interface HostTool {
   requiresLabel?: { key: string; value: string };
   /** Only agents carrying one of the factory `trustedLabels` see and may call the tool. */
   requiresTrusted?: boolean;
+  /** With `requiresTrusted`: an agent carrying this label sees the tool too (the tool's own checks say what it may do). */
+  alsoLabel?: { key: string; value: string };
   /** Changes nothing (advertised as the MCP `readOnlyHint`). An extension's tools that are not read-only are not offered to trusted agents. */
   readOnly?: boolean;
   /** Served for an extension (set by the host). */
@@ -39,7 +41,7 @@ export class UsageError extends Error {}
 export function adapt<E>(
   tool: { name: string; description: string; input: z.ZodObject; run(input: any, ctx: { engine: E; callerId: string; labels?: () => Promise<Record<string, string>>; labelsOf?: (id: string) => Promise<Record<string, string>>; nameOf?: (id: string) => Promise<string> }): Promise<unknown> | unknown },
   engine: E,
-  extra: { requiresLabel?: HostTool["requiresLabel"]; requiresTrusted?: boolean } = {},
+  extra: { requiresLabel?: HostTool["requiresLabel"]; requiresTrusted?: boolean; alsoLabel?: HostTool["alsoLabel"] } = {},
 ): Omit<HostTool, "owner"> {
   return { name: tool.name, description: tool.description, input: tool.input, ...extra, run: (input, call) => tool.run(input, { engine, callerId: call.callerId, labels: call.labels, labelsOf: call.labelsOf, nameOf: call.nameOf }) };
 }

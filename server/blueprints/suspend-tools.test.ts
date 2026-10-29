@@ -9,6 +9,7 @@ function fake() {
   const engine = {
     require: () => run,
     hasLivePm: async () => false,
+    pmRunOf: () => null,
     suspend: async (...a: unknown[]) => (calls.push(["suspend", ...a]), { id: "bp-1", status: "suspended", suspended: { pods: ["p"] } }),
     suspendAll: async (...a: unknown[]) => (calls.push(["suspendAll", ...a]), [{ id: "bp-1", status: "suspended", suspended: { pods: ["p"] } }]),
     resumeAllSuspended: (...a: unknown[]) => (calls.push(["resumeAll", ...a]), { runs: ["bp-1"], done: Promise.resolve() }),

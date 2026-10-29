@@ -154,7 +154,7 @@ export function InboxScreen({ theme, layout, focus }: PluginScreenProps & { focu
             ) : (
               <Text style={s.text} selectable>
                 {icon.label}
-                {item.answer ? `: ${item.answer.optionId ? (item.options.find((o) => o.id === item.answer!.optionId)?.label ?? item.answer.optionId) : item.answer.text}${item.answer.by === "default" ? " (default)" : item.answer.by === "assistant" ? " (by the Assistant on behalf of the user)" : ""}` : ""}
+                {item.answer ? `: ${item.answer.optionId ? (item.options.find((o) => o.id === item.answer!.optionId)?.label ?? item.answer.optionId) : item.answer.text}${item.answer.by === "default" ? " (default)" : item.answer.by === "assistant" ? " (by the Assistant on behalf of the user)" : item.answer.by === "pm" ? " (by the run's PM)" : ""}` : ""}
                 {item.comment ? ` — ${item.comment}` : ""}
                 {item.answer || item.status === "expired" ? ` · agent ${item.delivery === "sent" ? "notified" : item.delivery === "undeliverable" ? "archived or gone, so it could not be told" : item.delivery === "failed" ? "could not be notified" : "not yet notified"}` : ""}
               </Text>

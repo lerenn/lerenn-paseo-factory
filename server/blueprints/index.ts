@@ -19,7 +19,7 @@ import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
 import { startCrons } from "./crons";
 import { retitleFactoryWorkspaces } from "../workspace-title";
-import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
+import { blueprintTools, INSTRUCTIONS, PM_TOOL_NAMES, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
@@ -248,7 +248,14 @@ export function startBlueprints(host: FactoryHost) {
       const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);
       return needsCwd && !cfg().defaultCwd ? "Blueprints setting defaultCwd is not set: workers need a working directory. Set it in Factory > Blueprints > Settings." : null;
     },
-    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30 }),
+    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30, pm: cfg().pm }),
+    escalationTarget() {
+      const to = cfg().pm?.escalateTo?.trim();
+      if (to) return to;
+      const supervisor = (host.engines.supervisor as { config?(): { enabled: boolean; reportTo: string } } | undefined)?.config?.();
+      if (supervisor?.enabled && host.enabled("supervisor")) return "supervisor";
+      return supervisor?.reportTo?.trim() ?? "";
+    },
   };
   const engine = new Engine(store, ports);
   host.engines.blueprints = { engine, store, eventsMailTo: () => cfg().events.mailTo };
@@ -284,6 +291,7 @@ export function startBlueprints(host: FactoryHost) {
     module: "blueprints",
     note: MODULE_NOTE,
     tools(request) {
+      if (request.env?.PASEO_FACTORY_STAGE === "pm") return PM_TOOL_NAMES;
       if (request.env?.PASEO_FACTORY_RUN) return WORKER_TOOL_NAMES;
       return request.env?.PASEO_FACTORY_BLUEPRINTS === "on" || request.env?.PASEO_AGENT_ROLE === cfg().pmRole ? TOOL_NAMES : null;
     },
@@ -358,7 +366,10 @@ export function startBlueprints(host: FactoryHost) {
     }),
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
-      void recordSpend(agent.id, turnId).finally(() => engine.observer.retroEnded?.(agent.id));
+      void recordSpend(agent.id, turnId).finally(() => {
+        engine.observer.retroEnded?.(agent.id);
+        void engine.pmTurnEnded(agent.id);
+      });
       void engine.turnEnded(agent.id, { kind: outcome.kind, message: outcome.kind === "failed" ? outcome.error.message : undefined }).catch((e) => console.error("blueprints: turn_ended failed", e));
     }),
   ];

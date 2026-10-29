@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { Engine, UsageError, type GateState, type PrFacts, type Ports } from "./engine";
 import { RunStore } from "./store";
+import type { PmSettings } from "./pm";
 import { parseBlueprint } from "./toml";
 
 const flow = `
@@ -81,9 +82,12 @@ merged = "done"
 head_moved = "check"
 `;
 
-function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean } = {}, withReport = false) {
+/** No on-demand PM: judgement points go to the human, as the engine did before PMs. */
+const NO_PM = { maxPerRun: 0 };
+
+function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean; pm?: Partial<PmSettings>; escalationTarget?: string } = {}, withReport = false) {
   let time = 1_000_000;
-  const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string }[] = [];
+  const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string; title: string }[] = [];
   const sent: { to: string; text: string }[] = [];
   const states = new Map<string, "running" | "idle" | "gone">();
   const items = new Map<string, { gate: GateState; question: string; withdrawn: string | null }>();
@@ -101,7 +105,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
       const failure = spawnErrors.shift();
       if (failure) throw new Error(failure);
       const agentId = `agent-${++agents}`;
-      spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey, workspaceTitle: o.workspaceTitle });
+      spawned.push({ role: o.role, prompt: o.prompt, labels: o.labels, env: o.env, key: o.idempotencyKey, workspaceTitle: o.workspaceTitle, title: o.title });
       states.set(agentId, "running");
       return { agentId, workspaceId: over.pods ? `ws-${agents}` : undefined };
     },
@@ -147,7 +151,8 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     tool: () => null,
     stageKind: () => null,
     blueprint: (name) => (name === "flow" ? parseBlueprint(source) : undefined),
-    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, flakeRetries: over.flakeRetries, runsMailTo: over.runsMailTo }),
+    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, flakeRetries: over.flakeRetries, runsMailTo: over.runsMailTo, pm: over.pm }),
+    escalationTarget: () => over.escalationTarget ?? "",
   };
   const engine = new Engine(store, ports);
   const settle = async () => {
@@ -267,6 +272,7 @@ describe("setup failures", () => {
     live.status = "waiting";
     live.pmAgentId = null;
     live.pm.pending = { stage: "think", reason: "2 attempts used" };
+    delete live.pm.calls; // a run saved before on-demand PMs
     const spawn = a.ports.spawn;
     a.ports.spawn = async (o) => {
       if (o.role === "pm") throw new Error("Expected config.provider in provider/model format");
@@ -352,10 +358,15 @@ describe("attempts, runs and the PM", () => {
     expect(sent.find((m) => m.to === "agent-1")?.text).toMatch(/without giving a verdict/);
   });
 
-  it("exhaustion hands ONE judgement to the PM, who can grant bounded extra attempts", async () => {
-    const { run, engine, sent } = await exhaust();
+  it("exhaustion hands ONE judgement to an on-demand PM, who can grant bounded extra attempts", async () => {
+    const { run, engine, sent, spawned } = await exhaust();
     expect(engine.require(run.id)).toMatchObject({ status: "waiting", pm: { pending: { stage: "think" } } });
-    expect(sent.some((m) => m.to === "pm-agent" && /ONE judgement/.test(m.text))).toBe(true);
+    const pm = spawned.find((s) => s.role === "pm")!;
+    expect(pm.title).toBe(`PM flow ${run.id} · exhausted`);
+    expect(pm.labels["paseo.factory.stage"]).toBe("pm");
+    expect(pm.key).toBe(`pm:${run.id}:exhausted:think:1`);
+    expect(pm.prompt).toMatch(/ONE judgement/);
+    expect(sent.some((m) => m.to === "pm-agent")).toBe(false);
     await expect(engine.retry(run.id, { extraAttempts: 5 })).rejects.toThrow(/1 to 2/);
     await engine.retry(run.id, { extraAttempts: 2, note: "look at the logs" });
     expect(engine.require(run.id).status).toBe("running");
@@ -805,7 +816,7 @@ describe("infrastructure flakes", () => {
     expect(r.stages.think.attempts).toBe(3); // 1st + two failures counted after the cap
     expect(r.pm.pending?.reason).toContain("infra flakes ×4: OOMKilled / exit 137");
     expect(r.history.filter((e) => e.event === "flake_retry")).toHaveLength(2);
-    expect(spawned).toHaveLength(3);
+    expect(spawned.filter((s) => s.role !== "pm")).toHaveLength(3);
   });
 
   it("a stage's flake_retries raises the bound", async () => {
@@ -1080,7 +1091,7 @@ describe("suspending the whole Factory", () => {
 
 describe("withdrawing stale escalations on resume", () => {
   it("withdraws older pending pause items of the run when it resumes, keeping none behind", async () => {
-    const { start, engine, spawnErrors, items, settle } = setup(flow, { pods: true });
+    const { start, engine, spawnErrors, items, settle } = setup(flow, { pods: true, pm: NO_PM });
     spawnErrors.push("no provider");
     const run = await start();
     expect(engine.require(run.id).status).toBe("paused");
@@ -1095,7 +1106,7 @@ describe("withdrawing stale escalations on resume", () => {
   });
 
   it("an answer to a newer escalation withdraws the older ones", async () => {
-    const { start, engine, spawnErrors, items, answer, settle } = setup(flow, { pods: true });
+    const { start, engine, spawnErrors, items, answer, settle } = setup(flow, { pods: true, pm: NO_PM });
     spawnErrors.push("no provider");
     const run = await start();
     const older = [...items.keys()][0];
@@ -1231,7 +1242,7 @@ describe("a worker that finished while its stage was paused", () => {
 
 describe("blueprint_resume attach_agent", () => {
   it("resumes a paused stage onto its live worker without spawning", async () => {
-    const { start, engine, spawnErrors, spawned, sent, store, settle } = setup();
+    const { start, engine, spawnErrors, spawned, sent, store, settle } = setup(flow, { pm: NO_PM });
     const run = await start();
     spawnErrors.push("working directory does not exist");
     await engine.resume(run.id, { stage: "think" });
@@ -1355,7 +1366,7 @@ head_moved = "merge"
 
 describe("pod start failures (d82771ac)", () => {
   it("pauses the run after two pod starts in a row failed, instead of more retries", async () => {
-    const ctx = setup();
+    const ctx = setup(flow, { pm: NO_PM });
     ctx.spawnErrors.push("kube: could not start the pod: boom", "kube: could not start the pod: boom", "kube: could not start the pod: boom");
     const run = await ctx.start();
     const r = ctx.engine.require(run.id);
@@ -1584,5 +1595,179 @@ describe("a worker that waits on an outside system (decision f1cd49be)", () => {
     expect(ctx.sent.length).toBeGreaterThan(sentBefore);
     expect(r.stages[r.stage!].attempts).toBe(attempts + 1);
     expect(r.history.some((h) => h.event === "turn_ended")).toBe(true);
+  });
+});
+
+describe("the on-demand run PM (ADR 20261029-factory-on-demand-run-pm)", () => {
+  const exhaustThink = async (ctx: ReturnType<typeof setup>) => {
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+  };
+  const pms = (ctx: ReturnType<typeof setup>) => ctx.spawned.filter((s) => s.role === "pm");
+  const events = (ctx: ReturnType<typeof setup>, id: string) => ctx.engine.require(id).history.map((h) => h.event);
+
+  it("one PM per judgement key, archived with its workspace when its turn ends after it decided", async () => {
+    const ctx = setup(flow, { pods: true });
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    expect(pms(ctx)).toHaveLength(1);
+    expect(pms(ctx)[0].env).toMatchObject({ PASEO_FACTORY_STAGE: "pm", PASEO_FACTORY_RUN: run.id });
+    expect(pms(ctx)[0].prompt).toContain("<run-digest>");
+    const pm = "agent-2";
+    const archiveWs: string[] = [];
+    ctx.ports.archiveWorkspace = async (ws) => void archiveWs.push(ws);
+    // a restart does not spawn a second PM for the same key
+    await new Engine(ctx.store, ctx.ports).resumeAll();
+    await ctx.settle();
+    expect(pms(ctx)).toHaveLength(1);
+    await ctx.engine.retry(run.id, { extraAttempts: 2 });
+    await ctx.engine.pmDone(pm, run.id, { summary: "granted two attempts, the worker was close" });
+    ctx.states.set(pm, "idle");
+    await ctx.engine.pmTurnEnded(pm);
+    await ctx.settle();
+    expect(ctx.archived).toContain(pm);
+    expect(archiveWs).toContain("ws-2");
+    expect(events(ctx, run.id)).toEqual(expect.arrayContaining(["pm_spawned", "pm_done", "pm_ended"]));
+    expect([...ctx.items.values()].map((i) => i.question)).toEqual([]);
+  });
+
+  it("a PM that ends its turn without settling the point hands it to the human", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    ctx.states.set("agent-2", "idle");
+    await ctx.engine.pmTurnEnded("agent-2");
+    await ctx.settle();
+    expect(ctx.archived).toContain("agent-2");
+    expect([...ctx.items.values()].some((i) => /stuck at stage think/.test(i.question))).toBe(true);
+    expect(events(ctx, run.id)).toContain("pm_to_human");
+  });
+
+  it("a failed run gets a PM at its stage; a failed child is judged by its parent", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    await ctx.verdict("agent-1", "fix", { criteria: "c" });
+    const gate = [...ctx.items.keys()][0];
+    await ctx.answer(gate, "nonsense-answer"); // no edge: the run fails
+    expect(ctx.engine.require(run.id).status).toBe("failed");
+    expect(pms(ctx).map((p) => p.title)).toEqual([`PM flow ${run.id} · failed`]);
+    expect(pms(ctx)[0].key).toBe(`pm:${run.id}:failed:criteria:1`);
+  });
+
+  it("a pm = true gate spawns a PM that may answer that item only", async () => {
+    const gated = flow.replace('question = "Criteria for {{ticket}}?"', 'question = "Criteria for {{ticket}}?"\npm = true');
+    const ctx = setup(gated);
+    const run = await ctx.start();
+    await ctx.verdict("agent-1", "fix", { criteria: "c" });
+    const gate = ctx.engine.require(run.id).stages.criteria.gate!.itemId;
+    const pm = pms(ctx)[0];
+    expect(pm.title).toBe(`PM flow ${run.id} · gate`);
+    expect(pm.prompt).toContain(`inbox_answer(item="${gate}"`);
+    const pmId = ctx.engine.require(run.id).pmAgentId!;
+    expect(ctx.engine.pmMayAnswer(pmId, gate)).toBe(true);
+    expect(ctx.engine.pmMayAnswer(pmId, "item-other")).toBe(false);
+    expect(ctx.engine.pmMayAnswer("agent-1", gate)).toBe(false);
+    await ctx.answer(gate, "approve", null, "pm");
+    expect(ctx.engine.require(run.id).stage).toBe("build");
+    await ctx.engine.pmDone(pmId, run.id, { summary: "approved: criteria match the ticket" });
+    await ctx.engine.pmTurnEnded(pmId);
+    expect(ctx.engine.pmMayAnswer(pmId, gate)).toBe(false);
+  });
+
+  it("a gate without pm = true spawns no PM", async () => {
+    const ctx = setup();
+    await ctx.start();
+    await ctx.verdict("agent-1", "fix", { criteria: "c" });
+    expect(pms(ctx)).toHaveLength(0);
+  });
+
+  it("a paused run asks its PM for the resume decision; a PM past its timeout goes to the human", async () => {
+    const ctx = setup();
+    ctx.spawnErrors.push("No working directory");
+    const run = await ctx.start();
+    expect(ctx.engine.require(run.id).status).toBe("paused");
+    expect(pms(ctx).map((p) => p.title)).toEqual([`PM flow ${run.id} · resume`]);
+    expect(ctx.items.size).toBe(0);
+    ctx.advance(11 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(events(ctx, run.id)).toContain("pm_timeout");
+    expect(ctx.archived).toContain("agent-1");
+    expect([...ctx.items.values()].some((i) => /paused at stage think/.test(i.question))).toBe(true);
+  });
+
+  it("past pm.maxPerRun the human is asked", async () => {
+    const ctx = setup(flow, { pm: { maxPerRun: 0 } });
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    expect(pms(ctx)).toHaveLength(0);
+    expect(events(ctx, run.id)).toContain("pm_limit");
+    expect(ctx.engine.require(run.id).status).toBe("paused");
+  });
+
+  it("with runs.notifyMailTo set nothing is spawned at any point", async () => {
+    const ctx = setup(flow, { runsMailTo: "@assistant" }, true);
+    ctx.spawnErrors.push("No working directory");
+    const run = await ctx.start();
+    expect(ctx.engine.require(run.id).status).toBe("paused");
+    expect(ctx.items.size).toBe(1);
+    await ctx.engine.abort(run.id, "stop");
+    expect(pms(ctx)).toHaveLength(0);
+  });
+
+  it("escalation: the target first with the worker told, then the human after the timeout; every step in the history", async () => {
+    const ctx = setup(flow, { escalationTarget: "supervisor" });
+    const run = await ctx.start();
+    ctx.engine.workerWaiting("agent-1", "waiting for a review");
+    ctx.advance(121 * 60_000);
+    await ctx.engine.tick(); // the worker waited past the ceiling: paused, resume point
+    await ctx.settle();
+    const pm = ctx.engine.require(run.id).pmAgentId!;
+    expect(pms(ctx).map((p) => p.title)).toEqual([`PM flow ${run.id} · resume`]);
+    const out = await ctx.engine.pmEscalate(pm, run.id, { question: "Is the reviewer away?", bestGuess: "resume and wait", checked: "the PR has no review yet" });
+    expect(out).toMatchObject({ target: "supervisor", step: 1, wait_minutes: 30 });
+    expect(out.how).toContain("supervisor_ask");
+    expect(ctx.sent.some((m) => m.to === "agent-1" && /PM asked supervisor/.test(m.text))).toBe(true);
+    ctx.states.set(pm, "idle");
+    await ctx.engine.pmTurnEnded(pm); // waiting for the answer: kept
+    expect(ctx.archived).not.toContain(pm);
+    ctx.advance(31 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.sent.some((m) => m.to === pm && /blocking inbox_ask/.test(m.text))).toBe(true);
+    expect(ctx.sent.filter((m) => m.to === "agent-1" && /asks the human/.test(m.text))).toHaveLength(1);
+    await expect(ctx.engine.pmEscalate(pm, run.id, { question: "again", bestGuess: "x", checked: "y" })).rejects.toThrow(/already with the human/);
+    await ctx.engine.pmAnswer(pm, run.id, { answer: "resume it", by: "human" });
+    await ctx.engine.resume(run.id, { stage: "think" });
+    await ctx.engine.pmDone(pm, run.id, { summary: "resumed on the human's answer" });
+    await ctx.engine.pmTurnEnded(pm);
+    expect(ctx.archived).toContain(pm);
+    expect(events(ctx, run.id)).toEqual(expect.arrayContaining(["pm_escalated", "pm_escalation_timeout", "pm_answer", "pm_done"]));
+  });
+
+  it("no escalation target: straight to the human", async () => {
+    const ctx = setup();
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    const out = await ctx.engine.pmEscalate("agent-2", run.id, { question: "q?", bestGuess: "g", checked: "c" });
+    expect(out).toMatchObject({ target: "human", step: 2, wait_minutes: null });
+    await expect(ctx.engine.pmEscalate("agent-1", run.id, { question: "q?", bestGuess: "g", checked: "c" })).rejects.toThrow(/not the live PM/);
+  });
+
+  it("flags a PM over pm.maxUsd and handles a PM that is gone", async () => {
+    const ctx = setup(flow, { pm: { maxUsd: 0.5 } });
+    ctx.ports.spendOfAgent = () => 0.9;
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    await ctx.engine.pmEscalate("agent-2", run.id, { question: "q?", bestGuess: "g", checked: "c" });
+    await ctx.engine.pmTurnEnded("agent-2");
+    expect(events(ctx, run.id)).toContain("pm_over_budget");
+    ctx.states.set("agent-2", "gone");
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.engine.require(run.id).pm.calls![`${run.id}:exhausted:think:1`].state).toBe("gone");
+    expect([...ctx.items.values()].some((i) => /stuck at stage think/.test(i.question))).toBe(true);
   });
 });
