@@ -366,10 +366,8 @@ export function startBlueprints(host: FactoryHost) {
       ]);
       const runs = store.all();
       const known = new Set(runs.flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.workspaceId).filter((id): id is string => !!id)));
-      const defaultRoot = cfg().defaultCwd ? path.resolve(cfg().defaultCwd!) : null;
       const found = agentlessWorkspaces(workspaces, agents.map((e) => e.agent), {
-        projects: new Set(workspaces.filter((w) => known.has(w.id) && w.projectId).map((w) => w.projectId!)),
-        roots: new Set(defaultRoot ? [defaultRoot] : []),
+        known,
         pmAgentIds: new Set(runs.map((r) => r.pmAgentId).filter((id): id is string => !!id)),
         protect: new Set(runs.filter((r) => r.endedAt === null && r.sharedWorkspaceId).map((r) => r.sharedWorkspaceId!)),
       });
