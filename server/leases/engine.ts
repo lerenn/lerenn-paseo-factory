@@ -1,5 +1,6 @@
 import type { LeaseMode, LeaseView } from "../../shared/leases/lease";
 import type { LeasesSettings } from "../../shared/leases/settings";
+import { DEFAULT_EXPIRED_TEMPLATE } from "../../shared/leases/settings";
 import { render } from "./template";
 import type { Lease, Store } from "./store";
 
@@ -107,6 +108,28 @@ export class Engine {
     return { released: true, promoted: this.promote(lease, now) };
   }
 
+  /**
+   * For an extension that knows an agent is still on its job (the agent may be idle, waiting for a person): extend
+   * every lease the agent holds so it lasts at least `ttlSeconds` from now. Never shortens a lease, never takes one.
+   */
+  keep(agentId: string, ttlSeconds: number, by: string): string[] {
+    const now = this.now();
+    const max = (this.settings() ?? DEFAULT_SETTINGS()).maxTtlSeconds;
+    if (!(ttlSeconds > 0) || ttlSeconds > max) throw new UsageError(`ttl must be between 1 and ${max} seconds.`);
+    const kept: string[] = [];
+    for (const lease of this.store.leases()) {
+      this.settle(lease, now);
+      if (lease.holder?.agentId !== agentId) continue;
+      const until = now + ttlSeconds * 1000;
+      if (until > lease.holder.expiresAt) {
+        lease.holder.expiresAt = until;
+        this.touch(lease, now, { type: "renewed", actor: by, detail: `kept ${ttlSeconds}s for ${agentId}` });
+      }
+      kept.push(lease.name);
+    }
+    return kept;
+  }
+
   // ---- human ----
 
   forceRelease(name: string): { ok: boolean; message: string | null } {
@@ -164,9 +187,14 @@ export class Engine {
 
   private checkHolder(lease: Lease, agentId: string, token: number, op: string) {
     const holder = lease.holder;
-    if (!holder) throw this.refuse(lease.name, agentId, op, `"${lease.name}" is not held (it expired or was released). You no longer have it; acquire it again.`);
-    if (token !== lease.handover || holder.agentId !== agentId) {
-      throw this.refuse(lease.name, agentId, op, `token ${token} is stale for "${lease.name}" (current handover is ${lease.handover}${holder.agentId === agentId ? "" : ", held by another agent"}). You lost this lease: stop working on the resource.`);
+    if (!holder) {
+      throw this.refuse(lease.name, agentId, op, `"${lease.name}" is not held (it expired or was released) and nobody else holds it. If the work is still yours, take it again with lease_acquire and carry on.`);
+    }
+    if (holder.agentId === agentId && token !== lease.handover) {
+      throw this.refuse(lease.name, agentId, op, `token ${token} is stale for "${lease.name}": you hold it with token ${lease.handover}. Use that one.`);
+    }
+    if (holder.agentId !== agentId) {
+      throw this.refuse(lease.name, agentId, op, `token ${token} is stale for "${lease.name}" (current handover is ${lease.handover}, held by another agent). You lost this lease: stop working on the resource.`);
     }
     return holder;
   }
@@ -192,7 +220,9 @@ export class Engine {
   private settle(lease: Lease, now: number): boolean {
     if (!lease.holder || lease.holder.expiresAt > now) return false;
     const previous = lease.holder.agentId;
-    this.notify(previous, lease, "lost", "it expired because it was not renewed in time", lease.handover);
+    // Nobody waits: the lease simply lapses and its last holder may take it again. Someone waits: it is theirs now.
+    if (lease.queue.length === 0) this.notify(previous, lease, "expired", "", lease.handover);
+    else this.notify(previous, lease, "lost", "it expired because it was not renewed in time and went to the next waiter", lease.handover);
     lease.holder = null;
     this.touch(lease, now, { type: "expired", actor: "system", detail: `holder ${previous}` });
     this.promote(lease, now);
@@ -210,11 +240,12 @@ export class Engine {
     return next.agentId;
   }
 
-  private notify(agentId: string, lease: Lease, kind: "granted" | "lost", reason: string, token: number): void {
+  private notify(agentId: string, lease: Lease, kind: "granted" | "lost" | "expired", reason: string, token: number): void {
     const s = this.settings();
     const vars = { name: lease.name, token, reason, ttl: lease.holder?.ttlSeconds ?? 0 };
+    const template = kind === "granted" ? s?.grantedTemplate : kind === "expired" ? (s?.expiredTemplate ?? DEFAULT_EXPIRED_TEMPLATE) : s?.lostTemplate;
     // The message is recorded now and sent by deliver(), so a failure or restart cannot lose it.
-    this.store.enqueue({ agentId, lease: lease.name, kind, text: render((kind === "granted" ? s?.grantedTemplate : s?.lostTemplate) ?? "", vars) }, this.now());
+    this.store.enqueue({ agentId, lease: lease.name, kind, text: render(template ?? "", vars) }, this.now());
   }
 
   // ---- background ----

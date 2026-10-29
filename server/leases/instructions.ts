@@ -7,7 +7,7 @@ Modes of lease_acquire:
 - queue (default): if someone else holds the lease you are queued, status is "queued". END YOUR TURN: when the lease is yours you are woken with a message starting with "Agents Leases:" that carries your token. Do not poll or work on the resource meanwhile.
 - takeover (newest wins): you take the lease at once and the previous holder is told it lost it. Use it when the newest request supersedes the older one.
 
-If you receive a message saying you lost a lease (taken over, expired, released by a human, archived), stop working on that resource immediately; do not renew or release it.
+If you receive a message saying you lost a lease (taken over by another agent, handed to a waiter, released by a human), stop working on that resource immediately; do not renew or release it. A lease that only expired with nobody else holding it is different: its message (and a refused renew) says nobody else holds it, and if the work is still yours you take it again with lease_acquire (mode queue) and carry on. If that acquire queues you, someone else has it: leave the queue and stop.
 
 Tools:
 - lease_acquire(name, ttl, mode?): ttl in seconds. Returns status "held" with token and expires_at, or "queued" with your position. Calling it again for a lease you hold renews it.
