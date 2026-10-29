@@ -65,7 +65,8 @@ function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }
   );
 }
 
-export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProps) {
+/** `focus`: a run to show expanded (an extension tab's `open({tab: "blueprints", runId})`). */
+export function BlueprintsScreen({ theme, layout, navigation, focus }: PluginScreenProps & { focus?: string }) {
   const list = useRpc(listRunsRpc);
   const startCall = useRpc(startRunRpc);
   const abortCall = useRpc(abortRunRpc);
@@ -74,7 +75,7 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
   const [showFinished, setShowFinished] = useState(true);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => (focus ? { [focus]: true } : {}));
   const [picked, setPicked] = useState<string | null>(null);
   const [startOpen, setStartOpen] = useState(false);
   const [tabKey, setTabKey] = useState(0);

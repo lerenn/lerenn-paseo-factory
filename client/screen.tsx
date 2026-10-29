@@ -3,7 +3,7 @@ import { useCallback, useSyncExternalStore } from "react";
 import { SettingsCard, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Linking, Pressable, ScrollView, Text, View } from "react-native";
 import { BlueprintsScreen } from "./blueprints";
 import { InboxScreen } from "./inbox";
 import { LeasesScreen } from "./leases";
@@ -14,7 +14,8 @@ import { GitSourcesSection } from "./git-sources";
 import { ActivityScreen } from "./activity";
 import { OverviewScreen } from "./overview";
 import { SupervisorScreen } from "./supervisor/screen";
-import { subscribeTabs, tabFor } from "./registry";
+import { subscribeTabs, tabFor, type ExtensionLink } from "./registry";
+import { resolveLink } from "./extension-link";
 import { builtinTabs } from "./tabs";
 import { factorySettings, MODULES, type ModuleId } from "../shared/settings";
 
@@ -58,7 +59,7 @@ function SettingsTab({ theme, layout }: PluginScreenProps) {
   );
 }
 
-function ExtensionTab({ theme, layout, ext }: PluginScreenProps & { ext: { id: string; version: string; tab: string | null; tools: string[]; stageKinds: string[] } }) {
+function ExtensionTab({ theme, layout, ext, open }: PluginScreenProps & { ext: { id: string; version: string; tab: string | null; tools: string[]; stageKinds: string[] }; open(link: ExtensionLink): void }) {
   const c = theme.colors;
   const rpc = useRpc(extensionCallRpc);
   const Component = useSyncExternalStore(subscribeTabs, () => tabFor(ext.id));
@@ -70,7 +71,7 @@ function ExtensionTab({ theme, layout, ext }: PluginScreenProps & { ext: { id: s
     },
     [rpc, ext.id],
   );
-  if (Component) return <Component theme={theme} layout={layout} extensionId={ext.id} call={call} />;
+  if (Component) return <Component theme={theme} layout={layout} extensionId={ext.id} call={call} open={open} />;
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 16, gap: 6 }}>
       <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>{ext.tab ?? ext.id}</Text>
@@ -111,29 +112,46 @@ export function FactoryScreen(props: PluginScreenProps) {
   }, [modules, query.data?.extensions]);
   const tabs = useMemo(() => [...builtin, ...extensionTabs], [builtin, extensionTabs]);
   const [picked, setPicked] = useState<string>(OVERVIEW_TAB);
+  /** The run or Inbox item an extension tab asked to show (`open(link)`); cleared by picking a tab by hand. */
+  const [focus, setFocus] = useState<{ tab: string; id: string } | null>(null);
+  const pick = useCallback((key: string) => {
+    setFocus(null);
+    setPicked(key);
+  }, []);
+  const open = useCallback((link: ExtensionLink) => {
+    const target = resolveLink(link);
+    if (!target) return;
+    if ("url" in target) {
+      void Linking.openURL(target.url).catch(() => undefined);
+      return;
+    }
+    setFocus({ tab: target.tab, id: target.focus });
+    setPicked(target.tab);
+  }, []);
   const tab = tabs.some((t) => t.key === picked) ? picked : tabs[0].key;
+  const focused = focus && focus.tab === tab ? focus.id : undefined;
   const c = theme.colors;
 
   let body;
   if (tab === "supervisor") body = <SupervisorScreen theme={theme} layout={props.layout} navigation={props.navigation} />;
-  else if (tab === OVERVIEW_TAB) body = <OverviewScreen theme={theme} layout={props.layout} go={(k) => setPicked(k === "settings" ? SETTINGS_TAB : k)} />;
-  else if (tab === ACTIVITY_TAB) body = <ActivityScreen theme={theme} layout={props.layout} go={(k) => setPicked(k === "settings" ? SETTINGS_TAB : k)} />;
+  else if (tab === OVERVIEW_TAB) body = <OverviewScreen theme={theme} layout={props.layout} go={(k) => pick(k === "settings" ? SETTINGS_TAB : k)} />;
+  else if (tab === ACTIVITY_TAB) body = <ActivityScreen theme={theme} layout={props.layout} go={(k) => pick(k === "settings" ? SETTINGS_TAB : k)} />;
   else if (tab === SETTINGS_TAB) body = <SettingsTab {...props} />;
   else if (tab.startsWith("ext:")) {
     const ext = query.data?.extensions.find((e) => `ext:${e.id}` === tab);
-    body = ext ? <ExtensionTab {...props} ext={ext} /> : null;
+    body = ext ? <ExtensionTab {...props} ext={ext} open={open} /> : null;
   } else {
     const Screen = SCREENS[tab as keyof typeof SCREENS];
-    body = <Screen {...props} />;
+    body = <Screen key={focused ?? ""} {...props} focus={focused} />;
   }
   return (
     <View style={{ flex: 1, backgroundColor: c.surface0 }}>
       <View style={{ borderBottomWidth: 1, borderBottomColor: c.border }}>
-        <TabRow tabs={builtin} current={tab} onPick={setPicked} theme={theme} />
+        <TabRow tabs={builtin} current={tab} onPick={pick} theme={theme} />
         {extensionTabs.length > 0 ? (
           <View style={{ flexDirection: "row", alignItems: "center", borderTopWidth: 1, borderTopColor: c.border }}>
             <Text style={{ color: c.foregroundMuted, fontSize: 11, paddingLeft: 12, textTransform: "uppercase" }}>Extensions</Text>
-            <TabRow tabs={extensionTabs} current={tab} onPick={setPicked} theme={theme} />
+            <TabRow tabs={extensionTabs} current={tab} onPick={pick} theme={theme} />
           </View>
         ) : null}
       </View>
