@@ -229,6 +229,7 @@ describe("extensions", () => {
       expect((await getRuns("/blueprints/runs?since=-1")).status).toBe(400);
       const all = (await (await getRuns("/blueprints/runs?since=0&has_var=who")).json()) as any;
       expect(all.runs).toEqual([expect.objectContaining({ id: first.runId, blueprint: "demo", status: "done", parent: null, vars: { who: "Louis" }, events: expect.any(Array), stages: expect.any(Object) })]);
+      expect(all.runs[0]).toMatchObject({ stage: "hello", waitingFor: null, pmPending: null, suspended: null, gate: null, escalations: [], agentId: null, role: null, prs: {} });
       expect(((await (await getRuns("/blueprints/runs?since=0&has_var=slack_thread_ts")).json()) as any).runs).toEqual([]);
       expect(((await (await getRuns(`/blueprints/runs?since=${Date.now() + 60_000}`)).json()) as any).runs).toEqual([]);
     } finally {
@@ -297,6 +298,45 @@ describe("remote extensions (another plugin's process)", () => {
     expect(await rpc["factory.extension.call"]({ id: "release-trains", name: "board", input: { n: 3 } }, ctx)).toEqual({ ok: true, output: { lanes: 3 }, error: null });
     expect((await rpc["factory.overview"]({}, ctx)).extensions.map((e: any) => e.id)).toEqual(["release-trains"]);
     void token;
+  });
+
+  it("serves read-only rpcs on POST /extensions/<id>/rpc/<name>, and only those", async () => {
+    const ext = await extensionServer({
+      "/rpc/ticket-facts": (b) => ({ output: { facts: Object.fromEntries(b.input.keys.map((k: string) => [k, [{ label: "lane", value: "dev" }]])), by: b.callerId } }),
+      "/rpc/board": () => ({ output: { lanes: 1 } }),
+    });
+    const f = await factory();
+    expect((await f.register({ id: "releaser", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, rpc: [{ name: "ticket-facts", readOnly: true }, { name: "board" }] })).status).toBe(200);
+    const call = (p: string, body: object, auth = f.token) => fetch(`${f.endpoint.url}${p}`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
+    const ok = await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: ["ANY-1"] } });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ output: { facts: { "ANY-1": [{ label: "lane", value: "dev" }] }, by: "loopback" } });
+    expect((await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: [] } }, "wrong")).status).toBe(401);
+    expect((await call("/extensions/releaser/rpc/board", { input: {} })).status).toBe(403);
+    expect((await call("/extensions/releaser/rpc/nope", { input: {} })).status).toBe(404);
+    expect((await call("/extensions/missing/rpc/ticket-facts", { input: {} })).status).toBe(404);
+    expect((await fetch(`${f.endpoint.url}/extensions/releaser/rpc/ticket-facts`, { headers: { authorization: `Bearer ${f.token}` } })).status).toBe(405);
+    expect(ext.calls.filter((c) => c.path === "/rpc/board")).toEqual([]); // refused before the extension is reached
+  });
+
+  it("refuses an in-process rpc that is not read-only, and validates the input of one that is", async () => {
+    const f = await factory();
+    const reg = (globalThis as any)[Symbol.for("paseo.factory")] as { registerExtension(r: object): () => void };
+    cleanups.push(
+      reg.registerExtension({
+        id: "local-facts",
+        version: "1",
+        tools: [],
+        rpc: [
+          { name: "facts", readOnly: true, input: z.object({ keys: z.array(z.string()).max(200) }), output: z.object({ n: z.number() }), run: (i: { keys: string[] }) => ({ n: i.keys.length }) },
+          { name: "poke", input: z.object({}), output: z.unknown(), run: () => "poked" },
+        ],
+      }),
+    );
+    const call = (name: string, input: unknown) => fetch(`${f.endpoint.url}/extensions/local-facts/rpc/${name}`, { method: "POST", headers: { authorization: `Bearer ${f.token}` }, body: JSON.stringify({ input }) });
+    expect(await (await call("facts", { keys: ["A", "B"] })).json()).toEqual({ output: { n: 2 } });
+    expect((await call("facts", { keys: "A" })).status).toBe(400);
+    expect((await call("poke", {})).status).toBe(403);
   });
 
   it("completes a waiting stage through POST /stages/<token>/outcome", async () => {

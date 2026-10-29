@@ -6,6 +6,8 @@ import { HttpError } from "../host";
 import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
 import { ghDiff, ghFacts } from "./github";
+import { PrFactsCache } from "./pr-facts-cache";
+import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
@@ -119,6 +121,15 @@ export function startBlueprints(host: FactoryHost) {
 
   /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
   let spawning = 0;
+  // One cache for every PR lookup of the engine; GET /blueprints/runs only reads it (ADR "factory tickets view").
+  const prFacts = new PrFactsCache({ fetch: ghFacts });
+  let prunedAt = 0;
+  /** Forget the facts of PRs no stored run refers to any more (at most every 10 min). */
+  const prunePrFacts = () => {
+    if (Date.now() - prunedAt < 10 * 60_000) return;
+    prunedAt = Date.now();
+    prFacts.prune(new Set(store.all().flatMap(prUrlsOf)));
+  };
   const ports: Ports = {
     now: Date.now,
     async spawn(o) {
@@ -221,7 +232,7 @@ export function startBlueprints(host: FactoryHost) {
       const task = w?.store.get(taskId);
       if (task && task.state === "active") w.finish(task, "done", result);
     },
-    prFacts: ghFacts,
+    prFacts: (url, opts) => prFacts.get(url, opts),
     tool: (name) => host.toolRunner(name),
     stageKind(kind) {
       for (const ext of host.listExtensions()) {
@@ -296,22 +307,11 @@ export function startBlueprints(host: FactoryHost) {
       }
     },
     runs({ since, hasVar }) {
+      prunePrFacts();
       return store
         .all()
         .filter((r) => r.updatedAt >= since && (!hasVar || !!r.vars[hasVar]?.trim()))
-        .map((r) => ({
-          id: r.id,
-          blueprint: r.blueprint,
-          status: r.status,
-          parent: r.parent,
-          vars: r.vars,
-          updatedAt: r.updatedAt,
-          endedAt: r.endedAt,
-          stages: Object.fromEntries(
-            Object.entries(r.stages).map(([id, st]) => [id, { status: st.status, verdict: st.verdict, summary: st.summary, data: st.data }]),
-          ),
-          events: [...new Set(r.history.map((h) => h.event))],
-        }));
+        .map((r) => runSnapshot(r, (url) => prFacts.peek(url)));
     },
   };
 

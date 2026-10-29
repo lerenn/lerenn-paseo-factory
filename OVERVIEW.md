@@ -81,7 +81,8 @@ The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalat
 The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) and serves on loopback only, with the token as a bearer:
 
 - `POST /blueprints/start`, body `{blueprint, vars, requestedBy, idempotencyKey}` → `200 {runId}`, `404` unknown blueprint, `400` bad vars, `401`. The same `idempotencyKey` returns the same run.
-- `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, and the kinds of `events` in its history. For plugins that follow runs (for example Slack feedback in paseo-factory-slack).
+- `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, the kinds of `events` in its history, and where it stands now: `stage`, `waitingFor`, `pmPending`, `suspended` (`{reason, since, by}`), the open `gate` of the current stage (`{stage, itemId, kind: approval|question|merge, openedAt, passive}`; `itemId` is the Inbox item, null for a passive merge wait), the open `escalations` (Inbox item ids), the current stage's worker `agentId` and `role`, and `prs`: per PR URL the run refers to, the last facts the Factory read from GitHub (`state`, `head`, `ci`, `review`, `mergeable`, `draft`, `queued`, `queuePosition`, ..., and `checkedAt`). Read-only: the endpoint never calls GitHub itself. For plugins that follow runs (for example Slack feedback in paseo-factory-slack, the tickets-dispatcher's Tickets tab).
+- PR facts go through one per-URL cache: a fact younger than 2 min is served from memory, a merged PR is kept (and a closed one until a forced read) while a stored run refers to it, concurrent lookups of a URL share one `gh` call, and at most 4 run at once. Gates that need the current head (opening a gate, checking an answer, `verify`, a PR in the merge queue) read GitHub now.
 - `GET /blueprints` → names, descriptions and variables (`required`).
 
 ## Crons (Blueprints module)
@@ -126,11 +127,13 @@ const unregister = factory.registerExtension({
 
 Paseo runs each plugin's server in its own process, so `globalThis` registration only works for code inside the Factory's process. Other plugins register over the Factory's loopback endpoint (`~/.paseo/factory/endpoint.json`, bearer = its token) and serve a small loopback API of their own:
 
-`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
+`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name, readOnly? }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
 
 The Factory forwards, with `Authorization: Bearer <callback.token>`:
 - `POST <callback>/tools/<name>` `{ input, callerId }` → `{ result }` (the tool is served under the `factory` MCP server with your `inputSchema`; validate the input yourself; an error status with `{ error }` becomes the tool error).
 - `POST <callback>/rpc/<name>` `{ input, callerId }` → `{ output }` (for the tab, through `factory.extension.call`).
+
+An rpc registered with `readOnly: true` (in-process or remote) is also reachable by other plugins on the Factory's loopback endpoint: `POST /extensions/<id>/rpc/<name>` `{ input }` → `200 { output }`, bearer = the endpoint token (`~/.paseo/factory/endpoint.json`), `callerId` `loopback`. Other rpcs answer 403, an unknown extension or rpc 404, input that fails the rpc's schema 400. Mark only rpcs with no side effect and no secret in the output; this is how one extension reads another's facts (for example the releaser's `ticket-facts`).
 - `POST <callback>/stages/<kind>` `{ runId, stageId, blueprint, params, vars, outcomeToken }` → `{ outcome: { verdict, summary?, data? } }`, or `{ pending: true }` for a stage that waits: finish it later with `POST <factory>/stages/<outcomeToken>/outcome` `{ verdict, summary?, data? }` (bearer = the endpoint token; one use).
 - `GET <callback>/health`: any HTTP answer counts as alive. After 3 consecutive unreachable calls or probes (probed once a minute) the extension is dropped.
 
@@ -138,7 +141,7 @@ Roles shipped by an extension and `ctx.services` are in-process only for now.
 
 ### Extension tab UI
 
-Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call) }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:
+Add `rpc: [{ name, input: zodObject, output: zodObject, run(input, call), readOnly? }]` to the registration: backend calls for your tab, validated with those schemas and reached through the Factory RPC `factory.extension.call({ id, name, input })`. In your client bundle register a component for the tab:
 
 ```ts
 const queue = ((globalThis as any)[Symbol.for("paseo.factory.client")] ??= []);
@@ -146,7 +149,7 @@ const add = (id, Tab) => (Array.isArray(queue) ? queue.push([id, Tab]) : queue.r
 add("my-extension", ({ theme, layout, extensionId, call }) => /* call("board", { ... }) */ null);
 ```
 
-Until the Factory client has loaded, push `[id, Component]` onto that array; afterwards the global is the registry object and `registerTab(id, Component)` returns an unregister function. The component renders inside the extension's tab with `{ theme, layout, extensionId, call(name, input) }`; without one the tab shows the extension's metadata. It can use the host UI exports. Settings go through your own `rpc` entries (your server half reads and writes its own settings).
+Until the Factory client has loaded, push `[id, Component]` onto that array; afterwards the global is the registry object and `registerTab(id, Component)` returns an unregister function. The component renders inside the extension's tab with `{ theme, layout, extensionId, call(name, input), open(link) }`; `open` leaves the tab for `{ tab: "blueprints", runId }` (the run, expanded), `{ tab: "inbox", itemId }` (the item, opened) or `{ url }` (http(s) only, in the browser); without one the tab shows the extension's metadata. It can use the host UI exports. Settings go through your own `rpc` entries (your server half reads and writes its own settings).
 
 ## Sidebar badge
 
