@@ -33,7 +33,7 @@ Source lives in `client/`, `server/` and `shared/` only (Paseo's plugin loader r
 
 ## Git source
 
-Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `shared/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `shared/examples/blueprints`).
+Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `crons/` (`crons/schedules.json`, see Crons), `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `shared/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `shared/examples/blueprints`).
 
 ## Blueprints
 
@@ -83,6 +83,19 @@ The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) 
 - `POST /blueprints/start`, body `{blueprint, vars, requestedBy, idempotencyKey}` → `200 {runId}`, `404` unknown blueprint, `400` bad vars, `401`. The same `idempotencyKey` returns the same run.
 - `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, and the kinds of `events` in its history. For plugins that follow runs (for example Slack feedback in paseo-factory-slack).
 - `GET /blueprints` → names, descriptions and variables (`required`).
+
+## Crons (Blueprints module)
+
+The **Crons** tab (next to Blueprints) starts blueprints on cron schedules, with at most one active run per schedule.
+
+- **Where schedules live:** `crons/schedules.json` in the Factory folder of each git source (next to `roles/` and `blueprints/`, synced with them), plus the Blueprints setting `crons.schedules` (same entries; it wins on a repeated id, then sources in order). A file that does not parse keeps its last good copy; a bad entry is left out and shown in the tab.
+- **Format:** `{"schedules": [{"id": "nightly", "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "blueprint": "my-blueprint", "vars": {}, "enabled": true, "maxFailures": 2, "mailTo": "@ops"}]}`. `id` is lowercase letters, digits, `-` and `_`; `cron` has 5 fields (minute hour day-of-month month day-of-week, with `*`, lists, ranges and steps; day of week 0-7, Sunday 0 or 7; both day fields restricted means either matches); `timezone` is an IANA zone (default `UTC`); `vars` are strings; `enabled` defaults to true, `maxFailures` to 2; `mailTo` replaces `crons.mailTo`.
+- **Start:** each Blueprints tick (`pollSeconds`) looks at the minutes since the last tick, at most the last 10, and starts only the latest matching one. The run gets the vars plus `cron_id` and `cron_slot` (the UTC minute, `2026-10-29T08:00Z`), `requestedBy` `cron:<id>` and the idempotency key `cron:<id>:<slot>`, so a slot starts at most one run, across restarts too. The blueprint must declare `cron_id` and `cron_slot` (with `default = ""`). A slot is skipped and logged while a run with that `cron_id` has not ended. A suspended Factory or a cold catalog retries the slot within the window.
+- **Pause:** a run of the schedule that ends failed or aborted, or a start the engine refuses (no such blueprint, bad var), counts as a failure; `done` resets the count. At `maxFailures` in a row the schedule pauses and ONE mail goes to its `mailTo` (or `crons.mailTo`; empty: only logged), and the Supervisor sees it. It resumes with **Resume** in the tab, or when its `enabled` goes from false to true. **Pause** in the tab stops it by hand (no mail).
+- **Run now:** starts the blueprint at once with the same vars, unless a run of the schedule is active; key `cron:<id>:now:<minute>`. Its outcome counts like a scheduled run's. It works even with crons off.
+- **The tab** lists each schedule: cron and zone, blueprint, source, state (on, disabled, paused, crons off), next run, active run, last run and its result, failures in a row; with Pause/Resume and Run now.
+- **Settings (Blueprints):** `crons.enabled` (default **false**: nothing starts on its own until you switch it on, so installing this version changes nothing while another scheduler still starts the same blueprints; turn the other one off first), `crons.mailTo`, `crons.schedules`.
+- **State:** `crons.json` in the Factory's data folder (last minute evaluated; per schedule the failures, pause, last slot and the runs it follows), written atomically. RPCs: `blueprints.crons.list`, `.pause`, `.resume`, `.run_now`.
 
 ## Inbox and trusted agents
 
