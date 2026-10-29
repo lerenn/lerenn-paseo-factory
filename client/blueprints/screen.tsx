@@ -47,7 +47,7 @@ import { needsAttention } from "./attention";
 function RunPullRequests({ runId, s }: { runId: string; s: Record<string, any> }) {
   const call = useRpc(runDiffRpc);
   const q = useQuery({ queryKey: ["blueprints", "diff", runId], queryFn: () => call({ runId }), staleTime: 30_000 });
-  const label = (url: string) => url.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/, "$1#$2");
+  const label = (url: string) => url.replace(/^https?:\/\/[^/]+\//, "");
   if (!q.data || q.data.prs.length === 0) return null;
   return (
     <View style={{ gap: 2 }}>
@@ -401,8 +401,8 @@ export function BlueprintsScreen({ theme, layout, navigation }: PluginScreenProp
             {d.gate.noteTo ? ` · answer added to notes of ${d.gate.noteTo}` : ""}
           </Text>
         ) : null}
-        {d.facts ? <Text style={s.muted}>GitHub facts shown to the worker; data.pr_urls checked on GitHub</Text> : null}
-        {Object.entries(d.verify).map(([v, facts]) => <Text key={v} style={s.muted}>verdict {v} needs on GitHub: {facts.join(", ")}</Text>)}
+        {d.facts ? <Text style={s.muted}>PR facts shown to the worker; data.pr_urls checked</Text> : null}
+        {Object.entries(d.verify).map(([v, facts]) => <Text key={v} style={s.muted}>verdict {v} needs: {facts.join(", ")}</Text>)}
         {d.usesLease ? <Text style={s.muted}>uses a lease (see its role)</Text> : null}
         {keys.length > 0 ? <Text style={s.text} selectable>{keys.map((k) => edge(d, k)).join("   ")}</Text> : null}
       </View>

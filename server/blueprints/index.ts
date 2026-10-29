@@ -20,7 +20,7 @@ import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./t
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
 import type { BlueprintInfo, StageDetail } from "../../shared/blueprints/rpc";
 import { abortRunRpc, listRunsRpc, retryRunRpc, runDiffRpc, spendRpc, startRunRpc, suspendRunsRpc } from "../../shared/blueprints/rpc";
-import { blueprintsSettings, type BlueprintsSettings } from "../../shared/blueprints/settings";
+import { blueprintsSettings, DEFAULT_RETRO_PROMPT, type BlueprintsSettings } from "../../shared/blueprints/settings";
 
 /** What the Blueprints tab shows about a loaded blueprint. */
 function describe({ blueprint, text, source }: { blueprint: Blueprint; text: string; source: string }): BlueprintInfo {
@@ -71,7 +71,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "@assistant" }, retro: { enabled: true, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true, orphanSweep: true } } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "" }, retro: { enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT }, janitor: { enabled: false, dryRun: true, orphanSweep: true } } as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };

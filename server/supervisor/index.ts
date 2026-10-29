@@ -93,11 +93,14 @@ export function startSupervisor(host: FactoryHost) {
       }
       return { runs, liveStageAgents };
     },
-    flag: (report) => host.report("@assistant", report),
+    flag: async (report) => {
+      const to = current.reportTo?.trim();
+      if (to) await host.report(to, report);
+    },
     notify(subject, body) {
       const observer = host.engines.blueprints?.engine?.observer as { notice?(s: string, b: string): void } | undefined;
       if (observer?.notice) observer.notice(subject, body);
-      else void host.report("@assistant", { subject, body, kind: "info" }).catch(() => undefined);
+      else if (current.reportTo?.trim()) void host.report(current.reportTo.trim(), { subject, body, kind: "info" }).catch(() => undefined);
     },
     async issues() {
       const out: Issue[] = [];

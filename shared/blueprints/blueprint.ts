@@ -140,7 +140,7 @@ export const blueprintSchema = z
     description: z.string().default(""),
     /** First stage; `blueprint_start(at=...)` may enter elsewhere. Defaults to the first stage listed. */
     start: stageId.optional(),
-    /** Variables whose value a person or the PM must have checked for real (a Linear key); needs `<name>_confirmed = "true"` at start. */
+    /** Variables whose value a person or the PM must have checked for real (such as a ticket key); needs `<name>_confirmed = "true"` at start. */
     confirm: z.array(z.string()).default([]),
     /** Failed-run cap on the PM's single judgement call: at most this many extra attempts. */
     pm_extra_max: z.number().int().min(0).max(10).default(2),

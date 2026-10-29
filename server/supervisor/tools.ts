@@ -7,11 +7,11 @@ const supervisorOnly = { key: SUPERVISOR_LABEL, value: "1" };
 
 export const INSTRUCTIONS = `The Factory Supervisor is the agent that watches the Factory itself (stuck runs with no PM, spawn failures, leases, extensions, config errors).
 
-If it is disabled (setting supervisor.enabled=false) supervisor_ask and supervisor_status say so and the Assistant (@assistant) watches the Factory.
+If it is disabled (setting supervisor.enabled=false) supervisor_ask and supervisor_status say so, and its notices go to the blueprints events.mailTo (else the supervisor reportTo).
 
 It runs on demand: it is archived when the Factory is idle and created again when something needs it (the first answer then takes longer). Anyone can reach it: supervisor_ask(question) relays your question and returns its answer (or a queued/pending request id to poll with supervisor_ask_status); supervisor_status shows its state and stable agent id, which you can also steer directly with a normal agent message.
 
-If you are the Supervisor: answer requests with supervisor_reply, keep what your next session needs with supervisor_note, restart a crashed extension with extension_restart (once per hour per extension; after that ask the user with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on the lab repository for the user to approve.`;
+If you are the Supervisor: answer requests with supervisor_reply, keep what your next session needs with supervisor_note, restart a crashed extension with extension_restart (once per hour per extension; after that ask the user with inbox_ask), act on runs with blueprint_abort / blueprint_retry / blueprint_resume, and change roles or blueprints only through pull requests on their git source for the user to approve.`;
 
 export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">[] {
   return [

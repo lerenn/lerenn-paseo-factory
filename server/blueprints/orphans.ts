@@ -3,6 +3,7 @@
 // title and whatever their worktree holds. A closed agent (a pod agent that finished its turn) is resumable, so it still holds its
 // workspace: only archived or deleted agents free one. A workspace no run knows (coordinators, daemon ops, one-shots) is never taken.
 import { pathExcluded } from "../exclusions";
+import { isTrusted } from "../trust";
 
 export interface ListedWorkspace {
   id: string;
@@ -38,7 +39,7 @@ export function agentlessWorkspaces(
   const keep = new Set<string>(o.protect ?? []);
   for (const a of agents) {
     if (!a.workspaceId) continue;
-    if ((a.id && o.pmAgentIds.has(a.id)) || a.labels?.["paseo.assistant"]) keep.add(a.workspaceId);
+    if ((a.id && o.pmAgentIds.has(a.id)) || isTrusted(a.labels)) keep.add(a.workspaceId);
     if (!a.archivedAt) live.add(a.workspaceId);
   }
   return workspaces.filter((w) => {

@@ -78,7 +78,7 @@ type AskResult =
   | { status: "queued"; request: string; note: string }
   | { status: "disabled"; note: string };
 
-export const DISABLED_NOTE = "Supervisor disabled; the Assistant (@assistant) watches the Factory.";
+export const DISABLED_NOTE = "Supervisor disabled; its notices go to the blueprints events.mailTo (else the supervisor reportTo).";
 
 /** Issues mailed while the Supervisor is disabled: a lease that expired without a release, an extension that was dropped. */
 export function noticeOf(issue: Issue): { subject: string; body: string } | null {

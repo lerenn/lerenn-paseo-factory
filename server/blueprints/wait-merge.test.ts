@@ -53,7 +53,7 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string }
     for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
   };
   const startAt = async (at: string) => {
-    const run = engine.start({ blueprint: "ticket", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "x", at });
+    const run = engine.start({ blueprint: "ticket", vars: { ticket: "ABC-1", ticket_confirmed: "true" }, requestedBy: "x", at });
     run.stages.investigate = { ...run.stages.investigate, status: "done", data: { criteria: "1. works" }, summary: "inv" } as never;
     run.stages.implement = { ...run.stages.implement, status: "done", notes: [], runs: 1, attempts: 0, extra: 0, flakes: 0, data: { pr_urls: [PR] } } as never;
     await settle();
@@ -200,7 +200,7 @@ describe("criteria gate reminders", () => {
   });
 });
 
-describe("merge wait and the merge queue (ANY-2738)", () => {
+describe("merge wait and the merge queue", () => {
   it("shows the PR's queue position and ETA, and says once when it is still queued after 15 min", async () => {
     const t = setup();
     const run = await t.startAt("qa");

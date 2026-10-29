@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setTrustedLabels } from "../trust";
 import { blueprintTools, TOOL_NAMES } from "./tools";
 import type { CallContext } from "../tools";
 
@@ -20,6 +21,9 @@ function fake() {
 }
 
 describe("blueprint_suspend / blueprint_resume tools", () => {
+  beforeEach(() => setTrustedLabels(["paseo.assistant=1"]));
+  afterEach(() => setTrustedLabels([]));
+
   it("are listed for PMs", () => {
     expect(TOOL_NAMES).toContain("blueprint_suspend");
   });
@@ -30,13 +34,13 @@ describe("blueprint_suspend / blueprint_resume tools", () => {
     await expect(tool("blueprint_suspend").run({ run: "bp-1", all: true, reason: "x" }, ctx("a"))).rejects.toThrow(/either run or all/);
   });
 
-  it("all=true is for the Assistant and the Supervisor", async () => {
+  it("all=true is for a trusted agent and the Supervisor", async () => {
     const { tool, ctx, calls } = fake();
-    await expect(tool("blueprint_suspend").run({ all: true, reason: "freeze" }, ctx("pm"))).rejects.toThrow(/Assistant/);
+    await expect(tool("blueprint_suspend").run({ all: true, reason: "freeze" }, ctx("pm"))).rejects.toThrow(/trusted label/);
     const out = await tool("blueprint_suspend").run({ all: true, reason: "freeze", force: true }, ctx("assistant", { "paseo.assistant": "1" }));
     expect(out).toMatchObject({ factory_suspended: true, suspended: [{ run_id: "bp-1", status: "suspended", pods: ["p"] }] });
     expect(calls[0]).toEqual(["suspendAll", { reason: "freeze", by: "assistant", force: true }]);
-    await expect(tool("blueprint_resume").run({ all: true }, ctx("pm"))).rejects.toThrow(/Assistant/);
+    await expect(tool("blueprint_resume").run({ all: true }, ctx("pm"))).rejects.toThrow(/trusted label/);
     await tool("blueprint_resume").run({ all: true, concurrency: 3 }, ctx("assistant", { "paseo.assistant": "1" }));
     expect(calls[1]).toEqual(["resumeAll", { concurrency: 3, note: undefined }]);
   });
@@ -48,10 +52,17 @@ describe("blueprint_suspend / blueprint_resume tools", () => {
     expect(calls).toEqual([["suspend", "bp-1", { reason: "freeze", by: "anyone", force: undefined }], ["resume", "bp-1", { stage: undefined, extraAttempts: undefined, note: "go" }]]);
   });
 
-  it("attach_agent is for the Assistant and the Supervisor", async () => {
+  it("attach_agent is for a trusted agent and the Supervisor", async () => {
     const { tool, ctx, calls } = fake();
-    await expect(tool("blueprint_resume").run({ run: "bp-1", stage: "x", attach_agent: "a-1" }, ctx("pm"))).rejects.toThrow(/attach_agent is for the Assistant/);
+    await expect(tool("blueprint_resume").run({ run: "bp-1", stage: "x", attach_agent: "a-1" }, ctx("pm"))).rejects.toThrow(/attach_agent is for an agent with a trusted label/);
     await tool("blueprint_resume").run({ run: "bp-1", stage: "x", attach_agent: "a-1" }, ctx("assistant", { "paseo.assistant": "1" }));
     expect(calls.at(-1)).toEqual(["resume", "bp-1", { stage: "x", extraAttempts: undefined, note: undefined, attachAgent: "a-1" }]);
+  });
+
+  it("trusts nobody by label when trustedLabels is empty", async () => {
+    setTrustedLabels([]);
+    const { tool, ctx } = fake();
+    await expect(tool("blueprint_suspend").run({ all: true, reason: "freeze" }, ctx("assistant", { "paseo.assistant": "1" }))).rejects.toThrow(/trusted label/);
+    await expect(tool("blueprint_suspend").run({ all: true, reason: "freeze" }, ctx("sup", { "paseo.factory.supervisor": "1" }))).resolves.toMatchObject({ factory_suspended: true });
   });
 });

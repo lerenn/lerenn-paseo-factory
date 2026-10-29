@@ -9,6 +9,7 @@ import path from "node:path";
 import type { PluginBeforeRequests, PluginHookContext, PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
 import { createReporter } from "./report";
 import { setExclusions } from "./exclusions";
+import { setTrustedLabels } from "./trust";
 import { factorySettings, factorySettingsSchema, type FactorySettings, type ModuleId } from "../shared/settings";
 import { McpServer } from "./mcp";
 import { SessionStore } from "./sessions";
@@ -126,10 +127,12 @@ export class FactoryHost {
   constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null } = {}) {
     this.sessions = new SessionStore(opts.sessionsFile === undefined ? path.join(dataDir(), "sessions.json") : opts.sessionsFile);
     setExclusions({ paths: factorySettingsSchema.parse({}).excludePaths, agents: [] });
+    setTrustedLabels(factorySettingsSchema.parse({}).trustedLabels);
     const settings = server.registerSettings(factorySettings);
     const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
       this.current = state.status === "ready" ? state.values : null;
       setExclusions({ paths: this.current?.excludePaths ?? factorySettingsSchema.parse({}).excludePaths, agents: this.current?.excludeAgents ?? [] });
+      setTrustedLabels(this.current?.trustedLabels ?? factorySettingsSchema.parse({}).trustedLabels);
     };
     this.ready = settings.read().then(apply);
     this.unsubscribe = settings.subscribe(apply);
@@ -214,7 +217,7 @@ export class FactoryHost {
     return this.paseoRef !== null;
   }
 
-  /** Labels of an agent (cached briefly): the `paseo.*` labels carry the factory run and the Assistant mark. */
+  /** Labels of an agent (cached briefly): the `paseo.*` labels carry the factory run; `trustedLabels` mark trusted agents. */
   async labelsOf(agentId: string): Promise<Record<string, string>> {
     const cached = this.labelCache.get(agentId);
     if (cached && Date.now() - cached.at < 30_000) return cached.labels;
