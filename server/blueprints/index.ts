@@ -1,5 +1,5 @@
 import { AttentionNotifier, attentionPoints } from "./attention";
-import { agentlessWorkspaces, type ListedAgent, type ListedWorkspace } from "./orphans";
+import { agentlessWorkspaces, factoryWorkspaceTitles, type ListedAgent, type ListedWorkspace } from "./orphans";
 import path from "node:path";
 import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
@@ -135,6 +135,8 @@ export function startBlueprints(host: FactoryHost) {
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
+        // Recorded before the agent exists, so the orphan sweep finds the workspace even if the agent never comes.
+        onWorkspaceCreated: (id: string) => store.noteWorkspace(id, { at: Date.now(), run: o.labels["paseo.factory.run"] ?? null, title: o.workspaceTitle ?? o.title }),
       };
       const runtime = o.runtime ?? host.runtime;
       const { agentId, workspaceId } = await spawnAgent(host.paseo, runtime, { ...input, joinWorkspaceId: o.joinWorkspaceId }).catch((error: Error) => {
@@ -383,8 +385,15 @@ export function startBlueprints(host: FactoryHost) {
       ]);
       const runs = store.all();
       const known = new Set(runs.flatMap((r) => Object.values(r.agents ?? {}).map((a) => a.workspaceId).filter((id): id is string => !!id)));
+      // Forget the recorded workspaces that are gone (archived by the Factory, the spawn's clean-up or a person).
+      const listed = new Set(workspaces.map((w) => w.id));
+      store.forgetWorkspaces(Object.keys(store.createdWorkspaces()).filter((id) => !listed.has(id)));
+      const created = new Map(Object.entries(store.createdWorkspaces()).map(([id, w]) => [id, w.at] as [string, number]));
       const found = agentlessWorkspaces(workspaces, agents.map((e) => e.agent), {
         known,
+        created,
+        titles: factoryWorkspaceTitles(runs, cfg().pmRole),
+        now: Date.now(),
         pmAgentIds: new Set(runs.map((r) => r.pmAgentId).filter((id): id is string => !!id)),
         protect: new Set(runs.filter((r) => r.endedAt === null && r.sharedWorkspaceId).map((r) => r.sharedWorkspaceId!)),
       });
@@ -397,7 +406,9 @@ export function startBlueprints(host: FactoryHost) {
           continue;
         }
         archived.push(w.id);
-        const run = runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => r.vars.ticket && title.includes(r.vars.ticket));
+        const recorded = store.createdWorkspaces()[w.id]?.run;
+        store.forgetWorkspaces([w.id]);
+        const run = runs.find((r) => r.id === recorded) ?? runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => r.vars.ticket && title.includes(r.vars.ticket));
         if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
         console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
       }

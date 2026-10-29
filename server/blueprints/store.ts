@@ -138,6 +138,14 @@ interface State {
   approvals: Record<string, { optionId: string; by: string; at: number }>;
   /** The whole Factory is suspended: no run starts and nothing is respawned, across plugin reloads. */
   suspended: { reason: string; at: number; by: string } | null;
+  /** Every workspace (pod) the Factory created, from the moment it exists (before its agent): what the orphan sweep may take. */
+  workspaces?: Record<string, CreatedWorkspace>;
+}
+
+export interface CreatedWorkspace {
+  at: number;
+  run: string | null;
+  title: string;
 }
 
 const MAX_HISTORY = 400;
@@ -151,7 +159,7 @@ export class RunStore {
     if (file) {
       try {
         const s = JSON.parse(readFileSync(file, "utf8"));
-        this.state = { runs: s.runs ?? [], approvals: s.approvals ?? {}, suspended: s.suspended ?? null };
+        this.state = { runs: s.runs ?? [], approvals: s.approvals ?? {}, suspended: s.suspended ?? null, workspaces: s.workspaces ?? {} };
       } catch {
         this.state = { runs: [], approvals: {}, suspended: null };
       }
@@ -217,6 +225,25 @@ export class RunStore {
     run.history.push({ at: now, stage, event, detail });
     if (run.history.length > MAX_HISTORY) run.history.splice(0, run.history.length - MAX_HISTORY);
     run.updatedAt = now;
+  }
+
+  /** A workspace the Factory just created (its agent may not exist yet). */
+  noteWorkspace(id: string, w: CreatedWorkspace): void {
+    (this.state.workspaces ??= {})[id] = w;
+    this.save();
+  }
+
+  createdWorkspaces(): Record<string, CreatedWorkspace> {
+    return (this.state.workspaces ??= {});
+  }
+
+  forgetWorkspaces(ids: Iterable<string>): void {
+    let changed = false;
+    for (const id of ids) if (this.state.workspaces?.[id]) {
+      delete this.state.workspaces[id];
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   prune(now: number): void {
