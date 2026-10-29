@@ -4,7 +4,6 @@ import { needsAttentionBadge } from "./attention";
 import { listRunsRpc } from "../../shared/blueprints/rpc";
 
 export { BlueprintsScreen } from "./screen";
-export { CronsScreen } from "./crons";
 
 /** Runs waiting for the PM or a person, for the Factory's sidebar badge. 0 when the module is off. */
 export function useRunsNeedingAttention(): number {

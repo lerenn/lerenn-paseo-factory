@@ -86,7 +86,7 @@ The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) 
 
 ## Crons (Blueprints module)
 
-The **Crons** tab (next to Blueprints) starts blueprints on cron schedules, with at most one active run per schedule.
+The **Crons** sub-tab of Blueprints (Runs | Templates | Crons | Settings) starts blueprints on cron schedules, with at most one active run per schedule.
 
 - **Where schedules live:** `crons/schedules.json` in the Factory folder of each git source (next to `roles/` and `blueprints/`, synced with them), plus the Blueprints setting `crons.schedules` (same entries; it wins on a repeated id, then sources in order). A file that does not parse keeps its last good copy; a bad entry is left out and shown in the tab.
 - **Format:** `{"schedules": [{"id": "nightly", "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "blueprint": "my-blueprint", "vars": {}, "enabled": true, "maxFailures": 2, "mailTo": "@ops"}]}`. `id` is lowercase letters, digits, `-` and `_`; `cron` has 5 fields (minute hour day-of-month month day-of-week, with `*`, lists, ranges and steps; day of week 0-7, Sunday 0 or 7; both day fields restricted means either matches); `timezone` is an IANA zone (default `UTC`); `vars` are strings; `enabled` defaults to true, `maxFailures` to 2; `mailTo` replaces `crons.mailTo`.

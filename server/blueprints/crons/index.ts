@@ -80,7 +80,7 @@ export function startCrons({ host, engine, store, cfg, catalogReady, stateFile, 
     if (cfg().crons?.enabled) {
       for (const s of parsed.schedules) {
         const st = scheduler.snapshot().schedules[s.id];
-        if (st?.paused && st.pausedBy === "failures") out.push({ key: `cron:${s.id}:paused`, text: `Cron ${s.id} (blueprint ${s.blueprint}) is paused after ${st.consecutiveFailures} failed runs in a row; resume it in the Crons tab.` });
+        if (st?.paused && st.pausedBy === "failures") out.push({ key: `cron:${s.id}:paused`, text: `Cron ${s.id} (blueprint ${s.blueprint}) is paused after ${st.consecutiveFailures} failed runs in a row; resume it in Blueprints > Crons.` });
       }
     }
     return out;
