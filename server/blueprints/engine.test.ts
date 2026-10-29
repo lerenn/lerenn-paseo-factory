@@ -1299,3 +1299,49 @@ done = "done"
     expect(ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x", idempotencyKey: "aikido:1" }).id).toBe(b.id);
   });
 });
+
+describe("a merge wait that stalls (manual-dispatch CI never ran)", () => {
+  const src = `
+version = 1
+name = "flow"
+[[stage]]
+id = "wait-queue"
+kind = "gate"
+wait = "merge"
+question = "Waiting for the queue"
+pr = "${PR}"
+expires_in_minutes = 240
+stall_minutes = 10
+[stage.on]
+merged = "done"
+head_moved = "wait-queue"
+expired = "failed"
+stalled = "done"
+`;
+  it("follows on.stalled when the PR is neither queued nor tested after stall_minutes", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), ci: "none", queued: false };
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    await ctx.engine.tick();
+    expect(ctx.engine.require(run.id).stage).toBe("wait-queue");
+    ctx.advance(11 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    const r = ctx.engine.require(run.id);
+    expect(r.status).toBe("done");
+    expect(r.stages["wait-queue"]).toMatchObject({ verdict: "stalled" });
+    expect(r.history.some((h) => h.event === "merge_stalled" && /no CI run on its head/.test(h.detail ?? ""))).toBe(true);
+  });
+
+  it("keeps waiting for a PR that is queued", async () => {
+    const ctx = setup(src);
+    ctx.pr[PR] = { ...okPr(PR), ci: "pending", queued: true };
+    const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    ctx.advance(30 * 60_000);
+    await ctx.engine.tick();
+    await ctx.settle();
+    expect(ctx.engine.require(run.id)).toMatchObject({ stage: "wait-queue", status: "waiting" });
+  });
+});
