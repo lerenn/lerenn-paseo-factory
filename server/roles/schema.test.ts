@@ -12,3 +12,18 @@ describe("role.schema.json", () => {
     expect(readFileSync(file, "utf8")).toBe(generated);
   });
 });
+
+describe("runtimeProfile", () => {
+  const parse = (extra: object) => roleSchema.safeParse({ name: "r", ...extra });
+  it("is optional", () => {
+    const r = parse({});
+    expect(r.success && r.data.runtimeProfile).toBeUndefined();
+  });
+  it("accepts a profile name", () => {
+    const r = parse({ runtimeProfile: "builder-large" });
+    expect(r.success && r.data.runtimeProfile).toBe("builder-large");
+  });
+  it.each(["Small", "1gi", "-x", "a_b", "", "a".repeat(33)])("rejects %j", (v) => {
+    expect(parse({ runtimeProfile: v }).success).toBe(false);
+  });
+});

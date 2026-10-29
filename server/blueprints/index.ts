@@ -148,6 +148,7 @@ export function startBlueprints(host: FactoryHost) {
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
+        profile: role?.runtimeProfile,
         // Recorded before the agent exists, so the orphan sweep finds the workspace even if the agent never comes.
         onWorkspaceCreated: (id: string) => store.noteWorkspace(id, { at: Date.now(), run: o.labels["paseo.factory.run"] ?? null, title: o.workspaceTitle ?? o.title }),
       };

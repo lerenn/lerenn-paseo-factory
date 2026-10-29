@@ -72,6 +72,10 @@
       "minimum": 1,
       "maximum": 9007199254740991
     },
+    "runtimeProfile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
     "plugins": {
       "type": "object",
       "properties": {

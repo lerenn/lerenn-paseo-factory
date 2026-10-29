@@ -27,6 +27,25 @@ describe("spawnAgent", () => {
     expect(agentCreate).not.toHaveBeenCalled();
   });
 
+  it("kubernetes: passes the role's runtime profile as the runtime option", async () => {
+    const { paseo, wsCreate } = fakePaseo();
+    await spawnAgent(paseo as never, "kubernetes", { ...input, profile: "small" });
+    expect((wsCreate.mock.calls[0][0] as any).runtime.options).toMatchObject({ cwd: "/repo", profile: "small" });
+  });
+
+  it("kubernetes: no profile means no profile option", async () => {
+    const { paseo, wsCreate } = fakePaseo();
+    await spawnAgent(paseo as never, "kubernetes", input);
+    expect((wsCreate.mock.calls[0][0] as any).runtime.options).not.toHaveProperty("profile");
+  });
+
+  it("local: ignores the profile", async () => {
+    const { paseo, wsCreate, agentCreate } = fakePaseo();
+    await spawnAgent(paseo as never, "local", { ...input, profile: "small" });
+    expect(wsCreate).not.toHaveBeenCalled();
+    expect(JSON.stringify(agentCreate.mock.calls[0][0])).not.toContain("small");
+  });
+
   it("local: creates the agent on the daemon and titles its workspace", async () => {
     const { paseo, wsCreate, agentCreate } = fakePaseo();
     const out = await spawnAgent(paseo as never, "local", input);

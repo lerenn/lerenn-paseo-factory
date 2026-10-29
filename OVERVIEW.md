@@ -33,7 +33,7 @@ Source lives in `client/`, `server/` and `shared/` only (Paseo's plugin loader r
 
 ## Git source
 
-Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `crons/` (`crons/schedules.json`, see Crons), `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `shared/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `shared/examples/blueprints`).
+Roles and blueprints come from one git source (Roles tab settings): `url`, `ref`, and `path` = the **Factory folder**, whose subfolders are `roles/`, `blueprints/`, `crons/` (`crons/schedules.json`, see Crons), `leases/`, `warden/`, `inbox/`. Example: `services/paseo/plugins/factory`. Roles are `roles/<name>.yaml` ([format](role.schema.json), examples in `shared/examples/roles`); blueprints are `blueprints/<name>.toml` (examples in `shared/examples/blueprints`). A role can set `runtimeProfile` (a Kubernetes Runtime pod profile name, `^[a-z][a-z0-9-]{0,31}$`, e.g. `runtimeProfile: small` for roles that build nothing): the Factory passes it as the Runtime option `profile` when it creates the worker's workspace, which wins over the Runtime's `projectProfiles`. It is ignored on the `local` runtime, when the role omits it, and when a worker joins an existing shared workspace. Per-stage overrides are not supported: set it on the role.
 
 ## Blueprints
 
