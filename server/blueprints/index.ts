@@ -15,6 +15,7 @@ import { suspendPod, wakePod } from "./pod-control";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
+import { startCrons } from "./crons";
 import { retitleFactoryWorkspaces } from "../workspace-title";
 import { blueprintTools, INSTRUCTIONS, TOOL_NAMES, WORKER_TOOL_NAMES } from "./tools";
 import { stageVerdicts, type AgentStage, type Blueprint, type BlueprintStage, type CallStage, type GateStage } from "../../shared/blueprints/blueprint";
@@ -71,7 +72,7 @@ export function startBlueprints(host: FactoryHost) {
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
-  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "" }, retro: { enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT }, janitor: { enabled: false, dryRun: true, orphanSweep: true } } as BlueprintsSettings);
+  const cfg = (): BlueprintsSettings => current ?? ({ defaultProvider: "claude", pmRole: "pm", pollSeconds: 60, idleGraceSeconds: 90, archiveOnFinish: false, archiveWorkspaceWithAgent: true, events: { mailTo: "" }, retro: { enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT }, janitor: { enabled: false, dryRun: true, orphanSweep: true }, crons: { enabled: false, mailTo: "", schedules: [] } } as unknown as BlueprintsSettings);
 
   // ---- the catalog: blueprints/*.toml of the git sources, plus an optional local folder ----
   let catalog: Catalog = { blueprints: new Map(), errors: [] };
@@ -255,6 +256,17 @@ export function startBlueprints(host: FactoryHost) {
     return out;
   });
 
+  // Cron schedules (the Crons tab): crons/schedules.json of the git sources plus the settings' own, off until crons.enabled.
+  const crons = startCrons({
+    host,
+    engine,
+    store,
+    cfg,
+    ready,
+    catalogReady: async () => (await refresh()).blueprints.size > 0,
+    stateFile: (process.env.BLUEPRINTS_STATE ?? host.statePath("blueprints")).replace(/blueprints\.json$/, "crons.json"),
+  });
+
   const removeTools = host.registerTools("blueprints", blueprintTools({ engine, catalog: async () => (await refresh()).blueprints }));
   host.setInstructions("blueprints", INSTRUCTIONS);
   host.contribute({
@@ -428,6 +440,7 @@ export function startBlueprints(host: FactoryHost) {
       if (host.enabled("blueprints")) void refresh().catch((e) => console.error("blueprints: catalog failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await engine.tick();
       if (host.enabled("blueprints") && host.hasPaseo()) await notify();
+      if (host.enabled("blueprints") && host.hasPaseo() && !store.suspended()) await crons.tick().catch((e) => console.error("blueprints: cron tick failed", e));
       if (host.enabled("blueprints") && host.hasPaseo()) await sweep().catch((e) => console.error("blueprints: orphan sweep failed", e));
     } catch (error) {
       console.error("blueprints: tick failed", error);
