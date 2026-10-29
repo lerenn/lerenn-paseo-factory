@@ -1598,6 +1598,96 @@ describe("a worker that waits on an outside system (decision f1cd49be)", () => {
   });
 });
 
+describe("provider usage limits (usageLimit.enabled)", () => {
+  const LIMIT = "Claude AI usage limit reached|1793372460";
+  async function withLimits(enabled = true) {
+    const { UsageLimits, UsageLimitFile } = await import("./usage-limit/controller");
+    const ctx = setup(flow.replace("flake_retries = 1\n", ""), { pods: true }, true);
+    const settings = { enabled, notify: [], unknownAlertTo: "@user", confirmMinutes: 15, probeMinutes: 5, probeModel: "", resumeConcurrency: 2, resumeStaggerSeconds: 60, resetZone: "UTC" };
+    const controller = new UsageLimits(new UsageLimitFile(null), {
+      now: () => ctx.ports.now(),
+      settings: () => settings,
+      runs: () => ctx.store.all(),
+      factorySuspended: () => !!ctx.store.suspended(),
+      suspend: (id, input) => ctx.engine.suspend(id, input),
+      unsuspend: (id, input) => ctx.engine.unsuspend(id, input),
+      report: (to, r) => ctx.ports.report!(to, r),
+      log: () => undefined,
+    });
+    ctx.engine.usageLimits = controller;
+    return { ...ctx, controller, settings };
+  }
+
+  it("a usage-limit failure holds the run as paused: quota, uses no attempt, nudges nobody", async () => {
+    const t = await withLimits();
+    const run = await t.start();
+    t.states.set("agent-1", "idle");
+    t.advance(1793372460_000 - t.ports.now() - 3600_000); // an hour before the reset in the message
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: LIMIT, provider: "claude" });
+    await t.settle();
+    const live = t.engine.require(run.id);
+    expect(live.status).toBe("suspended");
+    expect(live.suspended?.usageLimit).toMatchObject({ source: "own", rule: "claude-usage-limit-epoch", resetAt: 1793372460_000, resumeAt: 1793372460_000 + 60_000 });
+    expect(live.stages.think).toMatchObject({ attempts: 1, flakes: 0 });
+    expect(t.sent.filter((m) => m.to === "agent-1")).toHaveLength(0);
+    expect(t.spawned).toHaveLength(1);
+    expect(t.items.size).toBe(0);
+    expect(t.engine.view(live).suspended?.quota).toMatchObject({ source: "own", rule: "claude-usage-limit-epoch" });
+    expect(t.controller.status()).toMatchObject({ state: "run_holds", agents: ["agent-1"] });
+  });
+
+  it("when its time comes the worker gets a continue prompt at the same attempt", async () => {
+    const t = await withLimits();
+    const run = await t.start();
+    t.states.set("agent-1", "idle");
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: "5-hour limit reached ∙ resets 3pm (UTC)" });
+    await t.settle();
+    t.advance(24 * 3600_000);
+    await t.controller.tick();
+    await t.settle();
+    const live = t.engine.require(run.id);
+    expect(live.status).toBe("running");
+    expect(live.stages.think.attempts).toBe(1);
+    expect(t.sent.at(-1)).toMatchObject({ to: "agent-1", text: expect.stringContaining("the provider usage limit was lifted") });
+  });
+
+  it("a second worker's match holds the Factory: no new run starts", async () => {
+    const t = await withLimits();
+    const a = await t.start({ ticket: "ANY-1", ticket_confirmed: "true" });
+    const b = await t.start({ ticket: "ANY-2", ticket_confirmed: "true" });
+    const c = await t.start({ ticket: "ANY-3", ticket_confirmed: "true" });
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: "Request failed", code: "rate_limit_error" });
+    await t.settle();
+    await t.engine.turnEnded("agent-2", { kind: "failed", message: 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"x"}}' });
+    await t.settle();
+    expect(t.controller.globalHold()).not.toBeNull();
+    expect([a, b, c].map((r) => t.engine.require(r.id).status)).toEqual(["suspended", "suspended", "suspended"]);
+    expect(t.engine.require(c.id).suspended?.usageLimit?.source).toBe("global");
+    expect(() => t.engine.start({ blueprint: "flow", vars: { ticket: "ANY-4", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/usage limit/);
+  });
+
+  it("not a usage limit: an overloaded turn takes the normal path, an unknown one also alerts once", async () => {
+    const t = await withLimits();
+    const run = await t.start();
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}' });
+    await t.settle();
+    expect(t.engine.require(run.id).status).toBe("running");
+    expect(t.engine.require(run.id).stages.think.attempts).toBe(2);
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: "Something nobody has seen" });
+    await t.settle();
+    expect(t.reports.filter((r) => r.to === "@user")).toHaveLength(1);
+  });
+
+  it("switched off (the default): a usage-limit failure is an ordinary failed turn", async () => {
+    const t = await withLimits(false);
+    const run = await t.start();
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: LIMIT });
+    await t.settle();
+    expect(t.engine.require(run.id).status).toBe("running");
+    expect(t.engine.require(run.id).stages.think.attempts).toBe(2);
+  });
+});
+
 describe("the on-demand run PM (ADR 20261029-factory-on-demand-run-pm)", () => {
   const exhaustThink = async (ctx: ReturnType<typeof setup>) => {
     await ctx.engine.turnEnded("agent-1", { kind: "completed" });

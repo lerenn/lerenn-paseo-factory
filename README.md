@@ -5,7 +5,7 @@ One Paseo plugin that merges **Roles**, **Blueprints**, **Leases**, **Warden** a
 | Module | Tab | What it does | MCP tools |
 |---|---|---|---|
 | Roles | Roles | Agent roles from git (`PASEO_AGENT_ROLE=<name>`) | none (hook) |
-| Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume` |
+| Blueprints | Blueprints | Flows: stages name roles, verdicts pick the next stage | `blueprint_list`, `_start`, `_status`, `_verdict`, `_retry`, `_abort`, `_resume`; `usage_limit_status`, `_classify`, `_lift` |
 | Leases | Leases | One agent at a time on a named resource | `lease_acquire`, `_renew`, `_release`, `_list` |
 | Warden | Warden | Pings agents that go quiet; supervises subagents | `warden_register`, `_register_subagent`, `_update`, `_done`, `_list` |
 | Inbox | Inbox | Multiple-choice questions and approvals for the human (2 to 4 options, an open "Other" always added) | `inbox_ask`, `_status`, `_list`, `_withdraw`, `_pending`, `_answer` |
@@ -87,7 +87,7 @@ The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) 
 
 ## Crons (Blueprints module)
 
-The **Crons** sub-tab of Blueprints (Runs | Templates | Crons | Settings) starts blueprints on cron schedules, with at most one active run per schedule.
+The **Crons** sub-tab of Blueprints (Runs | Templates | Crons | Quota | Settings) starts blueprints on cron schedules, with at most one active run per schedule.
 
 - **Where schedules live:** `crons/schedules.json` in the Factory folder of each git source (next to `roles/` and `blueprints/`, synced with them), plus the Blueprints setting `crons.schedules` (same entries; it wins on a repeated id, then sources in order). A file that does not parse keeps its last good copy; a bad entry is left out and shown in the tab.
 - **Format:** `{"schedules": [{"id": "nightly", "cron": "0 9 * * 1-5", "timezone": "Europe/Paris", "blueprint": "my-blueprint", "vars": {}, "enabled": true, "maxFailures": 2, "mailTo": "@ops"}]}`. `id` is lowercase letters, digits, `-` and `_`; `cron` has 5 fields (minute hour day-of-month month day-of-week, with `*`, lists, ranges and steps; day of week 0-7, Sunday 0 or 7; both day fields restricted means either matches); `timezone` is an IANA zone (default `UTC`); `vars` are strings; `enabled` defaults to true, `maxFailures` to 2; `mailTo` replaces `crons.mailTo`.
@@ -184,6 +184,17 @@ A Kubernetes workspace keeps its Sandbox object (suspended pod, volume) until it
 ## Quota refusals
 
 A worker start refused with `exceeded quota` (any resource: `count/sandboxes`, pods, ...) is a free infra flake: no attempt is used, no `flakes` count, no Inbox item and the run is not paused. The stage stays `entering` with a `quota_wait` log line and is retried by the tick after 1, 2, 4, then 8 minutes (8 minutes each after that), replaying the same dispatch, until the namespace has room.
+
+## Provider usage limits (`usageLimit`, Blueprints > Quota)
+
+Off by default (`usageLimit.enabled`). Not the Kubernetes `exceeded quota` above: this is the model provider's usage limit.
+
+- **Classifier** (`shared/blueprints/usage-limit.ts`, pure, also the read-only tool `usage_limit_classify`): only the terminal error of a failed turn (`PluginTurnOutcome.error`: `message` and `code`), never logs or timelines. A usage limit only on an explicit signal: `code` `rate_limit_error` / `rate_limit` / `usage_limit_reached` / `rate_limit_exceeded`, HTTP status 429, `API Error: 429 {...}` (or a JSON error type above), or the provider's own sentence anchored on the whole message (Claude Code "Claude AI usage limit reached|<epoch>", "... limit reached ... resets 3pm (Europe/Paris)"; Codex "You've hit your usage limit ... try again in/at ..."), with the reset time read from it (`resetZone` for a clock without a zone; past or more than 7 days ahead: none). Not a usage limit: 529/overloaded, other 5xx, network and DNS, auth, context too long, tool and permission errors, the Kubernetes quota, work failures. An error nobody classified takes the normal path and mails ONE alert per signature to `unknownAlertTo` (persisted), so the rules grow from evidence.
+- **Run level:** a match holds the run (status `suspended`, shown as "paused: quota" with `resume_at`): no attempt, flake, nudge or Inbox item; the worker is kept and its pod suspended. It resumes at the reset time plus 60 s, else after `probeMinutes`, with a continue prompt ("the provider usage limit was lifted ..."). A cron run held this way is no failure of its schedule.
+- **Whole Factory:** only a second independent match (another agent and run within `confirmMinutes`, default 15) or a probe (a throw-away one-turn agent on the daemon, label `paseo.factory.usage-probe=1`, model `probeModel` or the defaultProvider, 30 s after a first match, at most one every 5 minutes) holds every live run. While held: `blueprint_start` and the start form refuse, cron slots are skipped (not back-filled, no failure), no retro agent starts, the Supervisor is not woken automatically and Warden pings nobody.
+- **Resume:** a non-LLM scheduler on the Blueprints tick probes at `resume_at`; still limited: the hold stays (next reset time, else 10, 15, 30 minutes); passed: runs resume `resumeConcurrency` (default 2) every `resumeStaggerSeconds` (default 60), oldest first. A person's own Factory-wide suspension (`blueprint_suspend all`) always wins: nothing resumes on its own while it is on.
+- **Notify:** `usageLimit.notify` (addresses, aliases such as `@assistant`, `supervisor`): one mail on a global pause, resume and lift, with the held runs and their workers' agent ids, so an assistant can sweep agents outside the Factory ("continue" one by one) once it resumes. `usage_limit_status` (read-only, every agent; `PASEO_USAGE_LIMIT=off` skips it) gives state, `resume_at`, runs and agents for a heartbeat.
+- **State and audit:** `usage-limit.json` in the Factory's data folder (outside any run, written atomically): the hold, the recent matches, the alerted signatures and an audit log of every run pause, global pause, probe, resume and lift (matched rule and evidence, reset time, runs). The Quota sub-tab (next to Crons) and a banner above every Factory tab show it, with **Lift pause** (RPC `blueprints.usage_limit.lift`; `usage_limit_lift` for trusted agents and the Supervisor).
 
 ## Infrastructure flakes (`flakeRetries`)
 

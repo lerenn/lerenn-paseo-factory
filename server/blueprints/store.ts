@@ -10,6 +10,8 @@ export interface StageState {
   runs: number;
   /** Tries within the current entry. */
   attempts: number;
+  /** The next "wake" prompt says why the run was held (a provider usage limit), then it is cleared. */
+  wakeReason?: "usage_limit" | null;
   /** A start refused for cluster quota, retried by the tick at `at` (1, 2, 4, 8 min back-off), replaying the same dispatch; no attempt is used. */
   /** Pod starts of this stage that failed in a row (reset by a start that works). */
   podStartFailures?: number;
@@ -103,9 +105,22 @@ export interface Run {
   /** Workers replaced while mid-turn: archived when their turn ends. */
   retiring?: string[];
   /** Why and since when the run is suspended (status "suspended"), the status to go back to, and what happened to its worker's pod. */
-  suspended?: { reason: string; at: number; by: string; prevStatus: RunStatus; pods: string[] } | null;
+  suspended?: { reason: string; at: number; by: string; prevStatus: RunStatus; pods: string[]; usageLimit?: UsageLimitHold | null } | null;
   /** What happened after the run ended: event mails already sent, the retro, the janitor. */
   post?: PostState;
+}
+
+/** A run held for a provider usage limit ("paused: quota"): only these are resumed by the usage-limit scheduler, never a person's suspension. */
+export interface UsageLimitHold {
+  /** "own" (this run's worker hit the limit) or "global" (held with the whole Factory). */
+  source: "own" | "global";
+  rule: string | null;
+  evidence: string | null;
+  provider: string | null;
+  agentId: string | null;
+  resetAt: number | null;
+  /** When the scheduler resumes it (own holds only; a global hold resumes with the Factory). */
+  resumeAt: number | null;
 }
 
 /** Where the engine asks for a judgement: an exhausted stage, a failed run, a `pm = true` gate, a resume decision. */

@@ -104,7 +104,33 @@ export const settingsSchema = z.object({
       schedules: z.array(z.unknown()).default([]),
     })
     .default({ enabled: false, mailTo: "", schedules: [] }),
+  /**
+   * Provider usage limits (Blueprints > Quota): a worker whose turn fails on an explicit usage-limit signal holds its run
+   * ("paused: quota") without using an attempt; a second independent match holds the whole Factory until the reset time or a
+   * probe says it passed; runs resume in staggered batches. Off by default: installing it changes nothing.
+   */
+  usageLimit: z
+    .object({
+      enabled: z.boolean().default(false),
+      /** Agents Mail addresses told on a global pause, resume and lift (agent ids, titles, aliases such as @assistant; "supervisor" = the Factory's Supervisor). Empty: nobody. */
+      notify: z.array(z.string()).default([]),
+      /** Where ONE mail per new kind of unclassified provider error goes (e.g. @user). Empty: only logged. */
+      unknownAlertTo: z.string().default(""),
+      /** A second match from another agent within this window, or a probe, holds the whole Factory. */
+      confirmMinutes: z.number().min(1).default(15),
+      /** Without a reset time, probe after this long (then 10, 15, 30 minutes). */
+      probeMinutes: z.number().min(1).default(5),
+      /** "provider/model" of the probe agent (one short turn); empty: the defaultProvider. */
+      probeModel: z.string().default(""),
+      /** Held runs resumed per batch, and seconds between batches. */
+      resumeConcurrency: z.number().int().min(1).max(20).default(2),
+      resumeStaggerSeconds: z.number().int().min(0).default(60),
+      /** The zone a reset clock time without one is read in (the CLI's own). */
+      resetZone: z.string().default("UTC"),
+    })
+    .default({ enabled: false, notify: [], unknownAlertTo: "", confirmMinutes: 15, probeMinutes: 5, probeModel: "", resumeConcurrency: 2, resumeStaggerSeconds: 60, resetZone: "UTC" }),
 });
+export type UsageLimitSettings = BlueprintsSettings["usageLimit"];
 export type BlueprintsSettings = z.output<typeof settingsSchema>;
 
 export const blueprintsSettings = defineSettings({ id: "blueprints", scope: "host", version: 1, schema: settingsSchema });

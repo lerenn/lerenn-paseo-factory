@@ -34,7 +34,16 @@ export const runViewSchema = z.object({
   error: z.string().nullable(),
   waitingFor: z.string().nullable(),
   /** Set while the run is suspended (see blueprint_suspend). */
-  suspended: z.object({ reason: z.string(), since: z.number(), by: z.string(), pods: z.array(z.string()) }).nullable(),
+  suspended: z
+    .object({
+      reason: z.string(),
+      since: z.number(),
+      by: z.string(),
+      pods: z.array(z.string()),
+      /** Held for a provider usage limit ("paused: quota"): when it resumes (null: with the Factory, or by a probe). */
+      quota: z.object({ source: z.enum(["own", "global"]), rule: z.string().nullable(), resumeAt: z.number().nullable() }).nullable().optional(),
+    })
+    .nullable(),
   pmPending: z.object({ stage: z.string(), reason: z.string() }).nullable(),
   /** Open inbox items escalating this run to the human (stuck or setup); the sidebar badge counts those items, not the run. */
   escalations: z.array(z.string()).default([]),

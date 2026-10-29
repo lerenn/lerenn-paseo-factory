@@ -120,6 +120,18 @@ export class Scheduler {
     return this.state;
   }
 
+  /**
+   * The Factory is paused for a provider usage limit: the minutes up to now are evaluated without starting anything, so the
+   * slots of the pause are not back-filled when it resumes and count as no failure. Returns whether a window was skipped.
+   */
+  skipWindow(now: number): boolean {
+    const nowMin = floorMinute(now);
+    if (this.state.lastMinute !== null && this.state.lastMinute >= nowMin) return false;
+    this.state.lastMinute = nowMin;
+    this.store.save(this.state);
+    return true;
+  }
+
   private of(id: string): ScheduleState {
     return (this.state.schedules[id] ??= emptySchedule());
   }

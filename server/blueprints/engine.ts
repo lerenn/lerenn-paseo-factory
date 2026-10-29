@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
 import type { RunView, StageView } from "../../shared/blueprints/run";
-import type { Run, RunStore, StageState } from "./store";
+import type { Run, RunStore, StageState, UsageLimitHold } from "./store";
+import type { Classification, ProviderFailure } from "../../shared/blueprints/usage-limit";
 import { condition, render } from "./template";
 import { workspaceTitle } from "../workspace-title";
 import { PostRun } from "./post";
@@ -56,6 +57,8 @@ export interface Ports {
   report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   /** Settings of the event mails, the retro and the janitor. */
   post?(): PostSettings;
+  /** No model call should start now (the Factory is paused for a usage limit): the retro waits. */
+  quiet?(): boolean;
   /** Archive a workspace (the pod of a Kubernetes agent). */
   archiveWorkspace?(workspaceId: string): Promise<void>;
   /** Suspend the pod of a workspace (volume kept). `busy` says why it was refused (an agent is running in it). Absent: nothing to suspend. */
@@ -101,6 +104,20 @@ export interface Ports {
   settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings> };
   /** Where an on-demand PM escalates first: "supervisor", an agent address or alias, or "" (straight to the human). */
   escalationTarget?(): string;
+}
+
+/** The usage-limit controller as the engine sees it (server/blueprints/usage-limit). Absent or disabled: nothing changes. */
+export interface UsageLimitHook {
+  enabled(): boolean;
+  classify(f: ProviderFailure): Classification;
+  /** When a run held on its own match resumes. */
+  resumeAtFor(resetAt: number | null): number;
+  /** A worker hit the limit; its run is already held. Called outside the run's chain. */
+  matched(e: { runId: string; agentId: string | null; provider: string | null; rule: string; evidence: string; resetAt: number | null }): void;
+  /** A failed turn nobody classified (not a usage limit, a flake or a known class): one alert per signature. */
+  unknown(e: { runId: string; agentId: string | null; failure: ProviderFailure }): void;
+  /** The whole Factory is held for a usage limit. */
+  globalHold(): { reason: string; resumeAt: number | null } | null;
 }
 
 export interface PostSettings {
@@ -179,6 +196,8 @@ export class Engine {
   private readonly aborts = new Map<string, AbortController>();
 
   readonly observer: Observer;
+  /** Set by the Blueprints module when the usage-limit feature is wired. */
+  usageLimits: UsageLimitHook | null = null;
 
   constructor(
     readonly store: RunStore,
@@ -222,6 +241,8 @@ export class Engine {
     }
     const held = this.store.suspended();
     if (held) throw new UsageError(`The Factory is suspended (${held.reason}); resume it with blueprint_resume(all=true) before starting runs.`);
+    const limited = this.usageHold();
+    if (limited) throw new UsageError(`The Factory is paused for a provider usage limit (${limited.reason})${limited.resumeAt ? ` until about ${new Date(limited.resumeAt).toISOString()}` : ""}; no run starts until it resumes or a person lifts it (Blueprints > Quota).`);
     const loaded = this.ports.blueprint(input.blueprint);
     if (!loaded) throw new NotFoundError(`No blueprint "${input.blueprint}".`);
     const { blueprint: def, sha } = loaded;
@@ -282,7 +303,7 @@ export class Engine {
 
   /** Starts queued runs, oldest first, while their blueprint has a free slot under `max_active`. */
   private async dequeue(): Promise<void> {
-    if (this.store.suspended()) return;
+    if (this.store.suspended() || this.usageHold()) return;
     const queued = this.store.active().filter((r) => r.queued).sort((a, b) => a.queued!.at - b.queued!.at);
     for (const run of queued) {
       const max = run.def.max_active ?? Infinity;
@@ -925,17 +946,17 @@ export class Engine {
    * Hold a run: no worker is spawned or prompted, no stage is retried, no attempt is used, and open gates (Inbox items) stay as they
    * are. The pod of the stage's worker is suspended (volume kept) and the worker agent is kept, not archived.
    */
-  async suspend(runId: string, input: { reason: string; by: string; force?: boolean }): Promise<Run> {
+  async suspend(runId: string, input: { reason: string; by: string; force?: boolean; usageLimit?: UsageLimitHold }): Promise<Run> {
     const run = this.require(runId);
     return this.exclusive(run.id, () => this.doSuspend(run, input));
   }
 
-  private async doSuspend(run: Run, input: { reason: string; by: string; force?: boolean }): Promise<Run> {
+  private async doSuspend(run: Run, input: { reason: string; by: string; force?: boolean; usageLimit?: UsageLimitHold }): Promise<Run> {
     if (run.status === "done" || run.status === "failed" || run.status === "aborted") throw new UsageError(`Run ${run.id} is already ${run.status}.`);
     if (run.status === "suspended") return run;
     const now = this.ports.now();
     const pods: string[] = [];
-    run.suspended = { reason: input.reason, at: now, by: input.by, prevStatus: run.status, pods };
+    run.suspended = { reason: input.reason, at: now, by: input.by, prevStatus: run.status, pods, ...(input.usageLimit ? { usageLimit: input.usageLimit } : {}) };
     run.status = "suspended";
     // The Warden would prompt a quiet worker: its watch ends here and the stage registers a new one when it is woken.
     for (const st of Object.values(run.stages)) {
@@ -982,11 +1003,13 @@ export class Engine {
 
   private async doUnsuspend(run: Run, input: { note?: string }): Promise<Run> {
     if (run.status !== "suspended") throw new UsageError(`Run ${run.id} is ${run.status}, not suspended.`);
+    const usage = !!run.suspended?.usageLimit;
     run.status = run.suspended?.prevStatus ?? "running";
     run.suspended = null;
     const id = run.stage;
     const st = id ? run.stages[id] : undefined;
     if (input.note && st) st.notes.push(input.note);
+    if (usage && st) st.wakeReason = "usage_limit";
     this.log(run, "unsuspended", id, input.note ?? null);
     this.store.save();
     if (id && st) await this.replay(run, id, st, { resumed: true });
@@ -1058,7 +1081,9 @@ export class Engine {
 
   private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry" | "wake", facts: string): string {
     const parts: string[] = [];
-    if (why === "wake") {
+    if (why === "wake" && st.wakeReason === "usage_limit") {
+      parts.push(`Factory: the provider usage limit was lifted and run ${run.id} is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
+    } else if (why === "wake") {
       parts.push(`Factory: run ${run.id} was suspended and is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
     } else if (why === "nudge") {
       parts.push(`Factory: you ended your turn without giving a verdict for stage "${id}" of run ${run.id}. Finish the work if needed, then call blueprint_verdict. Do not end your turn without it.`);
@@ -1256,6 +1281,7 @@ export class Engine {
 
     const facts = await this.prFactsBlock(run, def);
     let prompt = this.composePrompt(run, id, def, st, why, facts);
+    if (why === "wake") st.wakeReason = null;
     const reuse = /^reuse:(.+)$/.exec(def.agent)?.[1];
     // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
     let target: string | null = why === "start" ? null : st.agentId;
@@ -1385,10 +1411,20 @@ export class Engine {
   }
 
   /** A turn failed or the worker vanished. Infrastructure failures are retried for free (see takeFlake), then it is an attempt. */
-  private async agentFailed(run: Run, id: string, detail: string): Promise<void> {
+  private async agentFailed(run: Run, id: string, detail: string, failure?: ProviderFailure): Promise<void> {
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
+    const ul = failure && this.usageLimits?.enabled() ? this.usageLimits : null;
+    const c = ul ? ul.classify(failure!) : null;
+    if (ul && c?.kind === "usage_limit") return this.holdForUsageLimit(run, id, failure!, c);
     const reason = flakeReason(detail);
+    if (ul && c?.kind === "other" && c.rule === null && !reason && !isBusyError(detail)) {
+      try {
+        ul.unknown({ runId: run.id, agentId: st.agentId, failure: failure! });
+      } catch (error) {
+        console.error("blueprints: usage-limit alert failed", error);
+      }
+    }
     if (reason) {
       if (this.takeFlake(run, id, reason, detail)) return this.dispatch(run, id, "retry", { free: true, fresh: true, archiveOld: reason === SESSION_GONE });
     } else if (st.flakes < def.flake_retries) {
@@ -1400,8 +1436,33 @@ export class Engine {
     return this.dispatch(run, id, "nudge");
   }
 
+  /**
+   * A provider usage limit: the run is held ("paused: quota") at the same stage and attempt count; no attempt, flake, nudge or
+   * Inbox item. The controller is told outside the run's chain (it may hold other runs, or the whole Factory).
+   */
+  private async holdForUsageLimit(run: Run, id: string, failure: ProviderFailure, c: Extract<Classification, { kind: "usage_limit" }>): Promise<void> {
+    const ul = this.usageLimits!;
+    const st = run.stages[id];
+    const global = ul.globalHold();
+    const hold: UsageLimitHold = { source: global ? "global" : "own", rule: c.rule, evidence: c.evidence, provider: failure.provider ?? null, agentId: st.agentId, resetAt: c.resetAt, resumeAt: global ? null : ul.resumeAtFor(c.resetAt) };
+    this.log(run, "usage_limit", id, `${c.rule}${c.resetAt ? `, resets ${new Date(c.resetAt).toISOString()}` : ""}: ${c.evidence}`);
+    await this.doSuspend(run, { reason: `paused: quota (${c.rule})`, by: "factory", usageLimit: hold });
+    const event = { runId: run.id, agentId: st.agentId, provider: failure.provider ?? null, rule: c.rule, evidence: c.evidence, resetAt: c.resetAt };
+    setImmediate(() => {
+      try {
+        ul.matched(event);
+      } catch (error) {
+        console.error("blueprints: usage-limit match failed", error);
+      }
+    });
+  }
+
+  private usageHold(): { reason: string; resumeAt: number | null } | null {
+    return this.usageLimits?.enabled() ? this.usageLimits.globalHold() : null;
+  }
+
   /** The stage's worker ended a turn. A verdict already given makes this a no-op. */
-  turnEnded(agentId: string, outcome: { kind: "completed" | "failed" | "canceled"; message?: string }): Promise<void> {
+  turnEnded(agentId: string, outcome: { kind: "completed" | "failed" | "canceled"; message?: string; code?: string; provider?: string | null }): Promise<void> {
     if (this.store.all().some((r) => r.retiring?.includes(agentId))) return this.flushRetired(agentId);
     const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === agentId && r.stages[r.stage].status === "running");
     if (!run) return Promise.resolve();
@@ -1426,7 +1487,7 @@ export class Engine {
         return this.pause(run, id, why);
       }
       this.log(run, "turn_ended", id, outcome.kind === "failed" ? `failed: ${outcome.message ?? ""}` : "no verdict");
-      if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed");
+      if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed", { message: outcome.message ?? "", code: outcome.code ?? null, provider: outcome.provider ?? null });
       return this.dispatch(run, id, "nudge");
     }).catch((e) => this.crash(run, e));
   }
@@ -2154,7 +2215,9 @@ export class Engine {
       endedAt: run.endedAt,
       error: run.error,
       waitingFor: run.waitingFor,
-      suspended: run.suspended ? { reason: run.suspended.reason, since: run.suspended.at, by: run.suspended.by, pods: run.suspended.pods } : null,
+      suspended: run.suspended
+        ? { reason: run.suspended.reason, since: run.suspended.at, by: run.suspended.by, pods: run.suspended.pods, quota: run.suspended.usageLimit ? { source: run.suspended.usageLimit.source, rule: run.suspended.usageLimit.rule, resumeAt: run.suspended.usageLimit.resumeAt } : null }
+        : null,
       pmPending: run.pm.pending,
       escalations: Object.keys(run.escalations ?? {}),
       parent: run.parent,
