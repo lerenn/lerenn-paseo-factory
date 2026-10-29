@@ -26,16 +26,6 @@ export const settingsSchema = z.object({
   gates: z.object({ criteriaReminderMinutes: z.number().min(0).default(30) }).default({ criteriaReminderMinutes: 30 }),
   /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. */
   events: z.object({ mailTo: z.string().default("@assistant") }).default({ mailTo: "@assistant" }),
-  /**
-   * Feedback in the Slack thread of a run started from a Slack message (vars `slack_channel`, `slack_thread_ts`): 👀, the diagnosis,
-   * the PR links, ✅ on merge. Only `channels` listed here; the bot token is read from `tokenFile` (a mounted Kubernetes Secret).
-   */
-  slack: z
-    .object({
-      channels: z.array(z.string().regex(/^[CG][A-Z0-9]{6,}$/)).default([]),
-      tokenFile: z.string().default("/etc/paseo/secrets/slack-factory-bot/token"),
-    })
-    .default({ channels: [], tokenFile: "/etc/paseo/secrets/slack-factory-bot/token" }),
   /** After a run ends (done, failed or aborted), a small separate agent mails one short retrospective. */
   retro: z
     .object({

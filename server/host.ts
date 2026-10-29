@@ -41,6 +41,21 @@ export interface Contribution {
 export interface BlueprintEndpoint {
   list(): { name: string; description: string; vars: { name: string; required: boolean; description: string }[] }[];
   start(input: { blueprint: string; vars: Record<string, string>; requestedBy: string; idempotencyKey?: string }): { runId: string };
+  /** Runs updated at or after `since` (epoch ms), optionally only those with a non-empty `hasVar`: for plugins that follow runs. */
+  runs(input: { since: number; hasVar?: string }): RunSnapshot[];
+}
+
+/** What another plugin sees of a run: its state, vars, each stage's outcome and the kinds of events in its history. */
+export interface RunSnapshot {
+  id: string;
+  blueprint: string;
+  status: string;
+  parent: { runId: string; stageId: string } | null;
+  vars: Record<string, string>;
+  updatedAt: number;
+  endedAt: number | null;
+  stages: Record<string, { status: string; verdict: string | null; summary: string | null; data: Record<string, unknown> }>;
+  events: string[];
 }
 
 /** A problem the Supervisor should know about; `key` identifies it across polls. */
@@ -522,7 +537,7 @@ export class FactoryHost {
         : { status: 404, body: { error: "no stage waits for this token" } };
     }
 
-    if (pathname === "/blueprints" || pathname === "/blueprints/start") {
+    if (pathname === "/blueprints" || pathname === "/blueprints/start" || pathname === "/blueprints/runs") {
       const given = Buffer.from(this.bearer(req) ?? "");
       const want = Buffer.from(this.endpointToken);
       if (given.length !== want.length || !timingSafeEqual(given, want)) return { status: 401, body: { error: "unauthorized" } };
@@ -530,6 +545,15 @@ export class FactoryHost {
       if (pathname === "/blueprints") {
         if (req.method !== "GET") return { status: 405, body: { error: "GET only" } };
         return { status: 200, body: { blueprints: this.blueprints.list() } };
+      }
+      if (pathname === "/blueprints/runs") {
+        if (req.method !== "GET") return { status: 405, body: { error: "GET only" } };
+        const q = new URLSearchParams((req.url ?? "").split("?")[1] ?? "");
+        const since = Number(q.get("since") ?? "0");
+        if (!Number.isFinite(since) || since < 0) return { status: 400, body: { error: "since must be epoch milliseconds" } };
+        const hasVar = q.get("has_var") ?? undefined;
+        if (hasVar !== undefined && !/^[a-z][a-z0-9_]*$/.test(hasVar)) return { status: 400, body: { error: "has_var must be a var name" } };
+        return { status: 200, body: { runs: this.blueprints.runs({ since, hasVar }) } };
       }
       if (req.method !== "POST") return { status: 405, body: { error: "POST only" } };
       let input: any;

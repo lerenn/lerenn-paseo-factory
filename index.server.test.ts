@@ -224,6 +224,13 @@ describe("extensions", () => {
       expect(seen).toEqual([{ name: "Louis" }]);
       const listed = (await (await fetch(`${endpoint.url}/blueprints`, { headers: { authorization: `Bearer ${token}` } })).json()) as any;
       expect(listed.blueprints[0]).toMatchObject({ name: "demo", vars: [{ name: "who", required: false }] });
+      const getRuns = (path: string, auth = token) => fetch(`${endpoint.url}${path}`, { headers: { authorization: `Bearer ${auth}` } });
+      expect((await getRuns("/blueprints/runs", "nope")).status).toBe(401);
+      expect((await getRuns("/blueprints/runs?since=-1")).status).toBe(400);
+      const all = (await (await getRuns("/blueprints/runs?since=0&has_var=who")).json()) as any;
+      expect(all.runs).toEqual([expect.objectContaining({ id: first.runId, blueprint: "demo", status: "done", parent: null, vars: { who: "Louis" }, events: expect.any(Array), stages: expect.any(Object) })]);
+      expect(((await (await getRuns("/blueprints/runs?since=0&has_var=slack_thread_ts")).json()) as any).runs).toEqual([]);
+      expect(((await (await getRuns(`/blueprints/runs?since=${Date.now() + 60_000}`)).json()) as any).runs).toEqual([]);
     } finally {
       delete process.env.FACTORY_BLUEPRINTS_DIR;
     }

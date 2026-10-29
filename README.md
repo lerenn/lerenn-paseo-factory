@@ -81,6 +81,7 @@ The **Activity** tab is a factory-wide feed (runs, stage changes, gates, escalat
 The Factory writes `~/.paseo/factory/endpoint.json` (mode 0600, `{url, token}`) and serves on loopback only, with the token as a bearer:
 
 - `POST /blueprints/start`, body `{blueprint, vars, requestedBy, idempotencyKey}` → `200 {runId}`, `404` unknown blueprint, `400` bad vars, `401`. The same `idempotencyKey` returns the same run.
+- `GET /blueprints/runs?since=<epoch ms>&has_var=<name>` → `200 {runs}`: runs updated since then (optionally only those with that var set), each with `id`, `blueprint`, `status`, `parent`, `vars`, `updatedAt`, `endedAt`, each stage's `status`/`verdict`/`summary`/`data`, and the kinds of `events` in its history. For plugins that follow runs (for example Slack feedback in paseo-factory-slack).
 - `GET /blueprints` → names, descriptions and variables (`required`).
 
 ## Inbox and the Assistant

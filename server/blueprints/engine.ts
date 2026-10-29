@@ -1181,7 +1181,7 @@ export class Engine {
         run.waitingFor = null;
       }
       st.verdict = input.verdict;
-      st.summary = input.summary ? clip(input.summary, 2000) : null;
+      st.summary = input.summary ? clip(input.summary, 4000) : null;
       st.data = data;
       st.status = "done";
       st.endedAt = this.ports.now();
