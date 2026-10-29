@@ -46,6 +46,25 @@ async function ciWithoutChecksApi(owner: string, repo: string, head: string): Pr
   return rollup(checks);
 }
 
+/**
+ * Whether the PR sits in a merge queue. Once GitHub moves an auto-merge PR into the queue it can drop `autoMergeRequest`, so that
+ * field alone read a queued PR as "left the queue" and re-opened the merge gate (ANY-2740: three times in 35 min). Undefined when
+ * GitHub does not say.
+ */
+async function inMergeQueue(owner: string, repo: string, number: string): Promise<boolean | undefined> {
+  try {
+    const out = await run("gh", [
+      "api", "graphql",
+      "-f", "query=query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){isInMergeQueue}}}",
+      "-f", `o=${owner}`, "-f", `r=${repo}`, "-F", `n=${number}`,
+    ]);
+    const v = JSON.parse(out).data?.repository?.pullRequest?.isInMergeQueue;
+    return typeof v === "boolean" ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Facts about a PR from GitHub itself (through the daemon's own `gh` login; the agents' GitHub access is the GitHub MCP server). */
 export async function ghFacts(url: string): Promise<PrFacts> {
   const match = PR_URL.exec(url);
@@ -67,16 +86,19 @@ export async function ghFacts(url: string): Promise<PrFacts> {
     throw error;
   }
   const j = JSON.parse(out);
+  const state = String(j.state).toLowerCase() === "merged" ? "merged" : String(j.state).toLowerCase() === "closed" ? "closed" : "open";
+  const autoMerge = j.autoMergeRequest !== null && j.autoMergeRequest !== undefined;
+  const queued = autoMerge || state !== "open" ? autoMerge : await inMergeQueue(match[1], match[2], match[3]);
   return {
     url,
     exists: true,
-    state: String(j.state).toLowerCase() === "merged" ? "merged" : String(j.state).toLowerCase() === "closed" ? "closed" : "open",
+    state,
     head: j.headRefOid ?? "",
     ci: rolledUp ? rollup(j.statusCheckRollup ?? []) : await ciWithoutChecksApi(match[1], match[2], j.headRefOid ?? ""),
     mergeable: j.mergeable === "MERGEABLE" ? true : j.mergeable === "CONFLICTING" ? false : null,
     draft: !!j.isDraft,
     review: j.reviewDecision ?? "",
-    queued: j.autoMergeRequest !== null && j.autoMergeRequest !== undefined,
+    queued,
   };
 }
 

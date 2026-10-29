@@ -39,6 +39,10 @@ export interface StageState {
     passive?: boolean;
     /** A "merged" answer found the PR in the merge queue: the gate waits for the merge (passive) instead of asking again. */
     queued?: boolean;
+    /** Polls in a row that did not see the queued PR in the merge queue. */
+    notQueuedPolls?: number;
+    /** The "still in the merge queue" notice went out. */
+    slowNoticed?: boolean;
   } | null;
   childRunId: string | null;
   startedAt: number | null;
