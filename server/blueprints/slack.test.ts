@@ -28,6 +28,17 @@ describe("Slack milestones", () => {
     expect(slackEscape("a".repeat(5000)).length).toBe(2900);
   });
 
+  it("closes the thread once the alert's own run is done: ✅ and a free-text reply, not for a child run", () => {
+    const merged = { "wait-queue": stage({ verdict: "merged" }) };
+    expect(milestones(run({ status: "running", stages: merged })).some((m) => m.key.endsWith(":done"))).toBe(false);
+    expect(milestones(run({ status: "done", stages: merged, parent: { runId: "bp-0", stageId: "ticket" } })).some((m) => m.key.endsWith(":done"))).toBe(false);
+    const done = milestones(run({ status: "done", stages: merged })).find((m) => m.key.endsWith(":done"))!;
+    expect(done.actions.slice(0, 2)).toEqual([{ kind: "unreact", name: "eyes" }, { kind: "react", name: "white_check_mark" }]);
+    expect((done.actions[2] as { text: string }).text).toBe("Done (bp-1): merged; the finding closes in Aikido after the deploy and its rescan.");
+    const noFix = milestones(run({ status: "done", stages: { investigate: stage({ verdict: "no_code_change", summary: "not reachable" }) } })).find((m) => m.key.endsWith(":done"))!;
+    expect((noFix.actions[2] as { text: string }).text).toBe("Done (bp-1): no code change needed.");
+  });
+
   it("sends each milestone once per thread, only for allowed channels, and retries a failure", async () => {
     const calls: string[] = [];
     let fail = true;

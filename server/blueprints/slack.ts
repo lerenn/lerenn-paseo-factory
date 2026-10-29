@@ -1,6 +1,6 @@
 // Slack feedback in an alert's thread (human decision f36893f5): a run started from a Slack message carries `slack_channel` and
 // `slack_thread_ts` (handed on to its child runs). From the run's state, once each per thread: 👀 on the alert, the diagnosis when
-// the investigation ends, the pull request links when they are open, and ✅ instead of 👀 once merged. Only channels on the
+// the investigation ends, the pull request links when they are open, ✅ instead of 👀 once merged, and a closing reply (with ✅) when the alert's own run is done. Only channels on the
 // allowlist, only the bot's own reactions, replies only in the thread, and the text is escaped so it can mention nobody.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -51,6 +51,11 @@ export function milestones(run: Run): Milestone[] {
   }
   const merged = run.history.some((h) => h.event === "merged") || Object.values(run.stages).some((st) => st.verdict === "merged");
   if (merged) out.push({ key: `${base}:merged`, channel, thread, actions: [{ kind: "unreact", name: "eyes" }, { kind: "react", name: "white_check_mark" }] });
+  // The run that the alert started ended well (merged, or no code change needed): ✅ in place of 👀 and a closing reply (decision 7ffd9055).
+  if (!run.parent && run.status === "done") {
+    const how = merged ? "merged; the finding closes in Aikido after the deploy and its rescan" : inv?.verdict ? (VERDICT[inv.verdict] ?? inv.verdict) : "finished";
+    out.push({ key: `${base}:done`, channel, thread, actions: [{ kind: "unreact", name: "eyes" }, { kind: "react", name: "white_check_mark" }, { kind: "reply", text: `Done (${slackEscape(run.id, 40)}): ${how}.` }] });
+  }
   return out;
 }
 
