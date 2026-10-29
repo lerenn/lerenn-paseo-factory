@@ -70,7 +70,7 @@ function setup(post: PostOverrides = {}) {
       const agentId = `agent-${++agents}`;
       spawned.push(o);
       states.set(agentId, "running");
-      return { agentId, workspaceId: o.local ? null : `ws-${agents}` };
+      return { agentId, workspaceId: o.runtime === "local" ? null : `ws-${agents}` };
     },
     async send() {},
     async report(to, r) {
@@ -257,12 +257,12 @@ describe("retro", () => {
     return t.engine.require(run.id);
   }
 
-  it("a run that did not go straight through gets a separate retro agent, local, with the digest and the destination", async () => {
+  it("a run that did not go straight through gets a separate retro agent, in a pod, with the digest and the destination", async () => {
     const t = setup();
     const run = await failed(t);
     const retro = t.spawned.find((s) => s.role === "retro")!;
     expect(retro).toBeTruthy();
-    expect(retro.local).toBe(true);
+    expect(retro.runtime).toBe("kubernetes");
     expect(retro.labels["paseo.factory.stage"]).toBe("retro");
     expect(retro.prompt).toContain('mail_send(to="@user"');
     expect(retro.prompt).toContain(`Run ${run.id}`);

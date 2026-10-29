@@ -141,13 +141,14 @@ export class PostRun implements Observer {
         cwd: this.ports.settings().defaultCwd,
         labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": s.retro.role, "paseo.factory.stage": "retro" },
         env: { PASEO_AGENT_ROLE: s.retro.role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: "retro" },
-        local: true,
+        // Always a pod: a retro in the daemon adds load to the host every run ends on (decision e833ea19).
+        runtime: "kubernetes",
       });
       (run.agents ??= {})[agentId] = { role: s.retro.role, stage: "retro", workspaceId: workspaceId ?? null };
       post.retro = { agentId, startedAt: now };
       post.phase = "retro";
     } catch (error) {
-      // No retro agent (no role, no working directory...): the facts still reach the human, unsummarised.
+      // No retro agent (no role, no pod: "Daemon client closed"...): the facts still reach the human, unsummarised.
       console.error("blueprints: retro agent failed", error);
       this.mail(s.retro.mailTo, `Factory retro ${run.id} (no agent: ${clip((error as Error).message, 80)})`, clip(digest, 3500), "info");
       post.phase = "archive";

@@ -33,7 +33,7 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; local?: boolean; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; /** Overrides the Blueprints runtime setting for this agent. */ runtime?: "kubernetes" | "local"; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
