@@ -78,6 +78,12 @@ export const gateStageSchema = z.strictObject({
    * and with `on.expired` after `expires_in_minutes` (the engine's own timer, not an Inbox expiry). Someone merging is announced by the run's "waiting" mail.
    */
   wait: z.literal("merge").optional(),
+  /**
+   * With `wait = "merge"`: after this many minutes, a PR that is still open but neither in a merge queue nor tested (no CI run on
+   * its head) will not merge by itself: the gate follows `on.stalled` (for example back to the stage that dispatches CI) instead
+   * of waiting for `expires_in_minutes`.
+   */
+  stall_minutes: z.number().min(1).optional(),
 });
 
 export const callStageSchema = z.strictObject({

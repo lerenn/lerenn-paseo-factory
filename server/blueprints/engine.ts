@@ -1659,6 +1659,28 @@ export class Engine {
         return;
       }
     }
+    // A passive merge wait whose PRs are neither queued nor tested after `stall_minutes` will never merge by itself.
+    if (st.gate?.passive && def.stall_minutes && def.on.stalled && merged < Object.keys(heads).length && this.ports.now() - (st.gate.openedAt ?? this.ports.now()) >= def.stall_minutes * 60_000) {
+      const stuck: string[] = [];
+      for (const url of Object.keys(heads)) {
+        const f = await this.ports.prFacts(url);
+        if (f.state === "open" && !f.queued && (f.ci === "none" || f.ci === "red")) stuck.push(`${url} (${f.ci === "none" ? "no CI run on its head" : "CI red"}, not in the merge queue)`);
+      }
+      if (stuck.length) {
+        await this.exclusive(run.id, async () => {
+          if (run.stage !== id || st.status !== "waiting" || !st.gate?.passive) return;
+          st.status = "done";
+          st.verdict = "stalled";
+          st.summary = `not merging by itself after ${def.stall_minutes} min: ${stuck.join("; ")}`;
+          st.gate = null;
+          run.status = "running";
+          run.waitingFor = null;
+          this.log(run, "merge_stalled", id, st.summary);
+          await this.go(run, id, def.on.stalled!, "merge wait stalled");
+        });
+        return;
+      }
+    }
     if (merged === Object.keys(heads).length && def.on.merged) {
       await this.exclusive(run.id, async () => {
         if (run.stage !== id || st.status !== "waiting" || !st.gate) return;
