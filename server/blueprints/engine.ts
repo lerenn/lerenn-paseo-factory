@@ -84,7 +84,11 @@ export interface Ports {
   withdraw(itemId: string, reason: string): void;
   wardenRegister(o: { agentId: string; task: string }): string | null;
   wardenDone(taskId: string, result: string): void;
-  prFacts(url: string): Promise<PrFacts>;
+  /**
+   * Facts of a PR, through the Factory's per-URL cache: served from memory when younger than `maxAgeMs` (default 2 min, merged
+   * and closed PRs for the life of the run); `maxAgeMs: 0` reads GitHub now (a gate that needs the current head).
+   */
+  prFacts(url: string, opts?: { maxAgeMs?: number }): Promise<PrFacts>;
   /** A Factory or extension tool by name, else null. */
   tool(name: string): ((args: Record<string, unknown>) => Promise<unknown> | unknown) | null;
   stageKind(kind: string): ((ctx: Omit<StageKindContext, "paseo" | "services" | "signal">) => Promise<StageOutcome>) | null;
@@ -1245,7 +1249,7 @@ export class Engine {
     for (const url of toCheck) {
       let f: PrFacts;
       try {
-        f = await this.ports.prFacts(url);
+        f = await this.ports.prFacts(url, { maxAgeMs: 0 });
       } catch (error) {
         throw new UsageError(`Cannot verify ${url} on GitHub (${(error as Error).message}); try again.`);
       }
@@ -1279,7 +1283,7 @@ export class Engine {
     let facts = "";
     if (def.pr) {
       for (const url of this.r(run, def.pr).split(",").map((s) => s.trim()).filter(Boolean)) {
-        const f = await this.ports.prFacts(url);
+        const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
         heads[url] = f.head;
         facts += `\n- ${url} @ ${f.head.slice(0, 12)}: ${f.state}, CI ${f.ci}`;
       }
@@ -1416,7 +1420,7 @@ export class Engine {
     const st = run.stages[id];
     const heads = st.gate!.heads;
     for (const [url, head] of Object.entries(heads)) {
-      const f = await this.ports.prFacts(url);
+      const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
       if (answer === "merged" && f.state === "open" && f.queued) {
         // In the merge queue: wait for the merge on GitHub instead of asking "merged?" again (human decision d82771ac).
         this.log(run, "merge_queued", id, `${url} is in the merge queue: waiting for the merge, no new question`);
@@ -1723,7 +1727,8 @@ export class Engine {
     let queuedNow = false;
     const places: string[] = [];
     for (const [url, head] of Object.entries(heads)) {
-      const f = await this.ports.prFacts(url);
+      // A queued PR is read fresh: LEFT_QUEUE_POLLS counts distinct reads, not one cached answer seen twice.
+      const f = await this.ports.prFacts(url, st.gate?.queued ? { maxAgeMs: 0 } : undefined);
       if (f.state === "open" && f.queued) queuedNow = true;
       if (f.state === "open" && f.queuePosition !== undefined) {
         places.push(`${url} #${f.queuePosition}${f.queueEtaSeconds !== undefined ? `, ETA ~${Math.max(1, Math.round(f.queueEtaSeconds / 60))} min` : ""}`);

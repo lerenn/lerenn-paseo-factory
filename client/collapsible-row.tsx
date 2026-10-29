@@ -14,6 +14,7 @@ export function CollapsibleRow({
   parts,
   bold,
   onOpen,
+  initiallyOpen,
   children,
 }: {
   theme: Theme;
@@ -23,10 +24,12 @@ export function CollapsibleRow({
   parts: (string | null | undefined)[];
   bold?: boolean;
   onOpen?(): void;
+  /** Open when first shown (a row an extension tab linked to). */
+  initiallyOpen?: boolean;
   children: ReactNode;
 }) {
   const c = theme.colors;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!!initiallyOpen);
   return (
     <View style={{ borderRadius: 8, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1 }}>
       <Pressable

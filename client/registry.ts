@@ -7,7 +7,12 @@ export interface ExtensionTabProps {
   extensionId: string;
   /** Call one of the extension's `rpc` entries on the server; throws with the server's message on failure. */
   call(name: string, input?: unknown): Promise<unknown>;
+  /** Leave the tab for a Factory run, an Inbox item or an outside page (the links the Activity feed builds). */
+  open(link: ExtensionLink): void;
 }
+
+/** Where `open` goes: a run on the Blueprints tab (expanded), an item on the Inbox tab (opened), or a URL in the browser. */
+export type ExtensionLink = { tab: "blueprints"; runId: string } | { tab: "inbox"; itemId: string } | { url: string };
 
 export type ExtensionTabComponent = ComponentType<ExtensionTabProps>;
 

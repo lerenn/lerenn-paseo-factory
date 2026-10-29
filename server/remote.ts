@@ -9,7 +9,7 @@ export const remoteRegistrationSchema = z.object({
   tab: z.string().optional(),
   callback: z.object({ url: z.string(), token: z.string().min(8) }),
   tools: z.array(z.object({ name: z.string(), description: z.string().default(""), inputSchema: z.record(z.string(), z.unknown()).default({ type: "object" }), readOnly: z.boolean().optional() })).default([]),
-  rpc: z.array(z.object({ name: z.string() })).default([]),
+  rpc: z.array(z.object({ name: z.string(), readOnly: z.boolean().optional() })).default([]),
   stageKinds: z.array(z.object({ kind: z.string() })).default([]),
   roles: z.array(z.object({ name: z.string(), yaml: z.string() })).default([]),
 });
@@ -116,6 +116,7 @@ export function buildRemote(raw: RemoteRegistration, pending: PendingOutcomes): 
       })),
       rpc: raw.rpc.map((r) => ({
         name: r.name,
+        readOnly: r.readOnly,
         input: z.unknown(),
         output: z.unknown(),
         async run(input: unknown, call: { callerId: string }) {
