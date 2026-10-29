@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
 import type { RunView, StageView } from "../../shared/blueprints/run";
-import type { Run, RunStore, StageState, UsageLimitHold } from "./store";
+import type { Run, RunStore, StageProgress, StageState, UsageLimitHold } from "./store";
 import type { Classification, ProviderFailure } from "../../shared/blueprints/usage-limit";
 import { condition, render } from "./template";
 import { workspaceTitle } from "../workspace-title";
@@ -154,6 +154,19 @@ const APPROVAL = [
 /** An approval gate nobody answers is reminded this many times at most. */
 const MAX_REMINDERS = 3;
 
+/** Progress records one stage entry keeps (blueprint_progress). */
+export const MAX_PROGRESS = 50;
+
+/** The saved results a replacement or woken worker reads first. */
+export function progressBlock(progress: StageProgress[]): string {
+  const lines = progress.map((p) => `- ${p.key}: ${p.status} (${new Date(p.at).toISOString()})${p.note ? ` — ${p.note}` : ""}`);
+  return (
+    `## Progress saved in this stage entry (Factory run store; it survives the pod)\n${lines.join("\n")}\n` +
+    "Keep these results: do not redo a step listed here unless it no longer holds (for example the PR head or environment it names " +
+    "changed). Do only the missing steps, save each with blueprint_progress, and give the verdict over all of them."
+  );
+}
+
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 const freshStage = (): StageState => ({
@@ -163,6 +176,7 @@ const freshStage = (): StageState => ({
   extra: 0,
   flakes: 0,
   flakeReasons: [],
+  progress: [],
   agentId: null,
   wardenTask: null,
   verdict: null,
@@ -486,6 +500,7 @@ export class Engine {
     st.attempts = 0;
     st.flakes = 0;
     st.flakeReasons = [];
+    st.progress = [];
     st.startedAt = this.ports.now();
     st.endedAt = null;
     st.verdict = null;
@@ -1091,6 +1106,7 @@ export class Engine {
       parts.push(this.r(run, def.prompt));
     }
     if (st.notes.length) parts.push(`## Notes from the PM\n${st.notes.map((n) => `- ${n}`).join("\n")}`);
+    if ((why === "retry" || why === "wake") && st.progress?.length) parts.push(progressBlock(st.progress));
     if (facts) parts.push(facts);
     const verdicts = stageVerdicts(def);
     parts.push(
@@ -1509,6 +1525,28 @@ export class Engine {
     }
     this.store.save();
     return { stage: run.stage! };
+  }
+
+  /**
+   * A worker saves the result of one step of its stage (for a QA, one criterion) in the run store. A replacement worker of the
+   * same entry (after a pod eviction, an OOMKill, a lost session) gets the saved results in its prompt and only does what is
+   * missing (ANY-2748 retro, decision a6decaa8). A record with the same key replaces the earlier one.
+   */
+  workerProgress(callerId: string, input: { key: string; status: string; note?: string }): { stage: string; saved: number } {
+    const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === callerId && (r.stages[r.stage].status === "running" || r.stages[r.stage].status === "entering"));
+    if (!run) throw new UsageError("You are not the worker of a running stage.");
+    const st = run.stages[run.stage!];
+    const key = clip(input.key.trim(), 100);
+    if (!key) throw new UsageError("key is empty.");
+    const list = (st.progress ??= []);
+    const entry = { key, status: clip(input.status.trim() || "done", 40), note: clip((input.note ?? "").trim(), 1000), at: this.ports.now() };
+    const i = list.findIndex((p) => p.key === key);
+    if (i >= 0) list[i] = entry;
+    else if (list.length >= MAX_PROGRESS) throw new UsageError(`A stage entry keeps at most ${MAX_PROGRESS} progress records; reuse a key.`);
+    else list.push(entry);
+    this.log(run, "progress", run.stage, `${key}: ${entry.status}`);
+    this.store.save();
+    return { stage: run.stage!, saved: list.length };
   }
 
   async verdict(callerId: string, input: { run?: string; stage?: string; verdict: string; summary?: string; data?: Record<string, unknown> }): Promise<{ next: string }> {

@@ -4,6 +4,17 @@ import path from "node:path";
 import type { Blueprint } from "../../shared/blueprints/blueprint";
 import type { RunStatus } from "../../shared/blueprints/run";
 
+/** One step a stage worker finished, saved with blueprint_progress. */
+export interface StageProgress {
+  /** The step, unique within the entry (for a QA, the criterion number). A new record with the same key replaces the old one. */
+  key: string;
+  /** Its outcome in the worker's words: pass, fail, skipped... */
+  status: string;
+  /** Evidence and what it was checked against (a head sha, a command, a path). */
+  note: string;
+  at: number;
+}
+
 export interface StageState {
   status: "pending" | "entering" | "running" | "waiting" | "done" | "exhausted" | "skipped" | "failed";
   /** Entries into the stage over the run. */
@@ -25,6 +36,12 @@ export interface StageState {
   flakes: number;
   /** Reasons of every infrastructure failure of the current entry (retried or not). Absent in older saved runs. */
   flakeReasons?: string[];
+  /**
+   * Results the stage's workers saved step by step in the current entry (blueprint_progress), kept in the run store so a
+   * replacement worker (pod evicted, OOMKilled, session gone) reads them instead of redoing the steps. Cleared on entry.
+   * Absent in older saved runs.
+   */
+  progress?: StageProgress[];
   agentId: string | null;
   wardenTask: string | null;
   verdict: string | null;

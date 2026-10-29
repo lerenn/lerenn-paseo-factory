@@ -104,6 +104,16 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
       },
     },
     {
+      name: "blueprint_progress",
+      description:
+        "Save the result of one step of your stage (for a QA, one criterion: key \"1\", status pass or fail, note = the evidence and the head sha it was checked on) as soon as it is known. " +
+        "It is kept in the Factory's run store: if your pod is evicted or your session is lost, the worker that replaces you is given every saved result and does only the missing steps. The same key replaces the earlier record. Never put secret values in it.",
+      input: z.object({ key: z.string().min(1).max(100), status: z.string().min(1).max(40), note: z.string().max(1000).optional() }),
+      run(input, ctx) {
+        return { ok: true, ...engine.workerProgress(ctx.callerId, input) };
+      },
+    },
+    {
       name: "blueprint_verdict",
       description:
         "Give the verdict of your stage; it picks the next stage. For a stage that produced pull requests, put them in data.pr_urls (checked on GitHub). Call it once, then stop.",
@@ -224,7 +234,7 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
 
 export const TOOL_NAMES = ["blueprint_list", "blueprint_start", "blueprint_status", "blueprint_verdict", "blueprint_retry", "blueprint_abort", "blueprint_resume", "blueprint_suspend"];
 /** What a stage worker needs. */
-export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status", "blueprint_waiting"];
+export const WORKER_TOOL_NAMES = ["blueprint_verdict", "blueprint_status", "blueprint_waiting", "blueprint_progress"];
 export { PM_TOOL_NAMES };
 
 export { stageVerdicts };

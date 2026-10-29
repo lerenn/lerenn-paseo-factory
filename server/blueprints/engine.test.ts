@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { Engine, UsageError, type GateState, type PrFacts, type Ports } from "./engine";
+import { Engine, MAX_PROGRESS, UsageError, type GateState, type PrFacts, type Ports } from "./engine";
 import { RunStore } from "./store";
 import type { PmSettings } from "./pm";
 import { parseBlueprint } from "./toml";
@@ -759,6 +759,53 @@ merged = "done"
     expect(ctx.items.size).toBe(2);
     await ctx.answer("item-2", "merged");
     expect(ctx.engine.require(run.id).status).toBe("done");
+  });
+});
+
+describe("saved progress of a stage entry (ANY-2748 retro, decision a6decaa8)", () => {
+  const noLegacy = flow.replace("flake_retries = 1\n", "");
+
+  it("a replacement worker after a pod loss gets the saved results; the same key replaces a record", async () => {
+    const { start, engine, spawned, settle } = setup(noLegacy);
+    const run = await start();
+    engine.workerProgress("agent-1", { key: "1", status: "pass", note: "head abc123: go test ./... ok" });
+    engine.workerProgress("agent-1", { key: "2", status: "fail", note: "first try" });
+    expect(engine.workerProgress("agent-1", { key: "2", status: "pass", note: "head abc123: curl 200" })).toEqual({ stage: "think", saved: 2 });
+    expect(spawned[0].prompt).not.toContain("Progress saved");
+    await engine.turnEnded("agent-1", { kind: "failed", message: "pod evicted by the node" });
+    await settle();
+    expect(spawned).toHaveLength(2);
+    const prompt = spawned[1].prompt;
+    expect(prompt).toContain("## Progress saved in this stage entry");
+    expect(prompt).toContain("- 1: pass");
+    expect(prompt).toContain("- 2: pass");
+    expect(prompt).toContain("head abc123: curl 200");
+    expect(prompt).not.toContain("first try");
+    expect(prompt).toContain("Investigate ANY-1"); // the stage prompt is still there
+    expect(engine.require(run.id).history.filter((h) => h.event === "progress")).toHaveLength(3);
+  });
+
+  it("only the stage's worker saves progress, within bounds", async () => {
+    const { start, engine } = setup(noLegacy);
+    await start();
+    expect(() => engine.workerProgress("stranger", { key: "1", status: "pass" })).toThrow(/not the worker/);
+    expect(() => engine.workerProgress("agent-1", { key: "  ", status: "pass" })).toThrow(/key is empty/);
+    for (let i = 0; i < MAX_PROGRESS; i++) engine.workerProgress("agent-1", { key: `k${i}`, status: "pass" });
+    expect(() => engine.workerProgress("agent-1", { key: "one-more", status: "pass" })).toThrow(/at most/);
+    expect(engine.workerProgress("agent-1", { key: "k0", status: "fail" }).saved).toBe(MAX_PROGRESS);
+  });
+
+  it("a new entry of the stage starts with no saved progress", async () => {
+    const ctx = setup(noLegacy);
+    const run = await ctx.start();
+    ctx.engine.workerProgress("agent-1", { key: "1", status: "pass" });
+    await ctx.verdict("agent-1", "fix", { criteria: "1. it works" });
+    const itemId = [...ctx.items.keys()].at(-1)!;
+    await ctx.answer(itemId, "deny");
+    const r = ctx.engine.require(run.id);
+    expect(r.stage).toBe("think");
+    expect(r.stages.think.runs).toBe(2);
+    expect(r.stages.think.progress).toEqual([]);
   });
 });
 
