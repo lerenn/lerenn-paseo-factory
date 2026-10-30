@@ -8,7 +8,7 @@ describe("resolveLink", () => {
   });
 
   it("opens only http(s) URLs", () => {
-    expect(resolveLink({ url: "https://linear.app/x/issue/ANY-1" })).toEqual({ url: "https://linear.app/x/issue/ANY-1" });
+    expect(resolveLink({ url: "https://tracker.example/issue/ABC-1" })).toEqual({ url: "https://tracker.example/issue/ABC-1" });
     expect(resolveLink({ url: "javascript:alert(1)" })).toBeNull();
   });
 

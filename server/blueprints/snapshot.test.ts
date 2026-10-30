@@ -12,7 +12,7 @@ function run(over: object = {}): any {
     blueprint: "ticket",
     status: "waiting",
     stage: "review",
-    vars: { ticket: "ANY-1" },
+    vars: { ticket: "ABC-1" },
     parent: null,
     updatedAt: 5,
     endedAt: null,

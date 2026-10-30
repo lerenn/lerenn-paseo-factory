@@ -132,11 +132,11 @@ describe("requests from other agents", () => {
 describe("extension restarts", () => {
   it("allows one restart per extension per hour, then points to the user", async () => {
     const { supervisor, advance } = setup();
-    expect(await supervisor.restartExtension("release-trains")).toBe("restarted release-trains");
-    await expect(supervisor.restartExtension("release-trains")).rejects.toThrow(/once per hour.*inbox_ask/);
+    expect(await supervisor.restartExtension("shipit")).toBe("restarted shipit");
+    await expect(supervisor.restartExtension("shipit")).rejects.toThrow(/once per hour.*inbox_ask/);
     expect(await supervisor.restartExtension("tickets-dispatcher")).toBe("restarted tickets-dispatcher");
     advance(61 * 60_000);
-    expect(await supervisor.restartExtension("release-trains")).toBe("restarted release-trains");
+    expect(await supervisor.restartExtension("shipit")).toBe("restarted shipit");
   });
 });
 
@@ -290,14 +290,14 @@ describe("memory and intro", () => {
     supervisor.note("waiting for a person on the deploy pin");
     supervisor.state.data.requests.push({ id: "sq-1", fromId: "a", fromName: "Assistant", question: "Q1", at: 1, answer: "A1", answeredAt: 2, deliveredAt: 1 });
     setIssues([{ key: "run:bp-9:failed", text: "Run bp-9 failed" }]);
-    setActivity({ runs: [{ id: "bp-9", label: "ticket ANY-1", status: "waiting", stage: "review", detail: "gate" }], liveStageAgents: 0 });
+    setActivity({ runs: [{ id: "bp-9", label: "ticket ABC-1", status: "waiting", stage: "review", detail: "gate" }], liveStageAgents: 0 });
     await supervisor.ensure({ restart: true });
     const intro = prompts[1];
     expect(intro).toMatch(/session #2/);
     expect(intro).toMatch(/waiting for a person on the deploy pin/);
     expect(intro).toMatch(/Run bp-9 failed/);
     expect(intro).toMatch(/sq-1 from "Assistant": Q1/);
-    expect(intro).toMatch(/bp-9 \(ticket ANY-1\) waiting at review/);
+    expect(intro).toMatch(/bp-9 \(ticket ABC-1\) waiting at review/);
   });
 
   it("caps the notes at 8 KB, dropping the oldest first, and the sessions at 20", async () => {
@@ -340,7 +340,7 @@ describe("watcher while archived", () => {
 
   it("wakes on a dropped extension", async () => {
     const { supervisor, created, setIssues } = await archivedSetup();
-    setIssues([{ key: "ext:release-trains:dropped", text: "Extension release-trains was dropped" }]);
+    setIssues([{ key: "ext:shipit:dropped", text: "Extension shipit was dropped" }]);
     await supervisor.digest();
     expect(created).toHaveLength(2);
   });
@@ -407,8 +407,8 @@ describe("supervisor.enabled", () => {
     const s = setup({ notify: (subject, body) => void notices.push({ subject, body }) }, { enabled: false });
     s.setIssues([
       { key: "lease:pr:org/repo#1:expired:123", text: "Lease pr:org/repo#1 expired without a release (holder a)." },
-      { key: "ext:releaser:dropped", text: "Extension releaser was dropped." },
-      { key: "ext:releaser:degraded", text: "degraded" },
+      { key: "ext:shipit:dropped", text: "Extension shipit was dropped." },
+      { key: "ext:shipit:degraded", text: "degraded" },
       { key: "lease:x:contended", text: "contended" },
       { key: "run:r1:failed", text: "failed run" },
     ]);
@@ -416,7 +416,7 @@ describe("supervisor.enabled", () => {
     await s.supervisor.digest();
     expect(notices).toHaveLength(2);
     expect(notices[0].subject).toBe("Factory: Lease pr:org/repo#1 expired without a release");
-    expect(notices[1].subject).toBe("Factory: extension releaser dropped");
+    expect(notices[1].subject).toBe("Factory: extension shipit dropped");
     expect(s.created).toHaveLength(0);
   });
 

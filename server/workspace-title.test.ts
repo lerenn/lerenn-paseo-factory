@@ -13,14 +13,14 @@ describe("workspace titles", () => {
   });
 
   it("puts the ticket key first, then its title", () => {
-    expect(workspaceTitle("investigator", { ticket: "ANY-1234", ticket_title: "Ticket Subject" })).toBe("Investigator: ANY-1234 Ticket Subject");
-    expect(workspaceTitle("implementer", { ticket: "ANY-1", ticket_text: "\nFirst line title\nbody" })).toBe("Implementer: ANY-1 First line title");
-    expect(workspaceTitle("qa", { ticket: "ANY-1" })).toBe("QA: ANY-1");
+    expect(workspaceTitle("investigator", { ticket: "ABC-1234", ticket_title: "Ticket Subject" })).toBe("Investigator: ABC-1234 Ticket Subject");
+    expect(workspaceTitle("implementer", { ticket: "ABC-1", ticket_text: "\nFirst line title\nbody" })).toBe("Implementer: ABC-1 First line title");
+    expect(workspaceTitle("qa", { ticket: "ABC-1" })).toBe("QA: ABC-1");
   });
 
   it("keeps the key when the title is long", () => {
-    const t = workspaceTitle("pm", { ticket: "ANY-9", ticket_title: "x".repeat(300) }, "ticket bp-1");
-    expect(t.startsWith("PM: ANY-9 xxx")).toBe(true);
+    const t = workspaceTitle("pm", { ticket: "ABC-9", ticket_title: "x".repeat(300) }, "ticket bp-1");
+    expect(t.startsWith("PM: ABC-9 xxx")).toBe(true);
     expect(t.length).toBeLessThan(100);
   });
 
@@ -46,7 +46,7 @@ describe("workspace titles", () => {
       },
       workspaces: { ref: () => ({ refresh, setTitle }) },
     };
-    await retitleFactoryWorkspaces(paseo as never, (id) => (id === "bp-1" ? { vars: { ticket: "ANY-5", ticket_title: "Fix it" }, blueprint: "ticket" } : undefined));
-    expect(setTitle.mock.calls).toEqual([["Supervisor"], ["Investigator: ANY-5 Fix it"]]);
+    await retitleFactoryWorkspaces(paseo as never, (id) => (id === "bp-1" ? { vars: { ticket: "ABC-5", ticket_title: "Fix it" }, blueprint: "ticket" } : undefined));
+    expect(setTitle.mock.calls).toEqual([["Supervisor"], ["Investigator: ABC-5 Fix it"]]);
   });
 });

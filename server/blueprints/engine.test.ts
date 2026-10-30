@@ -172,7 +172,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     await engine.gateResolved(itemId);
     await settle();
   };
-  const start = async (vars: Record<string, string> = { ticket: "ANY-1", ticket_confirmed: "true" }, extra: Record<string, unknown> = {}) => {
+  const start = async (vars: Record<string, string> = { ticket: "ABC-1", ticket_confirmed: "true" }, extra: Record<string, unknown> = {}) => {
     const run = engine.start({ blueprint: "flow", vars, requestedBy: "pm", ownerAgentId: "pm-agent", ...extra } as never);
     await settle();
     return run;
@@ -192,7 +192,7 @@ const PR = "https://github.com/acme/api/pull/7";
 describe("starting", () => {
   it("needs the confirmed ticket and checks the pattern", () => {
     const { engine } = setup();
-    expect(() => engine.start({ blueprint: "flow", vars: { ticket: "ANY-1" }, requestedBy: "x" })).toThrow(/confirmed/);
+    expect(() => engine.start({ blueprint: "flow", vars: { ticket: "ABC-1" }, requestedBy: "x" })).toThrow(/confirmed/);
     expect(() => engine.start({ blueprint: "flow", vars: { ticket: "nope", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/match/);
     expect(() => engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" })).toThrow(/required/);
     expect(() => engine.start({ blueprint: "missing", vars: {}, requestedBy: "x" })).toThrow(/No blueprint/);
@@ -205,8 +205,8 @@ describe("starting", () => {
     expect(spawned[0].role).toBe("investigator");
     expect(spawned[0].labels).toMatchObject({ "paseo.factory": "1", "paseo.factory.blueprint": "flow", "paseo.factory.run": run.id, "paseo.factory.stage": "think", "paseo.factory.role": "investigator" });
     expect(spawned[0].env).toMatchObject({ PASEO_AGENT_ROLE: "investigator", PASEO_FACTORY_RUN: run.id });
-    expect(spawned[0].workspaceTitle).toBe("Investigator: ANY-1");
-    expect(spawned[0].prompt).toContain("Investigate ANY-1");
+    expect(spawned[0].workspaceTitle).toBe("Investigator: ABC-1");
+    expect(spawned[0].prompt).toContain("Investigate ABC-1");
     expect(spawned[0].prompt).toContain("blueprint_verdict");
     expect(wardens).toEqual(["agent-1"]);
   });
@@ -298,7 +298,7 @@ describe("setup failures", () => {
   it("refuses to start when the blueprint cannot start any worker", () => {
     const ctx = setup();
     ctx.ports.preflight = () => "defaultCwd is not set";
-    expect(() => ctx.engine.start({ blueprint: "flow", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/defaultCwd is not set/);
+    expect(() => ctx.engine.start({ blueprint: "flow", vars: { ticket: "ABC-1", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/defaultCwd is not set/);
   });
 });
 
@@ -338,13 +338,13 @@ describe("verdicts", () => {
     expect(engine.require(run.id).stage).toBe("check");
   });
 
-  it("gives PR stages the GitHub facts in their prompt", async () => {
+  it("gives PR stages the PR facts in their prompt", async () => {
     const { start, verdict, pr, spawned } = setup();
     pr[PR] = okPr(PR, "abc123def456");
     await start(undefined, { at: "build" });
     await verdict("agent-1", "done", { pr_urls: [PR] });
     const qa = spawned.find((s) => s.role === "qa")!;
-    expect(qa.prompt).toMatch(/GitHub facts/);
+    expect(qa.prompt).toMatch(/PR facts/);
     expect(qa.prompt).toContain(`${PR}: open, head abc123def456, CI green`);
   });
 });
@@ -466,7 +466,7 @@ describe("gates", () => {
     const first = await start();
     await verdict("agent-1", "fix", { criteria: "1. it works" });
     expect(engine.require(first.id)).toMatchObject({ status: "waiting", stage: "criteria" });
-    expect(items.get("item-1")?.question).toMatch(/Criteria for ANY-1/);
+    expect(items.get("item-1")?.question).toMatch(/Criteria for ABC-1/);
     await answer("item-1", "approve");
     expect(engine.require(first.id).stage).toBe("build");
 
@@ -486,7 +486,7 @@ describe("gates", () => {
 
   it("skip_if follows the skipped edge", async () => {
     const { start, verdict, engine } = setup();
-    const run = await start({ ticket: "ANY-2", ticket_confirmed: "true", bump: "true" });
+    const run = await start({ ticket: "ABC-2", ticket_confirmed: "true", bump: "true" });
     await verdict("agent-1", "fix", { criteria: "x" });
     expect(engine.require(run.id).stage).toBe("build");
     expect(engine.require(run.id).stages.criteria.status).toBe("skipped");
@@ -602,7 +602,7 @@ name = "flow"
 [[stage]]
 id = "join"
 kind = "call"
-tool = "releaser_join"
+tool = "release_request"
 [stage.args]
 service = "{{svc}}"
 list = ["{{stage.join.data.urls}}"]
@@ -614,7 +614,7 @@ default = "backend"
 `;
     const ctx = setup(src);
     const calls: unknown[] = [];
-    ctx.ports.tool = (name) => (name === "releaser_join" ? async (args) => (calls.push(args), "joined") : null);
+    ctx.ports.tool = (name) => (name === "release_request" ? async (args) => (calls.push(args), "joined") : null);
     const run = ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
     await ctx.settle();
     expect(calls).toEqual([{ service: "backend", list: [] }]);
@@ -771,7 +771,7 @@ merged = "done"
   });
 });
 
-describe("saved progress of a stage entry (ANY-2748 retro, decision a6decaa8)", () => {
+describe("saved progress of a stage entry (decision a6decaa8)", () => {
   const noLegacy = flow.replace("flake_retries = 1\n", "");
 
   it("a replacement worker after a pod loss gets the saved results; the same key replaces a record", async () => {
@@ -790,7 +790,7 @@ describe("saved progress of a stage entry (ANY-2748 retro, decision a6decaa8)", 
     expect(prompt).toContain("- 2: pass");
     expect(prompt).toContain("head abc123: curl 200");
     expect(prompt).not.toContain("first try");
-    expect(prompt).toContain("Investigate ANY-1"); // the stage prompt is still there
+    expect(prompt).toContain("Investigate ABC-1"); // the stage prompt is still there
     expect(engine.require(run.id).history.filter((h) => h.event === "progress")).toHaveLength(3);
   });
 
@@ -921,7 +921,7 @@ describe("infrastructure flakes", () => {
 });
 
 describe("runs.notifyMailTo", () => {
-  const NOTHING = { ticket: "ANY-1", ticket_confirmed: "true" };
+  const NOTHING = { ticket: "ABC-1", ticket_confirmed: "true" };
 
   it("unset: the starter gets the live message, as before", async () => {
     const { start, verdict, sent, reports } = setup(flow, {}, true);
@@ -937,10 +937,10 @@ describe("runs.notifyMailTo", () => {
     await verdict("agent-1", "nothing");
     expect(engine.require(run.id).status).toBe("done");
     expect(reports).toHaveLength(1);
-    expect(reports[0]).toMatchObject({ to: "@assistant", subject: `Run ${run.id} ANY-1 done`, kind: "run" });
+    expect(reports[0]).toMatchObject({ to: "@assistant", subject: `Run ${run.id} ABC-1 done`, kind: "run" });
     expect(reports[0].body).toContain(`Run: ${run.id}`);
     expect(reports[0].body).toContain("Blueprint: flow");
-    expect(reports[0].body).toContain("ticket=ANY-1");
+    expect(reports[0].body).toContain("ticket=ABC-1");
     expect(reports[0].body).not.toContain("_confirmed");
     expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
   });
@@ -949,7 +949,7 @@ describe("runs.notifyMailTo", () => {
     const { start, engine, reports } = setup(flow, { runsMailTo: "@assistant" }, true);
     const run = await start(NOTHING, { ownerAgentId: "pm-agent" });
     await engine.abort(run.id, "stop");
-    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ANY-1 aborted`]);
+    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ABC-1 aborted`]);
   });
 
   it("set: a stage that needs the PM is mailed, and the PM is neither messaged nor spawned", async () => {
@@ -960,7 +960,7 @@ describe("runs.notifyMailTo", () => {
     await engine.turnEnded("agent-1", { kind: "completed" });
     await settle();
     expect(engine.require(run.id).status).toBe("waiting");
-    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ANY-1 needs PM`]);
+    expect(reports.map((r) => r.subject)).toEqual([`Run ${run.id} ABC-1 needs PM`]);
     expect(reports[0].body).toContain("blueprint_retry");
     expect(sent.filter((m) => m.to === "pm-agent")).toHaveLength(0);
     expect(spawned.filter((s) => s.role === "pm")).toHaveLength(0);
@@ -1005,7 +1005,7 @@ describe("suspending", () => {
     await engine.suspend(run.id, { reason: "freeze", by: "x" });
     expect(pods.suspended).toEqual([]);
     expect(engine.require(run.id).suspended!.pods[0]).toContain("not suspended (busy");
-    const second = await start({ ticket: "ANY-2", ticket_confirmed: "true" });
+    const second = await start({ ticket: "ABC-2", ticket_confirmed: "true" });
     pods.busy.add("ws-2");
     await engine.suspend(second.id, { reason: "freeze", by: "x", force: true });
     expect(pods.suspended).toEqual(["ws-2"]);
@@ -1064,7 +1064,7 @@ describe("suspending", () => {
     await settle();
     expect(engine.require(run.id).stages.think).toMatchObject({ attempts: 1, agentId: "agent-2" });
     expect(spawned).toHaveLength(2);
-    expect(spawned[1].prompt).toContain("Investigate ANY-1");
+    expect(spawned[1].prompt).toContain("Investigate ABC-1");
     expect(spawned[1].prompt).toContain("you are its replacement");
   });
 
@@ -1095,11 +1095,11 @@ describe("suspending the whole Factory", () => {
       const a = setup(flow, { pods: true });
       const store = new RunStore(file);
       const engine = new Engine(store, a.ports);
-      const run = engine.start({ blueprint: "flow", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "pm" });
+      const run = engine.start({ blueprint: "flow", vars: { ticket: "ABC-1", ticket_confirmed: "true" }, requestedBy: "pm" });
       await a.settle();
       await engine.suspendAll({ reason: "maintenance", by: "assistant" });
       expect(engine.require(run.id).status).toBe("suspended");
-      expect(() => engine.start({ blueprint: "flow", vars: { ticket: "ANY-2", ticket_confirmed: "true" }, requestedBy: "pm" })).toThrow(/suspended/);
+      expect(() => engine.start({ blueprint: "flow", vars: { ticket: "ABC-2", ticket_confirmed: "true" }, requestedBy: "pm" })).toThrow(/suspended/);
 
       // the plugin reloads: nothing is respawned
       const again = new RunStore(file);
@@ -1120,7 +1120,7 @@ describe("suspending the whole Factory", () => {
   it("resumes all with at most N workers starting at once and lifts the hold", async () => {
     const { start, engine, store, settle, ports } = setup(flow, { pods: true });
     const runs = [];
-    for (let i = 1; i <= 5; i++) runs.push(await start({ ticket: `ANY-${i}`, ticket_confirmed: "true" }));
+    for (let i = 1; i <= 5; i++) runs.push(await start({ ticket: `ABC-${i}`, ticket_confirmed: "true" }));
     await engine.suspendAll({ reason: "freeze", by: "x" });
     expect(store.suspended()).not.toBeNull();
     let inFlight = 0;
@@ -1141,7 +1141,7 @@ describe("suspending the whole Factory", () => {
     await settle();
     expect(peak).toBe(2);
     expect(runs.map((r) => engine.require(r.id).status)).toEqual(Array(5).fill("running"));
-    engine.start({ blueprint: "flow", vars: { ticket: "ANY-9", ticket_confirmed: "true" }, requestedBy: "pm" }); // starts again
+    engine.start({ blueprint: "flow", vars: { ticket: "ABC-9", ticket_confirmed: "true" }, requestedBy: "pm" }); // starts again
   });
 });
 
@@ -1382,7 +1382,7 @@ head_moved = "merge"
     ctx.pr[PR] = { ...okPr(PR), queued: false };
     await ctx.engine.tick();
     await ctx.settle();
-    expect(ctx.items.size).toBe(1); // one poll that misses the PR in the queue is not enough (ANY-2740)
+    expect(ctx.items.size).toBe(1); // one poll that misses the PR in the queue is not enough (seen in production)
     await ctx.engine.tick();
     await ctx.settle();
     expect(ctx.items.size).toBe(2);
@@ -1709,9 +1709,9 @@ describe("provider usage limits (usageLimit.enabled)", () => {
 
   it("a second worker's match holds the Factory: no new run starts", async () => {
     const t = await withLimits();
-    const a = await t.start({ ticket: "ANY-1", ticket_confirmed: "true" });
-    const b = await t.start({ ticket: "ANY-2", ticket_confirmed: "true" });
-    const c = await t.start({ ticket: "ANY-3", ticket_confirmed: "true" });
+    const a = await t.start({ ticket: "ABC-1", ticket_confirmed: "true" });
+    const b = await t.start({ ticket: "ABC-2", ticket_confirmed: "true" });
+    const c = await t.start({ ticket: "ABC-3", ticket_confirmed: "true" });
     await t.engine.turnEnded("agent-1", { kind: "failed", message: "Request failed", code: "rate_limit_error" });
     await t.settle();
     await t.engine.turnEnded("agent-2", { kind: "failed", message: 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"x"}}' });
@@ -1719,7 +1719,7 @@ describe("provider usage limits (usageLimit.enabled)", () => {
     expect(t.controller.globalHold()).not.toBeNull();
     expect([a, b, c].map((r) => t.engine.require(r.id).status)).toEqual(["suspended", "suspended", "suspended"]);
     expect(t.engine.require(c.id).suspended?.usageLimit?.source).toBe("global");
-    expect(() => t.engine.start({ blueprint: "flow", vars: { ticket: "ANY-4", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/usage limit/);
+    expect(() => t.engine.start({ blueprint: "flow", vars: { ticket: "ABC-4", ticket_confirmed: "true" }, requestedBy: "x" })).toThrow(/usage limit/);
   });
 
   it("not a usage limit: an overloaded turn takes the normal path, an unknown one also alerts once", async () => {

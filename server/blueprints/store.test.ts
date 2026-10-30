@@ -11,9 +11,9 @@ describe("RunStore created workspaces", () => {
   it("records a created workspace across restarts and forgets it", () => {
     dir = mkdtempSync(path.join(tmpdir(), "bp-store-"));
     const file = path.join(dir, "state.json");
-    new RunStore(file).noteWorkspace("ws1", { at: 1, run: "bp-1", title: "Implementer: ANY-1" });
+    new RunStore(file).noteWorkspace("ws1", { at: 1, run: "bp-1", title: "Implementer: ABC-1" });
     const again = new RunStore(file);
-    expect(again.createdWorkspaces()).toEqual({ ws1: { at: 1, run: "bp-1", title: "Implementer: ANY-1" } });
+    expect(again.createdWorkspaces()).toEqual({ ws1: { at: 1, run: "bp-1", title: "Implementer: ABC-1" } });
     again.forgetWorkspaces(["ws1", "nope"]);
     expect(new RunStore(file).createdWorkspaces()).toEqual({});
   });

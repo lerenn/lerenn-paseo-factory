@@ -55,10 +55,10 @@ describe("agentlessWorkspaces: workspaces whose agent never came", () => {
   });
 
   it("takes an unrecorded workspace by its Factory title (a leak from before the record), after the grace", () => {
-    const titles = new Set(["Implementer: ANY-2747 Fix it"]);
-    const leak = { ...ws("l1"), title: "Implementer: ANY-2747 Fix it", statusEnteredAt: new Date(now - 60 * min).toISOString() };
-    const young = { ...ws("l2"), title: "Implementer: ANY-2747 Fix it", statusEnteredAt: new Date(now - min).toISOString() };
-    const other = { ...ws("l3"), title: "Implementer: ANY-9 Other" };
+    const titles = new Set(["Implementer: ABC-2747 Fix it"]);
+    const leak = { ...ws("l1"), title: "Implementer: ABC-2747 Fix it", statusEnteredAt: new Date(now - 60 * min).toISOString() };
+    const young = { ...ws("l2"), title: "Implementer: ABC-2747 Fix it", statusEnteredAt: new Date(now - min).toISOString() };
+    const other = { ...ws("l3"), title: "Implementer: ABC-9 Other" };
     expect(agentlessWorkspaces([leak, young, other], [], { ...base, titles, now }).map((w) => w.id)).toEqual(["l1"]);
   });
 
@@ -77,7 +77,7 @@ describe("agentlessWorkspaces: workspaces whose agent never came", () => {
 
 describe("factoryWorkspaceTitles", () => {
   it("gives the titles the Factory sets for each agent stage's role and the PM", () => {
-    const runs = [{ id: "bp-1", blueprint: "ship", vars: { ticket: "ANY-2747", ticket_title: "Fix it" }, def: { stage: [{ id: "implement", role: "implementer" }, { id: "gate", kind: "gate" }] } }];
-    expect([...factoryWorkspaceTitles(runs, "pm")].sort()).toEqual(["Implementer: ANY-2747 Fix it", "PM: ANY-2747 Fix it"]);
+    const runs = [{ id: "bp-1", blueprint: "ship", vars: { ticket: "ABC-2747", ticket_title: "Fix it" }, def: { stage: [{ id: "implement", role: "implementer" }, { id: "gate", kind: "gate" }] } }];
+    expect([...factoryWorkspaceTitles(runs, "pm")].sort()).toEqual(["Implementer: ABC-2747 Fix it", "PM: ABC-2747 Fix it"]);
   });
 });

@@ -48,8 +48,8 @@ async function ciWithoutChecksApi(owner: string, repo: string, head: string): Pr
 
 /**
  * The PR's place in a merge queue. Once GitHub moves an auto-merge PR into the queue it can drop `autoMergeRequest`, so that field
- * alone read a queued PR as "left the queue" and re-opened the merge gate (ANY-2740: three times in 35 min). Position and ETA feed
- * the wait-queue status (ANY-2738). Empty when GitHub does not say.
+ * alone read a queued PR as "left the queue" and re-opened the merge gate (three times in 35 min once). Position and ETA feed
+ * the wait-queue status. Empty when GitHub does not say.
  */
 async function mergeQueue(owner: string, repo: string, number: string): Promise<{ inQueue?: boolean; position?: number; etaSeconds?: number }> {
   try {

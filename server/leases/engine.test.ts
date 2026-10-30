@@ -286,12 +286,12 @@ describe("keep (an extension vouches for a live agent)", () => {
     engine.acquire("a", "pr:o/r#1@abc", 60, "takeover");
     engine.acquire("a", "long", 7200, "queue");
     engine.acquire("b", "other", 60, "queue");
-    expect(engine.keep("a", 1800, "release-trains").sort()).toEqual(["long", "pr:o/r#1@abc"]);
+    expect(engine.keep("a", 1800, "shipit").sort()).toEqual(["long", "pr:o/r#1@abc"]);
     advance(1700_000);
     expect(engine.store.lease("pr:o/r#1@abc")!.holder?.agentId).toBe("a");
     expect(engine.store.lease("long")!.holder!.expiresAt).toBe(1_000_000 + 7200_000);
     expect(engine.views().find((v) => v.name === "other")).toBeUndefined();
-    expect(store.events().some((e) => e.type === "renewed" && e.actor === "release-trains")).toBe(true);
+    expect(store.events().some((e) => e.type === "renewed" && e.actor === "shipit")).toBe(true);
     expect(engine.keep("c", 1800, "x")).toEqual([]);
     expect(() => engine.keep("a", 0, "x")).toThrow(UsageError);
   });
