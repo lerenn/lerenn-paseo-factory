@@ -1,16 +1,27 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Engine, type GateState, type PrFacts, type Ports } from "./engine";
 import { RunStore } from "./store";
 import { parseBlueprint } from "./toml";
 import { settingsSchema } from "../../shared/blueprints/settings";
+import { factsSource, PR_FACTS_PROVIDER_KEY } from "./facts-provider";
+import { isGitHubPrUrl } from "./github";
+import { PrFactsCache } from "./pr-facts-cache";
 
 const ticket = readFileSync(path.join(__dirname, "..", "..", "shared", "examples", "blueprints", "ticket.toml"), "utf8");
 const PR = "https://github.com/acme/api/pull/7";
 const pr = (state: PrFacts["state"], head = "aaa111"): PrFacts => ({ url: PR, exists: true, state, head, ci: "green", mergeable: true, draft: false, review: "" });
 
-function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string } = {}) {
+/**
+ * How the engine reads the scripted facts: `port` hands them straight to the engine; `fallback` goes through the Factory's
+ * cache and facts source with no provider registered (the `gh` path); `provider` through a registered facts provider, the
+ * fallback refusing every read. The merge-queue behaviours must not depend on the path.
+ */
+type FactsPath = "port" | "fallback" | "provider";
+const PATHS: FactsPath[] = ["port", "fallback", "provider"];
+
+function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string; path?: FactsPath } = {}) {
   let time = 1_000_000;
   let agents = 0;
   const mails: { to: string; subject: string; body: string }[] = [];
@@ -48,6 +59,27 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string }
     post: () => ({ eventsMailTo: opts.eventsMailTo ?? "@assistant", retro: { enabled: false, mailTo: "@user", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true }, janitor: { enabled: false, dryRun: true } }),
     settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, criteriaReminderMinutes: opts.criteriaReminderMinutes }),
   };
+  const reads = { provider: 0, fallback: 0 };
+  if (opts.path && opts.path !== "port") {
+    const scripted = async (url: string) => ({ ...(facts.byUrl[url] ?? facts.pr) });
+    const registry: Record<symbol, unknown> = {};
+    if (opts.path === "provider") registry[PR_FACTS_PROVIDER_KEY] = { github: { matches: isGitHubPrUrl, prFacts: (url: string) => (reads.provider++, scripted(url)) } };
+    const source = factsSource(
+      {
+        matches: isGitHubPrUrl,
+        prDiff: async () => ({ files: 0, additions: 0, deletions: 0 }),
+        prFacts: (url) => {
+          reads.fallback++;
+          return opts.path === "fallback" ? scripted(url) : Promise.reject(new Error("the fallback must not be read"));
+        },
+      },
+      registry,
+    );
+    // ttlMs 0: every read reaches the source, like the scripted port (a merged PR stays cached, as in production).
+    const cache = new PrFactsCache({ fetch: source.prFacts, now: () => time, ttlMs: 0 });
+    ports.prFacts = (url, o) => cache.get(url, o);
+    ports.isPrUrl = source.isPrUrl;
+  }
   const engine = new Engine(store, ports);
   const settle = async () => {
     for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
@@ -67,7 +99,7 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string }
     await engine.tick();
     await settle();
   };
-  return { engine, mails, items, facts, startAt, verdict, tick, settle, advance: (ms: number) => (time += ms) };
+  return { engine, mails, items, facts, reads, startAt, verdict, tick, settle, advance: (ms: number) => (time += ms) };
 }
 
 describe("ticket blueprint: QA pending_merge", () => {
@@ -200,116 +232,127 @@ describe("criteria gate reminders", () => {
   });
 });
 
-describe("merge wait and the merge queue", () => {
-  it("shows the PR's queue position and ETA, and says once when it is still queued after 15 min", async () => {
-    const t = setup();
-    const run = await t.startAt("qa");
-    await t.verdict("agent-1", "pending_merge", "needs the merged code");
-    t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2, queueEtaSeconds: 300 };
-    await t.tick();
-    expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR} #2, ETA ~5 min`);
-    const slow = () => t.mails.filter((m) => m.body.includes("still in the merge queue"));
-    expect(slow()).toHaveLength(0);
-    t.advance(16 * 60_000);
-    await t.tick();
-    await t.tick();
-    expect(slow()).toHaveLength(1);
-    expect(slow()[0]!.body).toContain("#2, ETA ~5 min");
-    expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
+describe.each(PATHS)("merge queue behaviours, facts read through the %s path", (path) => {
+  afterEach(() => {
+    if (path === "port") return;
+    // Each test read its facts through the path under test only.
+    expect(last!.reads[path === "provider" ? "fallback" : "provider"]).toBe(0);
+    expect(last!.reads[path]).toBeGreaterThan(0);
   });
-});
+  let last: ReturnType<typeof setup> | null = null;
+  const setupPath = (o: Parameters<typeof setup>[0]) => (last = setup(o));
 
-describe("decision 9b98fade: a merge wait still in the merge queue at expiry is re-armed", () => {
-  it("re-arms while every PR is queued, and expires once a PR leaves the queue", async () => {
-    const t = setup();
-    const run = await t.startAt("qa");
-    await t.verdict("agent-1", "pending_merge", "needs the merged code");
-    t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2 };
-    t.advance(481 * 60_000);
-    await t.tick();
-    const live = t.engine.require(run.id);
-    expect(live).toMatchObject({ stage: "wait-merge", status: "waiting" });
-    expect(live.stages["wait-merge"].gate?.rearms).toBe(1);
-    expect(live.history.map((h) => h.event)).toContain("merge_wait_rearmed");
-    // still queued but not yet a full timeout since the re-arm: nothing happens
-    t.advance(100 * 60_000);
-    await t.tick();
-    expect(t.engine.require(run.id).stages["wait-merge"].gate?.rearms).toBe(1);
-    // dequeued (auto-merge off, out of the queue): the next expiry follows the expired edge
-    t.facts.pr = { ...pr("open"), queued: false };
-    t.advance(381 * 60_000);
-    await t.tick();
-    await t.tick();
-    expect(t.engine.require(run.id).stage).toBe("ask-blocked");
+  describe("merge wait and the merge queue", () => {
+    it("shows the PR's queue position and ETA, and says once when it is still queued after 15 min", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      await t.verdict("agent-1", "pending_merge", "needs the merged code");
+      t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2, queueEtaSeconds: 300 };
+      await t.tick();
+      expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR} #2, ETA ~5 min`);
+      const slow = () => t.mails.filter((m) => m.body.includes("still in the merge queue"));
+      expect(slow()).toHaveLength(0);
+      t.advance(16 * 60_000);
+      await t.tick();
+      await t.tick();
+      expect(slow()).toHaveLength(1);
+      expect(slow()[0]!.body).toContain("#2, ETA ~5 min");
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
+    });
   });
 
-  it("auto-merge on a red head is not a queue: the wait expires", async () => {
-    const t = setup();
-    const run = await t.startAt("qa");
-    await t.verdict("agent-1", "pending_merge", "x");
-    t.facts.pr = { ...pr("open"), queued: true, ci: "red" };
-    t.advance(481 * 60_000);
-    await t.tick();
-    expect(t.engine.require(run.id).stage).toBe("ask-blocked");
-  });
-});
+  describe("decision 9b98fade: a merge wait still in the merge queue at expiry is re-armed", () => {
+    it("re-arms while every PR is queued, and expires once a PR leaves the queue", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      await t.verdict("agent-1", "pending_merge", "needs the merged code");
+      t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2 };
+      t.advance(481 * 60_000);
+      await t.tick();
+      const live = t.engine.require(run.id);
+      expect(live).toMatchObject({ stage: "wait-merge", status: "waiting" });
+      expect(live.stages["wait-merge"].gate?.rearms).toBe(1);
+      expect(live.history.map((h) => h.event)).toContain("merge_wait_rearmed");
+      // still queued but not yet a full timeout since the re-arm: nothing happens
+      t.advance(100 * 60_000);
+      await t.tick();
+      expect(t.engine.require(run.id).stages["wait-merge"].gate?.rearms).toBe(1);
+      // dequeued (auto-merge off, out of the queue): the next expiry follows the expired edge
+      t.facts.pr = { ...pr("open"), queued: false };
+      t.advance(381 * 60_000);
+      await t.tick();
+      await t.tick();
+      expect(t.engine.require(run.id).stage).toBe("ask-blocked");
+    });
 
-describe("OPS-378: a merge wait whose PR leaves the merge queue", () => {
-  const PR2 = "https://github.com/acme/web/pull/9";
-  const at = (url: string, state: PrFacts["state"], extra: Partial<PrFacts> = {}): PrFacts => ({ ...pr(state), url, ...extra });
-
-  it("one PR merges, the other is dequeued: one left-queue notice, and waiting_for names only the unmerged PR", async () => {
-    const t = setup();
-    const run = await t.startAt("qa", [PR, PR2]);
-    await t.verdict("agent-1", "pending_merge", "needs the merged code");
-    t.facts.byUrl = { [PR]: at(PR, "open", { queued: true, queuePosition: 1 }), [PR2]: at(PR2, "open", { queued: true, queuePosition: 2 }) };
-    await t.tick();
-    expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR} #1; ${PR2} #2`);
-    // PR merges; PR2 leaves the queue (auto-merge off) without merging
-    t.facts.byUrl = { [PR]: at(PR, "merged"), [PR2]: at(PR2, "open", { queued: false }) };
-    await t.tick();
-    const left = () => t.mails.filter((m) => m.body.includes("left the merge queue"));
-    expect(left()).toHaveLength(0); // one read out of the queue is not "left": GitHub flips while it moves the PR
-    await t.tick();
-    await t.tick();
-    await t.tick();
-    expect(left()).toHaveLength(1);
-    expect(left()[0]!.body).toContain(PR2);
-    const live = t.engine.require(run.id);
-    expect(live.history.filter((h) => h.event === "merge_left_queue")).toHaveLength(1);
-    expect(live.waitingFor).toBe(`merge of ${PR2} (out of the merge queue)`);
-    expect(live.waitingFor).not.toContain(PR + " ");
-    expect(live).toMatchObject({ stage: "wait-merge", status: "waiting" });
-    // re-queued: the wait shows its place again, and it merges
-    t.facts.byUrl[PR2] = at(PR2, "open", { queued: true, queuePosition: 1 });
-    await t.tick();
-    expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR2} #1`);
-    t.facts.byUrl[PR2] = at(PR2, "merged");
-    await t.tick();
-    expect(t.engine.require(run.id).stage).toBe("qa");
-    expect(left()).toHaveLength(1);
+    it("auto-merge on a red head is not a queue: the wait expires", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      await t.verdict("agent-1", "pending_merge", "x");
+      t.facts.pr = { ...pr("open"), queued: true, ci: "red" };
+      t.advance(481 * 60_000);
+      await t.tick();
+      expect(t.engine.require(run.id).stage).toBe("ask-blocked");
+    });
   });
 
-  it("no notice for a PR still queued, nor one never queued; a queued set re-arms as before", async () => {
-    const t = setup();
-    const run = await t.startAt("qa", [PR, PR2]);
-    await t.verdict("agent-1", "pending_merge", "x");
-    t.facts.byUrl = { [PR]: at(PR, "merged"), [PR2]: at(PR2, "open", { queued: true, queuePosition: 1 }) };
-    await t.tick();
-    await t.tick();
-    t.advance(481 * 60_000);
-    await t.tick();
-    const live = t.engine.require(run.id);
-    expect(live.stages["wait-merge"].gate?.rearms).toBe(1);
-    expect(live.waitingFor).toBe(`merge queue: ${PR2} #1`);
-    expect(live.history.map((h) => h.event)).not.toContain("merge_left_queue");
-    // a PR the wait never saw queued is not "out of the queue"
-    const u = setup();
-    const r2 = await u.startAt("qa", [PR, PR2]);
-    await u.verdict("agent-1", "pending_merge", "x");
-    u.facts.byUrl = { [PR]: at(PR, "open", { queued: false }), [PR2]: at(PR2, "open", { queued: false }) };
-    for (let i = 0; i < 4; i++) await u.tick();
-    expect(u.engine.require(r2.id).history.map((h) => h.event)).not.toContain("merge_left_queue");
-    expect(u.engine.require(r2.id).waitingFor).toBe(`merge of ${PR}, ${PR2}`);
+  describe("OPS-378: a merge wait whose PR leaves the merge queue", () => {
+    const PR2 = "https://github.com/acme/web/pull/9";
+    const at = (url: string, state: PrFacts["state"], extra: Partial<PrFacts> = {}): PrFacts => ({ ...pr(state), url, ...extra });
+
+    it("one PR merges, the other is dequeued: one left-queue notice, and waiting_for names only the unmerged PR", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa", [PR, PR2]);
+      await t.verdict("agent-1", "pending_merge", "needs the merged code");
+      t.facts.byUrl = { [PR]: at(PR, "open", { queued: true, queuePosition: 1 }), [PR2]: at(PR2, "open", { queued: true, queuePosition: 2 }) };
+      await t.tick();
+      expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR} #1; ${PR2} #2`);
+      // PR merges; PR2 leaves the queue (auto-merge off) without merging
+      t.facts.byUrl = { [PR]: at(PR, "merged"), [PR2]: at(PR2, "open", { queued: false }) };
+      await t.tick();
+      const left = () => t.mails.filter((m) => m.body.includes("left the merge queue"));
+      expect(left()).toHaveLength(0); // one read out of the queue is not "left": GitHub flips while it moves the PR
+      await t.tick();
+      await t.tick();
+      await t.tick();
+      expect(left()).toHaveLength(1);
+      expect(left()[0]!.body).toContain(PR2);
+      const live = t.engine.require(run.id);
+      expect(live.history.filter((h) => h.event === "merge_left_queue")).toHaveLength(1);
+      expect(live.waitingFor).toBe(`merge of ${PR2} (out of the merge queue)`);
+      expect(live.waitingFor).not.toContain(PR + " ");
+      expect(live).toMatchObject({ stage: "wait-merge", status: "waiting" });
+      // re-queued: the wait shows its place again, and it merges
+      t.facts.byUrl[PR2] = at(PR2, "open", { queued: true, queuePosition: 1 });
+      await t.tick();
+      expect(t.engine.require(run.id).waitingFor).toBe(`merge queue: ${PR2} #1`);
+      t.facts.byUrl[PR2] = at(PR2, "merged");
+      await t.tick();
+      expect(t.engine.require(run.id).stage).toBe("qa");
+      expect(left()).toHaveLength(1);
+    });
+
+    it("no notice for a PR still queued, nor one never queued; a queued set re-arms as before", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa", [PR, PR2]);
+      await t.verdict("agent-1", "pending_merge", "x");
+      t.facts.byUrl = { [PR]: at(PR, "merged"), [PR2]: at(PR2, "open", { queued: true, queuePosition: 1 }) };
+      await t.tick();
+      await t.tick();
+      t.advance(481 * 60_000);
+      await t.tick();
+      const live = t.engine.require(run.id);
+      expect(live.stages["wait-merge"].gate?.rearms).toBe(1);
+      expect(live.waitingFor).toBe(`merge queue: ${PR2} #1`);
+      expect(live.history.map((h) => h.event)).not.toContain("merge_left_queue");
+      // a PR the wait never saw queued is not "out of the queue"
+      const u = setupPath({ path });
+      const r2 = await u.startAt("qa", [PR, PR2]);
+      await u.verdict("agent-1", "pending_merge", "x");
+      u.facts.byUrl = { [PR]: at(PR, "open", { queued: false }), [PR2]: at(PR2, "open", { queued: false }) };
+      for (let i = 0; i < 4; i++) await u.tick();
+      expect(u.engine.require(r2.id).history.map((h) => h.event)).not.toContain("merge_left_queue");
+      expect(u.engine.require(r2.id).waitingFor).toBe(`merge of ${PR}, ${PR2}`);
+    });
   });
 });

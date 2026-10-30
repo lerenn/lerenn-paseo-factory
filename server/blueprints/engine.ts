@@ -97,9 +97,12 @@ export interface Ports {
   wardenDone(taskId: string, result: string): void;
   /**
    * Facts of a PR, through the Factory's per-URL cache: served from memory when younger than `maxAgeMs` (default 2 min, merged
-   * and closed PRs for the life of the run); `maxAgeMs: 0` reads GitHub now (a gate that needs the current head).
+   * and closed PRs for the life of the run); `maxAgeMs: 0` reads the PR now (a gate that needs the current head). The read goes to
+   * the registered facts provider, else the Factory's own `gh` reads (`facts-provider.ts`).
    */
   prFacts(url: string, opts?: { maxAgeMs?: number }): Promise<PrFacts>;
+  /** A pull request URL the Factory can read facts of (default: a GitHub PR URL, the fallback's). */
+  isPrUrl?(url: string): boolean;
   /** A Factory or extension tool by name, else null. */
   tool(name: string): ((args: Record<string, unknown>) => Promise<unknown> | unknown) | null;
   stageKind(kind: string): ((ctx: Omit<StageKindContext, "paseo" | "services" | "signal">) => Promise<StageOutcome>) | null;
@@ -1688,7 +1691,8 @@ export class Engine {
   private async verifyFacts(run: Run, def: AgentStage, verdict: string, data: Record<string, unknown>): Promise<void> {
     const urls = Array.isArray(data.pr_urls) ? (data.pr_urls as unknown[]).filter((u): u is string => typeof u === "string") : [];
     for (const url of urls) {
-      if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(url)) throw new UsageError(`data.pr_urls: "${url}" is not a GitHub pull request URL.`);
+      const known = this.ports.isPrUrl ? this.ports.isPrUrl(url) : /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(url);
+      if (!known) throw new UsageError(`data.pr_urls: "${url}" is not a GitHub pull request URL.`);
     }
     const checks = def.verify?.[verdict] ?? [];
     const toCheck = checks.length || urls.length ? (urls.length ? urls : this.prUrls(run, def.pr_urls_from)) : [];

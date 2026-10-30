@@ -1,10 +1,10 @@
 import type { PrFacts } from "./engine";
 
-/** PR facts as last read from GitHub, with when. */
+/** PR facts as last read (from the facts provider, else GitHub through `gh`), with when. */
 export type CachedPrFacts = PrFacts & { checkedAt: number };
 
 export interface PrFactsCacheOptions {
-  /** The uncached lookup (`ghFacts`). */
+  /** The uncached lookup (the facts provider's, else `ghFacts`). */
   fetch(url: string): Promise<PrFacts>;
   now?: () => number;
   /** A fact younger than this is served from memory (default 2 min). */
@@ -17,7 +17,7 @@ export const PR_FACTS_TTL_MS = 2 * 60_000;
 export const PR_FACTS_CONCURRENCY = 4;
 
 /**
- * A per-URL cache in front of `ghFacts` (ADR "factory tickets view", decision 1aa2f981): a fact younger than `ttlMs` is
+ * A per-URL cache in front of the PR facts reads (a provider's or `ghFacts`) (ADR "factory tickets view", decision 1aa2f981): a fact younger than `ttlMs` is
  * served from memory, a merged or closed PR is kept until no run refers to it any more (`prune`), concurrent lookups of one
  * URL share one call, and at most `concurrency` calls run at once. `maxAgeMs: 0` forces a fresh read (a gate that needs the
  * current head); a merged PR is final and never read again. Failures are not cached.
@@ -37,7 +37,7 @@ export class PrFactsCache {
     this.concurrency = Math.max(1, options.concurrency ?? PR_FACTS_CONCURRENCY);
   }
 
-  /** Facts of `url`, from memory when fresh enough (`maxAgeMs`, default the TTL), else from GitHub. */
+  /** Facts of `url`, from memory when fresh enough (`maxAgeMs`, default the TTL), else read now. */
   async get(url: string, opts: { maxAgeMs?: number } = {}): Promise<CachedPrFacts> {
     const known = this.facts.get(url);
     if (known && this.fresh(known, opts.maxAgeMs ?? this.ttlMs)) return known;
