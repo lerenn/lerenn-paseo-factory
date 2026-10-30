@@ -1,5 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { normalizeSpend, sampleOf, stepSpend, type LastSample } from "./spend-recompute";
 
 export interface SpendRecord {
   agentId: string;
@@ -12,8 +13,14 @@ export interface SpendRecord {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** This turn's cost: the rise of the session's running total since the agent's previous record (spend-recompute.ts). */
   costUsd: number;
+  /** The session's running total Paseo reported after the turn. Absent on records written before: costUsd was that total. */
+  costTotalUsd?: number;
 }
+
+/** A turn as Paseo reports it: the session's running total, not yet this turn's share. */
+export type SpendSample = Omit<SpendRecord, "costUsd" | "costTotalUsd"> & { costTotalUsd: number };
 
 export interface SpendTotals {
   turns: number;
@@ -32,27 +39,40 @@ export interface SpendReport {
 
 const MAX_RECORDS = 50_000;
 
-/** Usage of the agents the Factory spawned, one record per turn (Paseo reports `lastUsage` per turn). */
+/**
+ * Usage of the agents the Factory spawned, one record per turn. Paseo's `lastUsage` carries the session's running cost
+ * (and per-turn tokens): each record keeps that total and the turn's share of it. Records written before are read
+ * with the same rule in memory; spend-recompute.ts rewrites the file once.
+ */
 export class SpendStore {
   private records: SpendRecord[] = [];
   private readonly seen = new Set<string>();
+  /** Each agent's last recorded turn, to compute the next one's share. */
+  private last = new Map<string, LastSample>();
 
   constructor(private readonly file: string | null) {
+    let stored: SpendRecord[] = [];
     if (file) {
       try {
-        this.records = JSON.parse(readFileSync(file, "utf8")).records ?? [];
+        stored = JSON.parse(readFileSync(file, "utf8")).records ?? [];
       } catch {
-        this.records = [];
+        stored = [];
       }
     }
+    ({ records: this.records, last: this.last } = normalizeSpend(stored));
     for (const r of this.records) this.seen.add(`${r.agentId}:${r.turnId}`);
   }
 
-  add(record: SpendRecord): boolean {
-    const key = `${record.agentId}:${record.turnId}`;
+  /** False for a turn already recorded, or the same usage read again under another turn id. */
+  add(sample: SpendSample): boolean {
+    const key = `${sample.agentId}:${sample.turnId}`;
     if (this.seen.has(key)) return false;
+    const s = sampleOf({ ...sample, costUsd: sample.costTotalUsd });
+    const step = stepSpend(this.last.get(sample.agentId), s);
+    if (step.duplicate) return false;
     this.seen.add(key);
-    this.records.push(record);
+    this.last.set(sample.agentId, s);
+    this.records.push({ ...sample, costUsd: step.costUsd });
     if (this.records.length > MAX_RECORDS) this.records.splice(0, this.records.length - MAX_RECORDS);
     this.save();
     return true;

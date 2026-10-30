@@ -12,6 +12,7 @@ import { PrFactsCache } from "./pr-facts-cache";
 import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
+import { releaseRole } from "./spend-recompute";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
 import { roleRuntimeOptions } from "../../shared/roles/role";
@@ -355,7 +356,7 @@ export function startBlueprints(host: FactoryHost) {
     },
   };
 
-  /** Usage of a turn of an agent the Factory spawned (Paseo reports lastUsage per turn). */
+  /** Usage of a turn of an agent the Factory spawned (lastUsage: the session's running cost, the turn's tokens). */
   async function recordSpend(agentId: string, turnId: string | null): Promise<void> {
     try {
       const labels = await host.labelsOf(agentId);
@@ -367,14 +368,15 @@ export function startBlueprints(host: FactoryHost) {
         agentId,
         turnId: turnId ?? `t${Date.now()}`,
         at: Date.now(),
-        role: labels["paseo.factory.role"] ?? null,
+        // anyshift-releaser agents carry releaser.job / releaser.qa instead of a Factory role.
+        role: labels["paseo.factory.role"] ?? releaseRole(labels, (found.agent as { title?: string | null }).title),
         run: labels["paseo.factory.run"] ?? null,
         blueprint: labels["paseo.factory.blueprint"] ?? null,
         stage: labels["paseo.factory.stage"] ?? null,
         inputTokens: usage.inputTokens ?? 0,
         cachedInputTokens: usage.cachedInputTokens ?? 0,
         outputTokens: usage.outputTokens ?? 0,
-        costUsd: usage.totalCostUsd ?? 0,
+        costTotalUsd: usage.totalCostUsd ?? 0,
       });
     } catch (error) {
       console.error("blueprints: spend record failed", error);
