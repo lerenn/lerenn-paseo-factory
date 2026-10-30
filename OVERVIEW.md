@@ -25,7 +25,7 @@ A sixth tab (between Overview and Activity) for the **Supervisor**: ONE on-deman
 
 ## Warden is for Factory agents only
 
-`warden_register`, `warden_register_subagent` and `/warden` refuse any agent without the label `paseo.factory=1` (the label the Factory puts on its workers and PM; extensions that spawn agents should add it, and set `PASEO_WARDEN=on` in their env so Warden is injected). The `warden_*` tools are hidden from other agents (`inbox_answer` likewise from agents without a trusted label, setting `trustedLabels`). Warden's setting `scope` defaults to `factory`; every minute it also drops watches of archived or vanished agents and of non-Factory agents.
+`warden_register`, `warden_register_subagent` and `/warden` refuse any agent without the label `paseo.factory=1` (the label the Factory puts on its workers, PM, retro, Supervisor and usage-limit probe, and on agents an extension spawns through `services.spawn`, whose own labels cannot set `paseo.factory` or any `paseo.factory.*` key; extensions that create agents themselves should add it, and set `PASEO_WARDEN=on` in their env so Warden is injected). The `warden_*` tools are hidden from other agents (`inbox_answer` likewise from agents without a trusted label, setting `trustedLabels`). Warden's setting `scope` defaults to `factory`; every minute it also drops watches of archived or vanished agents and of non-Factory agents.
 
 ## Layout
 

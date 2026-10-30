@@ -11,15 +11,30 @@ import type { RunStore } from "../store";
 import type { BlueprintsSettings } from "../../../shared/blueprints/settings";
 import { usageLimitAuditRpc, usageLimitLiftRpc, usageLimitStatusRpc } from "../../../shared/blueprints/usage-limit";
 import { UsageLimitFile, UsageLimits } from "./controller";
+import { USAGE_PROBE_LABEL } from "../spend-recompute";
 
 /** Read-only, for every agent (an outside sweep, a heartbeat). */
 export const USAGE_LIMIT_OPEN_TOOLS = ["usage_limit_status", "usage_limit_classify"];
 export const USAGE_LIMIT_TOOLS = [...USAGE_LIMIT_OPEN_TOOLS, "usage_limit_lift"];
-const PROBE_LABEL = "paseo.factory.usage-probe";
+const PROBE_LABEL = USAGE_PROBE_LABEL;
 const PROBE_TIMEOUT_MS = 180_000;
 
 export const USAGE_LIMIT_NOTE =
   "Factory usage limits: usage_limit_status says whether the Factory is paused for a provider usage limit (paused, resume_at, held runs and agents); usage_limit_classify(message, code?) says whether an error is one.";
+
+/** The probe agent: a Factory agent (paseo.factory=1, so Spend records its cost as "Usage probe") with every module off. */
+export function probeAgent(model: string, cwd: string, now = Date.now()) {
+  return {
+    idempotencyKey: `usage-probe:${now}`,
+    config: { provider: model },
+    cwd,
+    title: "Factory usage-limit probe",
+    workspaceTitle: "Usage-limit probe",
+    prompt: "Reply with the single word OK and nothing else.",
+    labels: { "paseo.factory": "1", [PROBE_LABEL]: "1" },
+    env: { PASEO_WARDEN: "off", PASEO_INBOX: "off", PASEO_LEASES: "off", PASEO_SUPERVISOR: "off", PASEO_USAGE_LIMIT: "off" },
+  };
+}
 
 interface Deps {
   host: FactoryHost;
@@ -52,16 +67,7 @@ export function startUsageLimits({ host, engine, store, cfg, stateFile }: Deps) 
     async probe(provider) {
       const fallback = cfg().defaultProvider;
       const model = settings().probeModel?.trim() || (provider && provider !== fallback.split("/")[0] ? provider : fallback);
-      const { agentId } = await spawnAgent(host.paseo, "local", {
-        idempotencyKey: `usage-probe:${Date.now()}`,
-        config: { provider: model },
-        cwd: cfg().defaultCwd ?? tmpdir(),
-        title: "Factory usage-limit probe",
-        workspaceTitle: "Usage-limit probe",
-        prompt: "Reply with the single word OK and nothing else.",
-        labels: { [PROBE_LABEL]: "1" },
-        env: { PASEO_WARDEN: "off", PASEO_INBOX: "off", PASEO_LEASES: "off", PASEO_SUPERVISOR: "off", PASEO_USAGE_LIMIT: "off" },
-      });
+      const { agentId } = await spawnAgent(host.paseo, "local", probeAgent(model, cfg().defaultCwd ?? tmpdir()));
       try {
         return await new Promise((resolve) => {
           const timer = setTimeout(() => {

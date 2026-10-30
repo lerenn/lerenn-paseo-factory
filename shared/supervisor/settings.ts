@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { roleSetting } from "../settings";
 
 export const settingsSchema = z.object({
   /** Off: the Supervisor is never started or woken (no agent, no digests, no restarts by it); supervisor_ask answers that it is disabled, and expired leases and dropped extensions are mailed to the blueprints events.mailTo (else reportTo) instead. An agent that is already running is archived at the next digest tick. */
@@ -11,7 +12,7 @@ export const settingsSchema = z.object({
   /** "provider/model" used when the role names none. */
   defaultProvider: z.string().default("claude/claude-sonnet-5-5"),
   /** Role file of the Supervisor in the git source. */
-  role: z.string().default("supervisor"),
+  role: roleSetting("supervisor"),
   /** How often the Factory looks for problems to tell the Supervisor about. */
   digestSeconds: z.number().int().min(15).default(60),
   /** An open issue is told again after this long. */

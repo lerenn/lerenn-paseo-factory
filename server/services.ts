@@ -2,6 +2,15 @@ import type { FactoryServices, SpawnOptions } from "./extensions";
 import type { FactoryHost } from "./host";
 import { resolveAgentConfig } from "./spawn-config";
 
+/**
+ * Labels of an agent an extension spawns: its own, except the Factory's namespace (`paseo.factory`, `paseo.factory.*`),
+ * which only the Factory sets. An extension cannot drop the Factory label or pose as a run, a stage or the Supervisor.
+ */
+export function extensionLabels(role: string | undefined, labels: Record<string, string> = {}): Record<string, string> {
+  const own = Object.fromEntries(Object.entries(labels).filter(([k]) => k !== "paseo.factory" && !k.startsWith("paseo.factory.")));
+  return { ...own, "paseo.factory": "1", ...(role ? { "paseo.factory.role": role } : {}) };
+}
+
 /** The services extensions get as `ctx.spawn`, `ctx.leases`, `ctx.warden` and `ctx.inbox`. */
 export function buildServices(host: FactoryHost): FactoryServices {
   const need = (name: "leases" | "warden" | "inbox") => {
@@ -19,7 +28,7 @@ export function buildServices(host: FactoryHost): FactoryServices {
         title: o.title,
         prompt: o.prompt,
         parent: o.parent,
-        labels: { "paseo.factory": "1", ...(o.role ? { "paseo.factory.role": o.role } : {}), ...o.labels },
+        labels: extensionLabels(o.role, o.labels),
         env: { ...(o.role ? { PASEO_AGENT_ROLE: o.role } : {}), ...o.env },
       });
       return { agentId: handle.id };

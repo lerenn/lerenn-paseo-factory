@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { roleSetting } from "../settings";
 
 /**
  * Prompt of the retro agent. Placeholders: {{run_id}} (the run id), {{mail_to}} (retro.mailTo), {{digest}} (the run
@@ -59,7 +60,7 @@ export const settingsSchema = z.object({
   /** "provider/model" of workers; a role's own provider and model replace it. */
   defaultProvider: z.string().default("claude/claude-sonnet-5-5"),
   /** Role of the PM agent the Factory spawns when a run has none to ask (stalls, judgement calls). */
-  pmRole: z.string().default("pm"),
+  pmRole: roleSetting("pm"),
   /** How often PR gates are polled and idle workers checked. */
   pollSeconds: z.number().int().min(10).default(60),
   /** A worker idle this long without a verdict gets nudged. */
@@ -125,7 +126,7 @@ export const settingsSchema = z.object({
       enabled: z.boolean().default(true),
       /** Where the retro (and the janitor report) is mailed. Empty: no retro agent and no mail. */
       mailTo: z.string().default(""),
-      role: z.string().default("retro"),
+      role: roleSetting("retro"),
       /** Spend above this is flagged in the run history (a turn cannot be cut short). */
       maxUsd: z.number().min(0).default(0.3),
       /** The retro agent is given up on (and archived) after this long. */

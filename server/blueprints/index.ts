@@ -12,7 +12,7 @@ import { PrFactsCache } from "./pr-facts-cache";
 import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
-import { releaseRole } from "./spend-recompute";
+import { spendRole } from "./spend-recompute";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
 import { roleRuntimeOptions } from "../../shared/roles/role";
@@ -368,8 +368,8 @@ export function startBlueprints(host: FactoryHost) {
         agentId,
         turnId: turnId ?? `t${Date.now()}`,
         at: Date.now(),
-        // anyshift-releaser agents carry releaser.job / releaser.qa instead of a Factory role.
-        role: labels["paseo.factory.role"] ?? releaseRole(labels, (found.agent as { title?: string | null }).title),
+        // The usage probe and anyshift-releaser agents (releaser.job / releaser.qa) have no Factory role.
+        role: labels["paseo.factory.role"] ?? spendRole(labels, (found.agent as { title?: string | null }).title),
         run: labels["paseo.factory.run"] ?? null,
         blueprint: labels["paseo.factory.blueprint"] ?? null,
         stage: labels["paseo.factory.stage"] ?? null,
