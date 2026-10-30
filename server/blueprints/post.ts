@@ -1,15 +1,17 @@
 import { runLabel } from "../../shared/blueprints/label";
 import type { Observer, Ports, RunEvent } from "./engine";
-import { DEFAULT_RETRO_PROMPT } from "../../shared/blueprints/settings";
+import { DEFAULT_RETRO_PROMPT, RETRO_NO_MAIL_NOTE } from "../../shared/blueprints/settings";
 import { buildDigest, isTrivial, trivialMail } from "./digest";
 import type { JanitorPlan, JanitorTarget, PostState, Run, RunStore } from "./store";
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** The retro prompt template with its placeholders filled in one pass (a digest that contains `{{...}}` stays as it is). */
-export function retroPrompt(template: string, run: Run, to: string, digest: string): string {
+export function retroPrompt(template: string, run: Run, to: string, digest: string, opts: { mail?: boolean } = {}): string {
   const values: Record<string, string> = { run_id: run.id, mail_to: to, digest };
-  return template.replace(/\{\{(run_id|mail_to|digest)\}\}/g, (_m, key: string) => values[key]);
+  // Without Agents Mail the note goes last, so it overrides a template that asks for mail_send.
+  const full = opts.mail === false ? `${template}\n\n${RETRO_NO_MAIL_NOTE}` : template;
+  return full.replace(/\{\{(run_id|mail_to|digest)\}\}/g, (_m, key: string) => values[key]);
 }
 
 /**
@@ -70,7 +72,23 @@ export class PostRun implements Observer {
     this.noteSpend(run, agentId);
     run.post!.phase = "archive";
     this.store.save();
-    this.finished(run);
+    if (run.post!.retro?.filedBy === "factory") void this.file(run, agentId).finally(() => this.finished(run));
+    else this.finished(run);
+  }
+
+  /** No Agents Mail: the retro is the agent's final message; the Factory delivers it (the Inbox when nobody can receive it). */
+  private async file(run: Run, agentId: string): Promise<void> {
+    const to = this.settings().retro.mailTo;
+    const text = ((await this.ports.lastReply?.(agentId).catch(() => null)) ?? "").trim();
+    if (!text) {
+      this.store.log(run, "retro_empty", "retro", "the retro agent wrote nothing to file", this.ports.now());
+      return;
+    }
+    const [first, ...rest] = text.split("\n");
+    const subject = /retro/i.test(first) ? first.replace(/^[#*\s]+|[*\s]+$/g, "") : `Factory retro ${run.id}`;
+    this.mail(to, subject, (/retro/i.test(first) ? rest.join("\n") : text).trim() || text, "info");
+    this.store.log(run, "retro_filed", "retro", `filed by the Factory for ${to} (no Agents Mail)`, this.ports.now());
+    this.store.save();
   }
 
   /** Poll: restart recovery, and a retro that never ended. */
@@ -130,11 +148,13 @@ export class PostRun implements Observer {
       return;
     }
     const digest = buildDigest(run, { now, spend: this.ports.spend?.(run.id) ?? null, janitor });
+    // Without Agents Mail the retro agent cannot mail: it writes the retro as its final message and the Factory files it.
+    const mail = this.ports.mailUp?.() ?? true;
     try {
       const { agentId, workspaceId } = await this.ports.spawn({
         idempotencyKey: `${run.id}:retro`,
         role: s.retro.role,
-        prompt: retroPrompt(s.retro.prompt ?? DEFAULT_RETRO_PROMPT, run, s.retro.mailTo, digest),
+        prompt: retroPrompt(s.retro.prompt ?? DEFAULT_RETRO_PROMPT, run, s.retro.mailTo, digest, { mail }),
         title: `Retro ${run.blueprint} ${run.id}`,
         workspaceTitle: `Retro: ${run.blueprint} ${run.id}`,
         cwd: this.ports.settings().defaultCwd,
@@ -144,7 +164,7 @@ export class PostRun implements Observer {
         ...(s.retro.runtime?.trim() ? { runtime: s.retro.runtime.trim() } : {}),
       });
       (run.agents ??= {})[agentId] = { role: s.retro.role, stage: "retro", workspaceId: workspaceId ?? null };
-      post.retro = { agentId, startedAt: now };
+      post.retro = { agentId, startedAt: now, ...(mail ? {} : { filedBy: "factory" as const }) };
       post.phase = "retro";
     } catch (error) {
       // No retro agent (no role, no pod: "Daemon client closed"...): the facts still reach the human, unsummarised.

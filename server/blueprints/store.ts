@@ -192,7 +192,8 @@ export interface PostState {
   /** Dedupe keys of the event mails sent. */
   mailed: string[];
   phase: "new" | "retro" | "archive" | "done";
-  retro?: { agentId: string | null; startedAt: number } | null;
+  /** `filedBy: "factory"`: no Agents Mail when it started, so the Factory files the agent's final message. */
+  retro?: { agentId: string | null; startedAt: number; filedBy?: "factory" } | null;
   /** The janitor's plan, made before the retro so the retro can report it. */
   plan?: JanitorPlan | null;
   archived?: string[];

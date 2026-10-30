@@ -2218,3 +2218,117 @@ bad = "failed"
     expect(b.engine.require(own.id).history.some((e) => e.event === "worker_stopped")).toBe(false);
   });
 });
+
+describe("without Agents Mail", () => {
+  const exhaustThink = async (ctx: ReturnType<typeof setup>) => {
+    for (let i = 0; i < 4; i++) {
+      await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+      await ctx.settle();
+    }
+  };
+  const pms = (ctx: ReturnType<typeof setup>) => ctx.spawned.filter((s) => s.role === "pm");
+
+  it("runs.notifyMailTo is ignored: the PM is spawned and the starter is told, as when it is unset", async () => {
+    const ctx = setup(flow, { runsMailTo: "@assistant" }, true);
+    ctx.ports.mailUp = () => false;
+    const run = await ctx.start(undefined, { ownerAgentId: "pm-agent" });
+    await exhaustThink(ctx);
+    expect(ctx.engine.require(run.id).status).toBe("waiting");
+    expect(pms(ctx)).toHaveLength(1);
+    expect(ctx.reports.filter((r) => r.to === "@assistant")).toHaveLength(0);
+    await ctx.engine.abort(run.id, "stop");
+    expect(ctx.reports.map((r) => r.to)).toEqual(["pm-agent"]);
+  });
+
+  it("with Agents Mail up, runs.notifyMailTo works as before", async () => {
+    const ctx = setup(flow, { runsMailTo: "@assistant" }, true);
+    ctx.ports.mailUp = () => true;
+    const run = await ctx.start(undefined, { ownerAgentId: "pm-agent" });
+    await exhaustThink(ctx);
+    expect(pms(ctx)).toHaveLength(0);
+    expect(ctx.reports.map((r) => r.subject)).toEqual([`Run ${run.id} ABC-1 needs PM`]);
+  });
+
+  it("a PM escalation target that needs a mail is skipped: the human is asked at once, with no timeout to wait", async () => {
+    const ctx = setup(flow, { escalationTarget: "@ops" });
+    ctx.ports.mailUp = () => false;
+    const run = await ctx.start();
+    await exhaustThink(ctx);
+    const pm = pms(ctx).length ? ctx.engine.require(run.id).pm.calls![`${run.id}:exhausted:think:1`].agentId! : "";
+    const out = await ctx.engine.pmEscalate(pm, run.id, { question: "q?", bestGuess: "g", checked: "c" });
+    expect(out).toMatchObject({ target: "human", step: 2, wait_minutes: null });
+    expect(out.how).toContain("inbox_ask");
+    expect(out.how).not.toContain("mail_send");
+    expect(ctx.engine.require(run.id).history.map((h) => h.event)).toContain("pm_escalation_skipped");
+  });
+
+  it("the Supervisor is still asked first (no mail needed), and a mail target is asked by mail when Mail is up", async () => {
+    const sup = setup(flow, { escalationTarget: "supervisor" });
+    sup.ports.mailUp = () => false;
+    const r1 = await sup.start();
+    await exhaustThink(sup);
+    const pm1 = sup.engine.require(r1.id).pm.calls![`${r1.id}:exhausted:think:1`].agentId!;
+    expect(await sup.engine.pmEscalate(pm1, r1.id, { question: "q?", bestGuess: "g", checked: "c" })).toMatchObject({ target: "supervisor", step: 1 });
+
+    const mail = setup(flow, { escalationTarget: "@ops" });
+    mail.ports.mailUp = () => true;
+    const r2 = await mail.start();
+    await exhaustThink(mail);
+    const pm2 = mail.engine.require(r2.id).pm.calls![`${r2.id}:exhausted:think:1`].agentId!;
+    const out = await mail.engine.pmEscalate(pm2, r2.id, { question: "q?", bestGuess: "g", checked: "c" });
+    expect(out).toMatchObject({ target: "@ops", step: 1, wait_minutes: 30 });
+    expect(out.how).toContain("mail_send");
+  });
+});
+
+describe("a stage kind no extension provides is refused at start", () => {
+  const src = `
+version = 1
+name = "flow"
+[[stage]]
+id = "pins"
+kind = "train"
+[stage.on]
+ok = "done"
+`;
+
+  it("refuses the run with a clear error, and creates nothing", () => {
+    const ctx = setup(src);
+    ctx.ports.stageKindKnown = () => false;
+    expect(() => ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" })).toThrow(/stage "pins" has kind "train", and no installed extension provides it/);
+    expect(ctx.store.all()).toHaveLength(0);
+  });
+
+  it("starts when an extension provides it now, or did lately (it may be restarting)", async () => {
+    const now = setup(src);
+    now.ports.stageKindKnown = () => false;
+    now.ports.stageKind = () => async () => ({ verdict: "ok" });
+    const r1 = now.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await now.settle();
+    expect(now.engine.require(r1.id).status).toBe("done");
+
+    const away = setup(src);
+    away.ports.stageKindKnown = (kind) => kind === "train";
+    const r2 = away.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
+    await away.settle();
+    expect(away.engine.require(r2.id).waitingFor).toContain('extension for stage kind "train"');
+  });
+
+  it("checks the stages of a child blueprint too", () => {
+    const ctx = setup(`
+version = 1
+name = "flow"
+[[stage]]
+id = "child"
+kind = "blueprint"
+blueprint = "release"
+[stage.on]
+done = "done"
+`);
+    const child = parseBlueprint(src.replace('name = "flow"', 'name = "release"'));
+    const own = ctx.ports.blueprint;
+    ctx.ports.blueprint = (name) => (name === "release" ? child : own(name));
+    ctx.ports.stageKindKnown = () => false;
+    expect(() => ctx.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" })).toThrow(/stage "child > pins" has kind "train"/);
+  });
+});

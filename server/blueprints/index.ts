@@ -21,6 +21,7 @@ import { suspendWorkspace, wakeWorkspace } from "./workspace-control";
 import { setFlakePatterns } from "./flake";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
+import { messagesFromTimeline } from "../transcript";
 import { RunStore } from "./store";
 import { startCrons } from "./crons";
 import { startUsageLimits } from "./usage-limit";
@@ -185,6 +186,11 @@ export function startBlueprints(host: FactoryHost) {
       await agentRef(agentId).send(text, { activeTurnBehavior: "steer" });
     },
     report: (agentId, report) => host.report(agentId, report),
+    mailUp: () => host.capabilities.mail(),
+    async lastReply(agentId) {
+      const payload = await agentRef(agentId).timeline.refetch({ direction: "tail", limit: 60, projection: "projected" } as never);
+      return messagesFromTimeline(payload, 60).filter((m) => m.role === "assistant").pop()?.text ?? null;
+    },
     runStarted: () => host.engines.supervisor?.wake(),
     async agentState(agentId) {
       try {
@@ -266,6 +272,7 @@ export function startBlueprints(host: FactoryHost) {
       }
       return null;
     },
+    stageKindKnown: (kind) => host.stageKindProvider(kind) !== null,
     blueprint: (name) => catalog.blueprints.get(name),
     preflight(def, at) {
       const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);

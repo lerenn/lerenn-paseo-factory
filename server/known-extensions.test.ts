@@ -23,3 +23,19 @@ describe("known extensions", () => {
     expect(w).toMatchObject({ name: "lanes_unblock", trustedWrite: true, extension: true });
   });
 });
+
+describe("known stage kinds", () => {
+  it("remembers which extension registered a stage kind, across restarts, for the TTL", () => {
+    const file = path.join(mkdtempSync(path.join(tmpdir(), "known-")), "extensions.json");
+    let now = 1_000;
+    const a = new KnownExtensions(file, () => now);
+    a.remember("lanes", []);
+    a.rememberStageKinds("releaser", ["train"]);
+    const b = new KnownExtensions(file, () => now);
+    expect(b.stageKind("train")).toBe("releaser");
+    expect(b.stageKind("other")).toBeNull();
+    expect(b.ids()).toEqual(["lanes"]); // stage kinds offer no placeholder tools
+    now += KNOWN_TTL_MS + 1;
+    expect(new KnownExtensions(file, () => now).stageKind("train")).toBeNull();
+  });
+});

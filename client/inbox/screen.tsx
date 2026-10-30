@@ -87,7 +87,7 @@ export function InboxScreen({ theme, layout, focus }: PluginScreenProps & { focu
       <CollapsibleRow
         key={item.id}
         theme={theme}
-        pill={{ text: item.status === "pending" ? (item.kind === "approval" ? "approval" : "question") : icon.label.toLowerCase(), color: icon.color }}
+        pill={{ text: item.status === "pending" ? item.kind : icon.label.toLowerCase(), color: icon.color }}
         title={`${item.kind === "approval" && item.status !== "pending" ? "Approval: " : ""}${item.question}`}
         bold={unread}
         initiallyOpen={item.id === focus}
@@ -128,14 +128,14 @@ export function InboxScreen({ theme, layout, focus }: PluginScreenProps & { focu
                     ))}
                   </View>
                 ) : null}
-                <TextInput
+                {item.kind === "info" ? null : <TextInput
                   value={text}
                   onChangeText={(v: string) => setDraft({ ...draft, [item.id]: v })}
                   placeholder={item.options.length ? "Other… (write an answer; with a choice above it is sent as a comment)" : "Other… (write an answer)"}
                   placeholderTextColor={theme.colors.foregroundMuted}
                   multiline
                   style={s.input}
-                />
+                />}
                 {item.allowFreeText ? (
                   <View style={s.choices}>
                     <Pressable
@@ -156,7 +156,7 @@ export function InboxScreen({ theme, layout, focus }: PluginScreenProps & { focu
                 {icon.label}
                 {item.answer ? `: ${item.answer.optionId ? (item.options.find((o) => o.id === item.answer!.optionId)?.label ?? item.answer.optionId) : item.answer.text}${item.answer.by === "default" ? " (default)" : item.answer.by === "assistant" ? " (by the Assistant on behalf of the user)" : item.answer.by === "pm" ? " (by the run's PM)" : ""}` : ""}
                 {item.comment ? ` — ${item.comment}` : ""}
-                {item.answer || item.status === "expired" ? ` · agent ${item.delivery === "sent" ? "notified" : item.delivery === "undeliverable" ? "archived or gone, so it could not be told" : item.delivery === "failed" ? "could not be notified" : "not yet notified"}` : ""}
+                {item.kind !== "info" && (item.answer || item.status === "expired") ? ` · agent ${item.delivery === "sent" ? "notified" : item.delivery === "undeliverable" ? "archived or gone, so it could not be told" : item.delivery === "failed" ? "could not be notified" : "not yet notified"}` : ""}
               </Text>
             )}
           </View>

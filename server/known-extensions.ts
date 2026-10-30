@@ -28,6 +28,8 @@ interface Entry {
  */
 export class KnownExtensions {
   private entries: Record<string, Entry> = {};
+  /** Stage kinds any extension (in-process or remote) registered, with which one and when: a restart is not a missing kind. */
+  private kinds: Record<string, { id: string; at: number }> = {};
 
   constructor(
     private readonly file: string | null,
@@ -42,6 +44,27 @@ export class KnownExtensions {
     } catch {
       this.entries = {};
     }
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8")).stageKinds ?? {};
+      for (const [kind, k] of Object.entries(raw as Record<string, { id: string; at: number }>)) {
+        if (typeof k?.at === "number" && typeof k.id === "string" && this.now() - k.at < KNOWN_TTL_MS) this.kinds[kind] = k;
+      }
+    } catch {
+      this.kinds = {};
+    }
+  }
+
+  /** The extension that last registered this stage kind (within the TTL), or null when none ever did. */
+  stageKind(kind: string): string | null {
+    const k = this.kinds[kind];
+    return k && this.now() - k.at < KNOWN_TTL_MS ? k.id : null;
+  }
+
+  rememberStageKinds(id: string, kinds: string[]): void {
+    if (!kinds.length) return;
+    const at = this.now();
+    for (const kind of kinds) this.kinds[kind] = { id, at };
+    this.save();
   }
 
   ids(): string[] {
@@ -61,7 +84,7 @@ export class KnownExtensions {
     if (!this.file) return;
     mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const tmp = `${this.file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ extensions: this.entries }), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ extensions: this.entries, stageKinds: this.kinds }), { mode: 0o600 });
     chmodSync(tmp, 0o600);
     renameSync(tmp, this.file);
   }

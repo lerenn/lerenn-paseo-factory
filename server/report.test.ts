@@ -55,3 +55,36 @@ describe("Factory reports", () => {
     expect(send2).toHaveBeenCalledWith("a", report.body);
   });
 });
+
+describe("Factory reports without Agents Mail", () => {
+  it("an address only Mail resolves goes straight to the fallback; an agent id is still messaged directly", async () => {
+    const send = vi.fn(async () => undefined);
+    const fallback = vi.fn(async () => undefined);
+    const r = createReporter({ file: () => endpoint(), fetchImpl: vi.fn() as never, send, fallback });
+    await r("@user", report);
+    await r("label:role=pm", report);
+    expect(fallback.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["@user", "label:role=pm"]);
+    expect(send).not.toHaveBeenCalled();
+    await r("ag1", report);
+    expect(send).toHaveBeenCalledWith("ag1", report.body);
+    expect(fallback).toHaveBeenCalledTimes(2);
+  });
+
+  it("a direct message to an agent that fails still fails for the caller (it may retry), nothing is filed", async () => {
+    const send = vi.fn(async () => {
+      throw new Error("no such agent");
+    });
+    const fallback = vi.fn(async () => undefined);
+    await expect(createReporter({ file: () => endpoint(), fetchImpl: vi.fn() as never, send, fallback })("ag1", report)).rejects.toThrow(/no such agent/);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("with Agents Mail up, an alias is mailed and the fallback is never used", async () => {
+    const file = endpoint({ url: "http://127.0.0.1:1/", token: "t" });
+    const fetchImpl = vi.fn(async () => ({ ok: true }) as Response);
+    const fallback = vi.fn(async () => undefined);
+    await createReporter({ file: () => file, fetchImpl: fetchImpl as never, send: vi.fn(), fallback })("@user", report);
+    expect(fallback).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});

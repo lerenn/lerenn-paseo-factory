@@ -495,3 +495,59 @@ describe("settings", () => {
     expect(settingsSchema.parse({ janitor: { enabled: true } }).janitor.dryRun).toBe(true);
   });
 });
+
+describe("the retro without Agents Mail", () => {
+  async function failed(t: ReturnType<typeof setup>) {
+    const run = await t.start();
+    await t.engine.turnEnded("agent-1", { kind: "failed", message: "pod start timeout after 300s" });
+    await t.settle();
+    await t.engine.turnEnded("agent-1", { kind: "completed" });
+    await t.settle();
+    await t.engine.abort(run.id, "giving up").catch(() => undefined);
+    await t.settle();
+    return t.engine.require(run.id);
+  }
+
+  it("the agent is told not to mail; its final message is filed by the Factory for retro.mailTo", async () => {
+    const t = setup();
+    t.ports.mailUp = () => false;
+    t.ports.lastReply = async () => "**Factory retro bp-x · ABC-1: failed, 12 min**\nTimeline: think failed twice.\nImprove: retry pod starts.";
+    const run = await failed(t);
+    const retro = t.spawned.find((s) => s.role === "retro")!;
+    expect(retro.prompt).toContain("Agents Mail is NOT available here");
+    expect(retro.prompt).toContain("the Factory files it for @user");
+    expect(run.post!.retro).toMatchObject({ filedBy: "factory" });
+    t.engine.observer.retroEnded!(run.post!.retro!.agentId!);
+    await t.settle();
+    const filed = t.mails.filter((m) => m.to === "@user");
+    expect(filed).toHaveLength(1);
+    expect(filed[0].subject).toBe("Factory retro bp-x · ABC-1: failed, 12 min");
+    expect(filed[0].body).toBe("Timeline: think failed twice.\nImprove: retry pod starts.");
+    expect(run.history.some((h) => h.event === "retro_filed")).toBe(true);
+    expect(run.post?.phase).toBe("done");
+  });
+
+  it("an empty final message is logged, nothing is filed", async () => {
+    const t = setup();
+    t.ports.mailUp = () => false;
+    t.ports.lastReply = async () => null;
+    const run = await failed(t);
+    t.engine.observer.retroEnded!(run.post!.retro!.agentId!);
+    await t.settle();
+    expect(t.mails.filter((m) => m.to === "@user")).toHaveLength(0);
+    expect(run.history.some((h) => h.event === "retro_empty")).toBe(true);
+  });
+
+  it("with Agents Mail up, the prompt and the delivery are as before", async () => {
+    const t = setup();
+    t.ports.mailUp = () => true;
+    t.ports.lastReply = async () => "should not be filed";
+    const run = await failed(t);
+    const retro = t.spawned.find((s) => s.role === "retro")!;
+    expect(retro.prompt).toContain('mail_send(to="@user"');
+    expect(retro.prompt).not.toContain("NOT available");
+    t.engine.observer.retroEnded!(run.post!.retro!.agentId!);
+    await t.settle();
+    expect(t.mails.filter((m) => m.to === "@user")).toHaveLength(0);
+  });
+});

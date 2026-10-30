@@ -8,7 +8,7 @@ export const defaultStatePath = null as string | null;
 export interface Item {
   id: string;
   agentId: string;
-  kind: "question" | "approval";
+  kind: "question" | "approval" | "info";
   question: string;
   context: string | null;
   options: InboxOption[];
