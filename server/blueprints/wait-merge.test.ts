@@ -26,7 +26,8 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string; 
   let agents = 0;
   const mails: { to: string; subject: string; body: string }[] = [];
   const items = new Map<string, GateState>();
-  const facts: { pr: PrFacts; byUrl: Record<string, PrFacts> } = { pr: pr("open"), byUrl: {} };
+  // `fail`: every read throws it (a GitHub outage, a missing PR) until it is cleared.
+  const facts: { pr: PrFacts; byUrl: Record<string, PrFacts>; fail: unknown } = { pr: pr("open"), byUrl: {}, fail: null };
   const store = new RunStore(null);
   const ports: Ports = {
     now: () => time,
@@ -51,8 +52,10 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string; 
     wardenRegister: () => null,
     wardenDone() {},
     async prFacts(url) {
+      if (facts.fail) throw facts.fail;
       return facts.byUrl[url] ?? facts.pr;
     },
+    sleep: async () => {},
     tool: () => null,
     stageKind: () => null,
     blueprint: () => parseBlueprint(ticket),
@@ -61,7 +64,10 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string; 
   };
   const reads = { provider: 0, fallback: 0 };
   if (opts.path && opts.path !== "port") {
-    const scripted = async (url: string) => ({ ...(facts.byUrl[url] ?? facts.pr) });
+    const scripted = async (url: string) => {
+      if (facts.fail) throw facts.fail;
+      return { ...(facts.byUrl[url] ?? facts.pr) };
+    };
     const registry: Record<symbol, unknown> = {};
     if (opts.path === "provider") registry[PR_FACTS_PROVIDER_KEY] = { github: { matches: isGitHubPrUrl, prFacts: (url: string) => (reads.provider++, scripted(url)) } };
     const source = factsSource(
@@ -353,6 +359,132 @@ describe.each(PATHS)("merge queue behaviours, facts read through the %s path", (
       for (let i = 0; i < 4; i++) await u.tick();
       expect(u.engine.require(r2.id).history.map((h) => h.event)).not.toContain("merge_left_queue");
       expect(u.engine.require(r2.id).waitingFor).toBe(`merge of ${PR}, ${PR2}`);
+    });
+  });
+
+  describe("bp-98295f48: a transient GitHub error never fails a run", () => {
+    // Through a provider, an Octokit-like error that says only its status; through gh, the CLI's message.
+    const outage = () => (path === "provider" ? Object.assign(new Error("request failed"), { status: 503 }) : new Error("gh: HTTP 500"));
+    const events = (t: ReturnType<typeof setup>, id: string) => t.engine.require(id).history.map((h) => h.event);
+
+    it("a 500 as the merge wait opens keeps it waiting, retries with back-off, and goes on once GitHub answers merged", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      t.facts.fail = outage();
+      await t.verdict("agent-1", "pending_merge", "needs the merged code");
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting", error: null });
+      expect(t.engine.require(run.id).waitingFor).toContain("GitHub unavailable");
+      const retry = t.engine.require(run.id).stages["wait-merge"].factsRetry!;
+      expect(retry.at - retry.since).toBe(30_000);
+      // still down: the back-off doubles, facts_transient is said once per streak
+      t.advance(31_000);
+      await t.tick();
+      t.advance(61_000);
+      await t.tick();
+      expect(t.engine.require(run.id).stages["wait-merge"].factsRetry!.n).toBe(3);
+      expect(events(t, run.id).filter((e) => e === "facts_transient")).toHaveLength(1);
+      expect(t.engine.require(run.id).status).toBe("waiting");
+      // GitHub answers: the PRs merged meanwhile, QA runs again
+      t.facts.fail = null;
+      t.facts.pr = pr("merged");
+      t.advance(121_000);
+      await t.tick();
+      await t.tick();
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "qa", status: "running" });
+      expect(t.engine.require(run.id).stages["wait-merge"]).toMatchObject({ verdict: "merged", factsRetry: null });
+      expect(events(t, run.id)).toContain("facts_recovered");
+      expect(events(t, run.id)).not.toContain("failed");
+    });
+
+    it("a 500 while polling an open merge wait keeps it waiting, and no poll is made during the back-off", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      await t.verdict("agent-1", "pending_merge", "x");
+      t.facts.fail = outage();
+      await t.tick();
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
+      expect(t.engine.require(run.id).stages["wait-merge"].factsRetry?.n).toBe(1);
+      await t.tick(); // inside the 30 s back-off: no new read
+      expect(t.engine.require(run.id).stages["wait-merge"].factsRetry?.n).toBe(1);
+      t.facts.fail = null;
+      t.facts.pr = pr("merged");
+      t.advance(31_000);
+      await t.tick();
+      expect(t.engine.require(run.id).stage).toBe("qa");
+    });
+
+    it("a 30-min streak opens one notice for a person, and the wait still goes on (no expiry on unanswered reads)", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      await t.verdict("agent-1", "pending_merge", "x");
+      t.facts.fail = outage();
+      const notices = () => t.mails.filter((m) => m.body.includes("has not answered the PR reads"));
+      for (let i = 0; i < 50; i++) {
+        await t.tick();
+        t.advance(10 * 60_000);
+      }
+      expect(notices()).toHaveLength(1);
+      expect(events(t, run.id).filter((e) => e === "facts_transient")).toHaveLength(1);
+      expect(events(t, run.id).filter((e) => e === "facts_transient_long")).toHaveLength(1);
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
+      // 500 min, past the 480-min expiry: it does not fire on reads GitHub did not answer
+      expect(t.engine.require(run.id).stages["wait-merge"].verdict).toBeNull();
+    });
+
+    it("a 404 still fails the run as before; a resume on a 500 is refused and leaves the run as it was", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      t.facts.fail = path === "provider" ? Object.assign(new Error("Not Found"), { status: 404 }) : new Error("gh: HTTP 404: Not Found");
+      await t.verdict("agent-1", "pending_merge", "x");
+      expect(t.engine.require(run.id)).toMatchObject({ status: "failed" });
+      expect(t.engine.require(run.id).error).toMatch(/^engine error: .*(404|Not Found)/);
+
+      t.facts.fail = outage();
+      const before = JSON.stringify(t.engine.require(run.id));
+      await expect(t.engine.resume(run.id, { stage: "wait-merge", note: "retry" })).rejects.toThrow(/GitHub unavailable.*try again/);
+      expect(JSON.stringify(t.engine.require(run.id))).toBe(before);
+
+      t.facts.fail = null;
+      await t.engine.resume(run.id, { stage: "wait-merge" });
+      await t.settle();
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting", error: null });
+    });
+
+    it("a Resume chosen in the Inbox on a 500 is refused with a notice and never changes the run", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("qa");
+      t.facts.fail = new Error("HTTP 404: Not Found");
+      await t.verdict("agent-1", "pending_merge", "x");
+      const live = t.engine.require(run.id);
+      expect(live.status).toBe("failed");
+      // the failed run's own escalation, answered "resume" while GitHub is down
+      (live.escalations ??= {})["esc-1"] = { stage: "wait-merge" } as never;
+      t.items.set("esc-1", { status: "answered", optionId: "resume", text: null, by: "louis" });
+      t.facts.fail = outage();
+      await t.engine.gateResolved("esc-1");
+      await t.settle();
+      expect(t.engine.require(run.id)).toMatchObject({ status: "failed", stage: "wait-merge" });
+      expect(events(t, run.id)).toContain("resume_refused");
+      expect(t.mails.some((m) => m.body.includes("GitHub unavailable"))).toBe(true);
+    });
+
+    it("a gate answer GitHub cannot check is kept, not failed, and applied once GitHub answers", async () => {
+      const t = setupPath({ path });
+      const run = await t.startAt("merge");
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "merge", status: "waiting" });
+      const itemId = t.engine.require(run.id).stages.merge.gate!.itemId;
+      t.facts.fail = outage();
+      t.items.set(itemId, { status: "answered", optionId: "merged", text: null, by: "louis" });
+      await t.engine.gateResolved(itemId);
+      await t.settle();
+      expect(t.engine.require(run.id)).toMatchObject({ stage: "merge", status: "waiting", error: null });
+      expect(events(t, run.id)).toContain("facts_transient");
+      t.facts.fail = null;
+      t.facts.pr = pr("merged");
+      t.advance(31_000);
+      await t.tick();
+      expect(t.engine.require(run.id).stages.merge).toMatchObject({ status: "done", verdict: "merged", factsRetry: null });
+      expect(t.engine.require(run.id).status).not.toBe("failed");
     });
   });
 });

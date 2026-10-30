@@ -6,7 +6,9 @@ import type { PrFacts } from "./engine";
  * provider on `globalThis[Symbol.for("paseo.pr-facts")]`: a registry keyed by provider id, each entry a `PrFactsProvider`.
  * A URL goes to the first provider that `matches` it; with none, to the Factory's own `gh` reads (`github.ts`), so the Factory
  * behaves the same with or without the plugin. A provider that throws is not replaced by the fallback: its error is the
- * answer (the engine treats it like a failed `gh` read: "facts unavailable", a verdict to retry, a wait that polls again).
+ * answer (the engine treats it like a failed `gh` read: "facts unavailable", a verdict to retry, a wait that polls again). An
+ * error with `status` 429/5xx, a network `code` or `transient: true` (or a message saying so) is transient (`transient.ts`):
+ * retried with back-off, never a failed run.
  * The engine keeps the per-URL cache and the merge-wait logic (left-queue, re-arm); a provider only reads.
  */
 export const PR_FACTS_PROVIDER_KEY = Symbol.for("paseo.pr-facts");
