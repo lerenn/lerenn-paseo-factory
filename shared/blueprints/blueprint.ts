@@ -23,6 +23,11 @@ const common = {
   title: z.string().optional(),
   /** Skip the stage when this renders true (`{{x}} == y`, `{{x}} != y`, or a bare `true`); the `skipped` edge is followed. */
   skip_if: z.string().optional(),
+  /**
+   * A stage id whose `data.pr_urls` is the run's PR set: on entry, when every one of those PRs is already merged on GitHub (read
+   * fresh), the stage is not run and `on.already_merged` is followed (for example to the release). Nothing happens without PRs.
+   */
+  skip_if_merged: stageId.optional(),
   on: onSchema.default({}),
 };
 
@@ -51,6 +56,11 @@ export const agentStageSchema = z.strictObject({
   facts: z.enum(["pr"]).optional(),
   /** The stage whose `data.pr_urls` is the PR set. */
   pr_urls_from: stageId.optional(),
+  /**
+   * Seconds a freshly spawned worker's checkout has to answer git (`rev-parse` in its workspace). No answer, or not a worktree:
+   * the worker and its workspace are archived and one fresh worker is started; a second failure pauses the run with the reason.
+   */
+  worktree_check: z.number().int().min(5).max(300).optional(),
   /** Verdict -> facts that must hold on GitHub (`ci_green`, `mergeable`, `open`) for the verdict to be accepted. */
   verify: z.record(z.string(), z.array(z.enum(["ci_green", "mergeable", "open", "exists"]))).optional(),
 });
@@ -71,6 +81,11 @@ export const gateStageSchema = z.strictObject({
   /** The answer text is added to the notes of this stage's worker prompt. */
   note_to: stageId.optional(),
   expires_in_minutes: z.number().min(1).optional(),
+  /**
+   * With `expires_in_minutes`: the answer (an option id) the gate takes by itself when nobody answered in time, instead of
+   * following `on.expired`. The history says it was the default (decision c8125131: ask-blocked waited for days).
+   */
+  default_answer: z.string().min(1).optional(),
   /** An answer with the option id "hold" asks the same question again after this many minutes. */
   hold_minutes: z.number().min(1).optional(),
   /** The run's on-demand PM is spawned when the gate opens and may answer it (and only it); the human can still answer it in the Inbox. */
@@ -186,8 +201,15 @@ export const blueprintSchema = z
           if (!g.expires_in_minutes) ctx.addIssue({ code: "custom", path: ["stage", i, "expires_in_minutes"], message: "a gate that waits for a merge needs expires_in_minutes (its timeout)" });
           for (const edge of ["merged", "expired"]) if (!(edge in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: `a gate that waits for a merge needs an on.${edge} edge` });
         }
+        if (g.default_answer) {
+          if (!g.expires_in_minutes) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: "default_answer needs expires_in_minutes" });
+          if (g.wait) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: "a merge wait has no answer to default to" });
+          if (!(g.default_answer in g.on) && !("default" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: `default_answer ${g.default_answer} has no edge (on.${g.default_answer} or on.default)` });
+        }
         if (g.pr && !("head_moved" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a gate tied to PRs needs an on.head_moved edge" });
       }
+      if (s.skip_if_merged && !("already_merged" in s.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a stage with skip_if_merged needs an on.already_merged edge" });
+      if (s.skip_if_merged && !ids.has(s.skip_if_merged)) ctx.addIssue({ code: "custom", path: ["stage", i, "skip_if_merged"], message: `unknown stage ${s.skip_if_merged}` });
       if (s.skip_if && !("skipped" in s.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a stage with skip_if needs an on.skipped edge" });
       if (s.kind === "agent" || s.kind === undefined) {
         const a = s as AgentStage;
@@ -204,7 +226,7 @@ export const blueprintSchema = z
 export type Blueprint = z.output<typeof blueprintSchema>;
 
 /** `on` keys the engine fires itself, which are not verdicts a worker gives. */
-export const RESERVED_ON = ["exhausted", "failed", "head_moved", "skipped"];
+export const RESERVED_ON = ["exhausted", "failed", "head_moved", "skipped", "already_merged"];
 
 export function stageVerdicts(stage: Stage): string[] {
   if ((stage.kind ?? "agent") !== "agent") return Object.keys(stage.on);

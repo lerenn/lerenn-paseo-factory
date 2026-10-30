@@ -67,6 +67,8 @@ export interface Ports {
   wakeWorkspace?(workspaceId: string): Promise<void>;
   /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
   trace?(workspaceId: string): Promise<string>;
+  /** The fresh worker's checkout answers git within `timeoutMs` (`worktree_check`); never throws. Absent: no check. */
+  worktreeCheck?(workspaceId: string, timeoutMs: number): Promise<{ ok: boolean; detail: string }>;
   /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
   liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
@@ -101,7 +103,7 @@ export interface Ports {
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
   preflight?(def: Blueprint, at: string): string | null;
-  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings> };
+  settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings>; /** One free "call your verdict" nudge per attempt (decision c8125131). */ verdictNudge?: boolean };
   /** Where an on-demand PM escalates first: "supervisor", an agent address or alias, or "" (straight to the human). */
   escalationTarget?(): string;
 }
@@ -496,11 +498,25 @@ export class Engine {
       this.log(run, "skipped", id, def.skip_if);
       return this.go(run, id, def.on.skipped ?? "done", "skipped");
     }
+    // Decision 12885996: a run whose PRs were all merged meanwhile (by a person, the queue) goes straight on instead of babysitting,
+    // implementing or QA-ing merged code, or asking a person about it.
+    if (def.skip_if_merged && def.on.already_merged) {
+      const urls = this.prUrls(run, def.skip_if_merged);
+      if (await this.allMerged(urls)) {
+        st.status = "skipped";
+        st.verdict = "already_merged";
+        st.summary = `every PR is already merged: ${urls.join(", ")}`;
+        this.log(run, "already_merged", id, urls.join(", "));
+        return this.go(run, id, def.on.already_merged, "every PR already merged");
+      }
+    }
     st.runs += 1;
     st.attempts = 0;
     st.flakes = 0;
     st.flakeReasons = [];
     st.progress = [];
+    st.verdictNudged = false;
+    st.worktreeFailures = 0;
     st.startedAt = this.ports.now();
     st.endedAt = null;
     st.verdict = null;
@@ -637,13 +653,18 @@ export class Engine {
   private async notifyPm(run: Run, text: string): Promise<void> {
     // With runs.notifyMailTo set, a judgement request is mailed there (queued) instead of interrupting the starter or spawning a PM.
     const mailTo = this.ports.settings().runsMailTo?.trim();
+    const stage = run.pm.pending?.stage ?? run.stage ?? "?";
+    const detail = `Stage "${stage}" is exhausted: ${run.pm.pending?.reason ?? "out of attempts"}.\nLast summary: ${run.stages[stage]?.summary ?? "none"}\nThis is the run's ONE judgement on this stage: if it exhausts again after your extra attempts, the run fails and goes to the human.`;
     if (mailTo && this.ports.report) {
-      await this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} needs PM`, body: `${this.runFacts(run)}\n${text}`, kind: "run" }).catch((e) => console.error("blueprints: PM mail failed", e));
+      // Decision c8125131: the PM is paged at once; the mail (read when its reader is idle) informs, or asks when no PM came.
+      const paged = this.pmSettings().pageOnExhausted === true && (await this.judge(run, "exhausted", stage, detail));
+      const pm = paged ? (pmCalls(run)[pmKey(run.id, "exhausted", stage, run.stages[stage]?.runs ?? 0)]?.agentId ?? "?") : null;
+      const subject = paged ? `Run ${run.id} ${this.runLabel(run)}: stage ${stage} exhausted, PM ${pm} paged` : `Run ${run.id} ${this.runLabel(run)} needs PM`;
+      const body = paged ? `${this.runFacts(run)}\nThe on-demand PM ${pm} was paged and judges it now; nothing is needed unless it escalates.\n${text}` : `${this.runFacts(run)}\n${text}`;
+      await this.ports.report(mailTo, { subject, body, kind: "run" }).catch((e) => console.error("blueprints: PM mail failed", e));
       return;
     }
     // Otherwise an on-demand PM for this judgement key; none (no pm role, the per-run limit, a key already judged): the human.
-    const stage = run.pm.pending?.stage ?? run.stage ?? "?";
-    const detail = `Stage "${stage}" is exhausted: ${run.pm.pending?.reason ?? "out of attempts"}.\nLast summary: ${run.stages[stage]?.summary ?? "none"}\nThis is the run's ONE judgement on this stage: if it exhausts again after your extra attempts, the run fails and goes to the human.`;
     if (await this.judge(run, "exhausted", stage, detail)) return;
     const call = pmCalls(run)[pmKey(run.id, "exhausted", stage, run.stages[stage]?.runs ?? 0)];
     const why = call?.state === "unavailable" ? (call.outcome ?? "spawn failed") : call ? "a PM already had this point" : `pm.maxPerRun (${this.pmSettings().maxPerRun}) reached`;
@@ -1094,12 +1115,18 @@ export class Engine {
 
   // ---- agent stages ----
 
-  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry" | "wake", facts: string): string {
+  private composePrompt(run: Run, id: string, def: AgentStage, st: StageState, why: "start" | "nudge" | "retry" | "wake", facts: string, o: { callVerdict?: boolean } = {}): string {
     const parts: string[] = [];
     if (why === "wake" && st.wakeReason === "usage_limit") {
       parts.push(`Factory: the provider usage limit was lifted and run ${run.id} is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
     } else if (why === "wake") {
       parts.push(`Factory: run ${run.id} was suspended and is resumed. Continue stage "${id}" where you stopped (check the repository and PR state first), then call blueprint_verdict. Do not end your turn without it.`);
+    } else if (why === "nudge" && o.callVerdict) {
+      parts.push(
+        `Factory: CALL YOUR VERDICT NOW. You ended your turn without blueprint_verdict for stage "${id}" of run ${run.id}. ` +
+          `If the work is done, or you cannot go further, call blueprint_verdict right away with the verdict that fits and a summary of where things stand (blocked is a verdict). ` +
+          `If you are waiting on a person or an outside system, call blueprint_waiting instead. This reminder uses no attempt; the next turn that ends without a verdict uses one.`,
+      );
     } else if (why === "nudge") {
       parts.push(`Factory: you ended your turn without giving a verdict for stage "${id}" of run ${run.id}. Finish the work if needed, then call blueprint_verdict. Do not end your turn without it.`);
     } else {
@@ -1284,19 +1311,37 @@ export class Engine {
     return !Object.values(run.stages).some((st) => st.agentId === agentId && (st.status === "running" || st.status === "entering" || st.status === "waiting"));
   }
 
-  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string } = {}): Promise<void> {
+  /**
+   * A worker that ended its turn (or went idle) without a verdict. Decision c8125131: the first time in an attempt it gets ONE
+   * explicit "call your verdict" nudge that uses no attempt; the next one is an ordinary nudge, which counts.
+   */
+  private nudge(run: Run, id: string): Promise<void> {
+    const st = run.stages[id];
+    if (this.ports.settings().verdictNudge && !st.verdictNudged) {
+      st.verdictNudged = true;
+      this.log(run, "verdict_nudge", id, "no verdict: one explicit reminder, no attempt used");
+      return this.dispatch(run, id, "nudge", { free: true, callVerdict: true });
+    }
+    return this.dispatch(run, id, "nudge");
+  }
+
+  private async dispatch(run: Run, id: string, why: "start" | "nudge" | "retry" | "wake", opts: { free?: boolean; fresh?: boolean; archiveOld?: boolean; attach?: string; callVerdict?: boolean } = {}): Promise<void> {
     if (run.status === "suspended") return;
     const def = this.stageDef(run, id) as AgentStage;
     const st = run.stages[id];
     if (why === "start" || why === "retry") st.workerWaitSince = null;
-    if (!opts.free) st.attempts += 1;
+    if (!opts.free) {
+      st.attempts += 1;
+      // A new attempt gets its own free verdict reminder (the counted nudge itself is the start of one).
+      if (why !== "start") st.verdictNudged = false;
+    }
     if (st.attempts > def.max_attempts + st.extra) return this.exhausted(run, id, `${st.attempts - 1} attempts used (max_attempts ${def.max_attempts})`);
     st.status = "entering";
     st.verdict = null;
     this.store.save();
 
     const facts = await this.prFactsBlock(run, def);
-    let prompt = this.composePrompt(run, id, def, st, why, facts);
+    let prompt = this.composePrompt(run, id, def, st, why, facts, { callVerdict: opts.callVerdict });
     if (why === "wake") st.wakeReason = null;
     const reuse = /^reuse:(.+)$/.exec(def.agent)?.[1];
     // A stage entered fresh gets a new worker; nudges and retries within the entry stay with its worker.
@@ -1311,6 +1356,7 @@ export class Engine {
       else prompt = this.composePrompt(run, id, def, st, "retry", facts);
     }
 
+    let freshWorkspace: string | null = null;
     try {
       if (target) {
         const previous = st.agentId;
@@ -1327,7 +1373,7 @@ export class Engine {
         const replaced = !!old;
         const share = !!this.ports.settings().shareWorkspace && def.workspace === "run";
         const spawned = await this.ports.spawn({
-          idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}`,
+          idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}${st.worktreeFailures ? `:w${st.worktreeFailures}` : ""}`,
           role: def.role,
           prompt: replaced ? `${prompt}\n\nNote: the worker that held this role earlier is gone; you are its replacement. Read the repository and PR state before continuing.` : prompt,
           title: `${run.blueprint} · ${id} · ${run.vars.ticket || run.id}`,
@@ -1344,6 +1390,7 @@ export class Engine {
           env: { PASEO_AGENT_ROLE: def.role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: id },
         });
         st.agentId = spawned.agentId;
+        freshWorkspace = spawned.workspaceId ?? null;
         this.registerAgent(run, spawned.agentId, def.role, id, spawned.workspaceId);
         if (share && spawned.workspaceId) run.sharedWorkspaceId = spawned.workspaceId;
         this.log(run, "spawned", id, `${def.role} ${spawned.agentId}`);
@@ -1403,12 +1450,43 @@ export class Engine {
       st.summary = `could not start a worker: ${message}`;
       return this.pause(run, id, st.summary);
     }
+    if (def.worktree_check && freshWorkspace && st.agentId && this.ports.worktreeCheck) {
+      const failed = await this.checkWorktree(run, id, st.agentId, freshWorkspace, def.worktree_check);
+      if (failed) {
+        if ((st.worktreeFailures ?? 0) < 2) return this.dispatch(run, id, "retry", { free: true, fresh: true });
+        st.worktreeFailures = 0;
+        st.summary = `the worker's worktree failed its check twice in a row: ${failed}`;
+        return this.pause(run, id, st.summary);
+      }
+    }
     st.status = "running";
     st.quotaRetry = null;
     st.podStartFailures = 0;
     if (st.wardenTask) this.ports.wardenDone(st.wardenTask, "redispatched");
     st.wardenTask = st.agentId ? this.ports.wardenRegister({ agentId: st.agentId, task: `blueprint ${run.blueprint} run ${run.id} stage ${id}: call blueprint_verdict when done` }) : null;
     this.store.save();
+  }
+
+  /**
+   * Decision 12885996: a fresh worker whose checkout does not answer git within the stage's `worktree_check` seconds would hang its
+   * stage. Its agent and workspace go, and the failure is counted; the caller starts one fresh worker, then pauses the run.
+   * Returns why it failed, or null when the worktree answered.
+   */
+  private async checkWorktree(run: Run, id: string, agentId: string, workspaceId: string, seconds: number): Promise<string | null> {
+    const st = run.stages[id];
+    const out = await this.ports.worktreeCheck!(workspaceId, seconds * 1000).catch((e: Error) => ({ ok: false, detail: e.message }));
+    if (out.ok) {
+      this.log(run, "worktree_ok", id, `${agentId}: ${out.detail}`);
+      return null;
+    }
+    st.worktreeFailures = (st.worktreeFailures ?? 0) + 1;
+    this.log(run, "worktree_check_failed", id, `${agentId} (${workspaceId}), ${st.worktreeFailures}/2: ${out.detail}`);
+    await this.ports.archive(agentId).catch((e) => console.error(`blueprints: archiving ${agentId} failed`, e));
+    if (run.sharedWorkspaceId === workspaceId) run.sharedWorkspaceId = null;
+    await this.archiveWorkspaceOf(run, agentId);
+    st.agentId = null;
+    this.store.save();
+    return out.detail;
   }
 
   /**
@@ -1504,7 +1582,7 @@ export class Engine {
       }
       this.log(run, "turn_ended", id, outcome.kind === "failed" ? `failed: ${outcome.message ?? ""}` : "no verdict");
       if (outcome.kind === "failed") return this.agentFailed(run, id, outcome.message ?? "turn failed", { message: outcome.message ?? "", code: outcome.code ?? null, provider: outcome.provider ?? null });
-      return this.dispatch(run, id, "nudge");
+      return this.nudge(run, id);
     }).catch((e) => this.crash(run, e));
   }
 
@@ -1729,8 +1807,17 @@ export class Engine {
       if (gate.status === "withdrawn" || gate.status === "archived") return; // withdrawn by us, or the asker went away
       if (gate.status === "expired") {
         st.status = "done";
-        st.verdict = "expired";
+        st.endedAt = this.ports.now();
         run.status = "running";
+        run.waitingFor = null;
+        if (def.default_answer) {
+          const next = def.on[def.default_answer] ?? def.on.default!;
+          st.verdict = def.default_answer;
+          st.summary = `nobody answered in ${def.expires_in_minutes} min: default answer ${def.default_answer}`;
+          this.log(run, "gate_answered", id, `${def.default_answer} by default (expired after ${def.expires_in_minutes} min)`);
+          return this.go(run, id, next, `default answer ${def.default_answer}`);
+        }
+        st.verdict = "expired";
         return this.go(run, id, def.on.expired ?? def.on.exhausted ?? "failed", "gate expired");
       }
       const answer = gate.optionId ?? "answered";
@@ -1943,7 +2030,7 @@ export class Engine {
     }
     st.status = "running";
     this.store.save();
-    const { id: _id, kind: _k, on: _o, skip_if: _s, title: _t, ...params } = def as Record<string, unknown> & Stage;
+    const { id: _id, kind: _k, on: _o, skip_if: _s, skip_if_merged: _m, title: _t, ...params } = def as Record<string, unknown> & Stage;
     const entry = st.runs;
     void handler({ runId: run.id, stageId: id, blueprint: run.blueprint, params: this.deepRender(run, params) as Record<string, unknown>, vars: { ...run.vars } })
       .catch((error): StageOutcome => ({ verdict: "error", summary: (error as Error).message }))
@@ -2071,7 +2158,7 @@ export class Engine {
             st.lastNudgeAt = now;
             this.log(run, "stalled", id, state);
             if (state === "gone") await this.agentFailed(run, id, "worker gone");
-            else await this.dispatch(run, id, "nudge");
+            else await this.nudge(run, id);
           });
         }
       } catch (error) {
@@ -2179,13 +2266,24 @@ export class Engine {
     }
   }
 
-  /** A wait for a merge that lasted `expires_in_minutes`: follow the `expired` edge. */
+  /**
+   * A wait for a merge that lasted `expires_in_minutes`: follow the `expired` edge. A PR set still in the merge queue (every PR
+   * merged or queued, none dequeued) is not stuck, the queue is just slow: the wait is re-armed for another `expires_in_minutes`
+   * instead (decision 9b98fade: wait-queue expired into the human merge gate while GitHub was still merging).
+   */
   private async expireMergeWait(run: Run, id: string): Promise<void> {
     const st = run.stages[id];
     const def = this.stageDef(run, id) as GateStage;
-    if (!st.gate?.passive || !def.expires_in_minutes || this.ports.now() - (st.gate.openedAt ?? this.ports.now()) < def.expires_in_minutes * 60_000) return;
+    if (!st.gate?.passive || !def.expires_in_minutes || this.ports.now() - (st.gate.expiresFrom ?? st.gate.openedAt ?? this.ports.now()) < def.expires_in_minutes * 60_000) return;
     await this.exclusive(run.id, async () => {
       if (run.stage !== id || st.status !== "waiting" || !st.gate?.passive) return;
+      if (await this.stillQueued(Object.keys(st.gate.heads))) {
+        st.gate.expiresFrom = this.ports.now();
+        st.gate.rearms = (st.gate.rearms ?? 0) + 1;
+        this.log(run, "merge_wait_rearmed", id, `still in the merge queue after ${def.expires_in_minutes} min: waiting ${def.expires_in_minutes} min more (re-arm ${st.gate.rearms})`);
+        this.store.save();
+        return;
+      }
       const why = def.context ? this.r(run, def.context) : "";
       st.status = "done";
       st.verdict = "expired";
@@ -2197,6 +2295,30 @@ export class Engine {
       this.log(run, "gate_answered", id, `expired after ${def.expires_in_minutes} min`);
       await this.go(run, id, def.on.expired, "merge wait expired");
     });
+  }
+
+  /** Every PR is merged or in a merge queue, and at least one is still queued (read fresh; a read that fails is "not queued"). */
+  private async stillQueued(urls: string[]): Promise<boolean> {
+    let queued = 0;
+    for (const url of urls) {
+      const f = await this.ports.prFacts(url, { maxAgeMs: 0 }).catch(() => null);
+      if (!f) return false;
+      if (f.state === "merged") continue;
+      // Auto-merge alone with red CI never merges: only a PR with a queue place, or auto-merge on a head that is not red, counts.
+      if (f.state === "open" && f.queued === true && (f.queuePosition !== undefined || f.ci !== "red")) queued += 1;
+      else return false;
+    }
+    return queued > 0;
+  }
+
+  /** Every PR of the list is merged on GitHub (read fresh; an empty list or a read that fails is "no"). */
+  private async allMerged(urls: string[]): Promise<boolean> {
+    if (!urls.length) return false;
+    for (const url of urls) {
+      const f = await this.ports.prFacts(url, { maxAgeMs: 0 }).catch(() => null);
+      if (f?.state !== "merged") return false;
+    }
+    return true;
   }
 
   /** An approval gate (criteria) nobody answered: one more mail through the run's event mails, at most MAX_REMINDERS. */

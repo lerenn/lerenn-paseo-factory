@@ -7,6 +7,8 @@ export interface PmSettings {
   timeoutMinutes: number;
   escalateTo: string;
   escalateTimeoutMinutes: number;
+  /** An exhausted stage spawns the PM at once, also in mail mode (decision c8125131). The settings schema turns it on; absent: off. */
+  pageOnExhausted?: boolean;
 }
 
 export const PM_DEFAULTS: PmSettings = { maxPerRun: 4, maxUsd: 0.5, timeoutMinutes: 10, escalateTo: "", escalateTimeoutMinutes: 30 };
