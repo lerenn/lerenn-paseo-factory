@@ -1,6 +1,13 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/** A role setting: empty or blank is unset and gives the default, so no agent is spawned or shown with an empty role. */
+export const roleSetting = (fallback: string) =>
+  z
+    .string()
+    .transform((v) => v.trim() || fallback)
+    .default(fallback);
+
 /** The runtime that needs no plugin: the agent runs on the daemon. */
 export const LOCAL_RUNTIME = "local";
 

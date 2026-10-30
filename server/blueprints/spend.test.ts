@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { aggregate, SpendStore, type SpendRecord, type SpendSample } from "./spend";
-import { cli, normalizeSpend, recomputeSpendFile, releaseRole, releaseRoleOfTitle } from "./spend-recompute";
+import { cli, normalizeSpend, recomputeSpendFile, spendRole, releaseRoleOfTitle } from "./spend-recompute";
 
 const rec = (over: Partial<SpendRecord>): SpendRecord => ({ agentId: "a", turnId: "t", at: Date.UTC(2026, 9, 25, 10), role: "implementer", run: "bp-1", blueprint: "ticket", stage: "implement", inputTokens: 100, cachedInputTokens: 10, outputTokens: 50, costUsd: 0.5, ...over });
 const sample = (over: Partial<SpendSample>): SpendSample => {
@@ -91,14 +91,14 @@ describe("spend", () => {
 
 describe("release roles", () => {
   it("names release agents by their releaser label and title", () => {
-    expect(releaseRole({ "releaser.qa": "12" }, "Dev QA: backend v1.2.3")).toBe("Dev QA");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "Release: cut")).toBe("Release cut");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "Release: pin dev")).toBe("Pin dev");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "Release: pin stg")).toBe("Pin stg");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "Release: pin prd")).toBe("Pin prd");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "Release: migration")).toBe("Release migration");
-    expect(releaseRole({ "releaser.job": "job-1a2b" }, "something else")).toBe("Release");
-    expect(releaseRole({}, "Release: cut")).toBeNull();
+    expect(spendRole({ "releaser.qa": "12" }, "Dev QA: backend v1.2.3")).toBe("Dev QA");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "Release: cut")).toBe("Release cut");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "Release: pin dev")).toBe("Pin dev");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "Release: pin stg")).toBe("Pin stg");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "Release: pin prd")).toBe("Pin prd");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "Release: migration")).toBe("Release migration");
+    expect(spendRole({ "releaser.job": "job-1a2b" }, "something else")).toBe("Release");
+    expect(spendRole({}, "Release: cut")).toBeNull();
     expect(releaseRoleOfTitle("ticket · implement · ANY-1")).toBeNull();
     expect(releaseRoleOfTitle(null)).toBeNull();
   });

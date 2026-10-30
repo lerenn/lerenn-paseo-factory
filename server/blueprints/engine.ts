@@ -214,6 +214,9 @@ export interface StartInput {
   parent?: { runId: string; stageId: string };
 }
 
+/** A run that ended: only resume (or a PM re-scope) starts it again. */
+const ended = (run: Run) => run.status === "done" || run.status === "failed" || run.status === "aborted";
+
 /**
  * The flow engine. A run is a state machine over the stages of its blueprint: every transition is
  * recorded in the store before its effect (spawn, message, gate) happens, and `resumeAll` replays the
@@ -471,6 +474,12 @@ export class Engine {
 
   /** Follow an edge: a stage id, "done", "failed" or "pm". */
   private async go(run: Run, from: string, target: string, why: string): Promise<void> {
+    // An ended run is never revived by a late edge (a child ending after its parent was aborted); resume sets it running first.
+    if (ended(run)) {
+      this.log(run, "transition_refused", from, `${why} -> ${target}: run already ${run.status}`);
+      this.store.save();
+      return;
+    }
     this.log(run, "transition", from, `${why} -> ${target}`);
     if (target === "done") return this.finish(run, "done", null);
     if (target === "failed") return this.finish(run, "failed", `stage ${from}: ${why}`);
@@ -536,6 +545,7 @@ export class Engine {
 
   private async childFinished(parent: Run, child: Run): Promise<void> {
     if (parent.status === "suspended") return; // replayed when the parent is resumed
+    if (ended(parent)) return; // an aborted (or finished) parent stays as it is
     const id = Object.entries(parent.stages).find(([, st]) => st.childRunId === child.id)?.[0];
     if (!id || parent.stage !== id) return;
     const st = parent.stages[id];
@@ -1178,13 +1188,42 @@ export class Engine {
     }
   }
 
-  async abort(runId: string, reason: string): Promise<Run> {
+  /**
+   * Abort a run for good: its mid-turn stage workers are stopped (see stopWorkers), and its live child runs are aborted
+   * too, recursively, with a reason naming it. `by` (the caller, e.g. the run's PM) is never stopped.
+   */
+  async abort(runId: string, reason: string, opts: { by?: string } = {}): Promise<Run> {
     const run = this.require(runId);
-    return this.exclusive(run.id, async () => {
-      if (run.status === "done" || run.status === "failed" || run.status === "aborted") throw new UsageError(`Run ${run.id} is already ${run.status}.`);
+    await this.exclusive(run.id, async () => {
+      if (ended(run)) throw new UsageError(`Run ${run.id} is already ${run.status}.`);
       this.finish(run, "aborted", reason);
-      return run;
+      await this.stopWorkers(run, opts.by);
     });
+    for (const child of this.store.all().filter((r) => r.parent?.runId === run.id && !ended(r))) {
+      await this.abort(child.id, `parent run ${run.id} aborted: ${reason}`, opts).catch((e) => {
+        if (!(e instanceof UsageError)) console.error(`blueprints: aborting child ${child.id} of ${run.id} failed`, e);
+      });
+    }
+    return run;
+  }
+
+  /**
+   * Stop the workers of an aborted run that are mid-turn, so their writes stop landing. Paseo's plugin API has no cancel or
+   * interrupt for an agent's turn (the agent handle offers send, run, waitForFinish, archive, detach); archive() closes the
+   * agent's session on the daemon, which ends the running turn. An idle worker is left to the usual retirement.
+   */
+  private async stopWorkers(run: Run, except?: string): Promise<void> {
+    const ids = new Set(Object.values(run.stages).map((st) => st.agentId).filter((id): id is string => !!id && id !== except && id !== run.pmAgentId));
+    for (const id of ids) {
+      if ((await this.ports.agentState(id).catch(() => "gone" as const)) !== "running") continue;
+      try {
+        await this.ports.archive(id);
+        this.log(run, "worker_stopped", null, `${id} was mid-turn: archived to end its turn`);
+      } catch (e) {
+        console.error(`blueprints: stopping ${id} of ${run.id} failed`, e);
+      }
+    }
+    this.store.save();
   }
 
   // ---- agent stages ----

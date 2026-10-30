@@ -72,8 +72,15 @@ export function normalizeSpend<T extends SpendRow>(records: readonly T[]): { rec
   return { records: out, last, dropped };
 }
 
-/** Spend role of an anyshift-releaser agent, which has no paseo.factory.role: Dev QA by its label, a job by its title. */
-export function releaseRole(labels: Record<string, string>, title: string | null | undefined): string | null {
+/** Label of the Factory's usage-limit probe agent (usage-limit/index.ts). */
+export const USAGE_PROBE_LABEL = "paseo.factory.usage-probe";
+
+/**
+ * Spend role of a Factory agent with no paseo.factory.role: the usage-limit probe, and anyshift-releaser agents (Dev QA by
+ * its label, a job by its title).
+ */
+export function spendRole(labels: Record<string, string>, title: string | null | undefined): string | null {
+  if (labels[USAGE_PROBE_LABEL] === "1") return "Usage probe";
   if (labels["releaser.qa"]) return "Dev QA";
   if (labels["releaser.job"]) return releaseRoleOfTitle(title) ?? "Release";
   return null;
