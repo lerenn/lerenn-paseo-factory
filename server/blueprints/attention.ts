@@ -1,6 +1,7 @@
 // One mail to the events address per new attention point (human decision f45ab3ba): what the Overview shows as
 // "needs a look" (runs paused, failed, waiting for the PM or stalled) and the Inbox's pending items. Suspended runs
 // are held on purpose and never count. A point is mailed once; it can be mailed again only after it went away.
+import { runLabel } from "../../shared/blueprints/label";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Run } from "./store";
@@ -21,7 +22,7 @@ export interface PendingItem {
   createdAt: number;
 }
 
-const label = (run: Run) => `${run.blueprint} ${run.vars.ticket || run.vars.incident_id || run.id}`;
+const label = (run: Run) => `${run.blueprint} ${runLabel(run)}`;
 
 /** The attention points of the runs and the pending Inbox items. Pure. */
 export function attentionPoints(runs: Run[], pending: PendingItem[], now: number): AttentionPoint[] {

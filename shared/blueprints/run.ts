@@ -27,6 +27,8 @@ export const runViewSchema = z.object({
   status: runStatusSchema,
   stage: z.string().nullable(),
   vars: z.record(z.string(), z.string()),
+  /** What the run is called: the blueprint's `label` rendered, else ticket, else incident_id, else the run id. */
+  label: z.string(),
   requestedBy: z.string(),
   createdAt: z.number(),
   updatedAt: z.number(),

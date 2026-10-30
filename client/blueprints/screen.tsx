@@ -169,7 +169,7 @@ export function BlueprintsScreen({ theme, layout, navigation, focus }: PluginScr
     const canResume = run.status === "failed" || run.status === "paused" || run.pmPending !== null;
     const varEntries = Object.entries(run.vars).filter(([, v]) => v !== "").sort(([a], [b]) => (a === "ticket" ? -1 : b === "ticket" ? 1 : 0));
     const open = expanded[run.id];
-    const label = run.vars.ticket || run.vars.incident_id || run.id;
+    const label = run.label;
     const header = (
       <Pressable onPress={() => setExpanded((e) => ({ ...e, [run.id]: !e[run.id] }))} style={s.line}>
         <Text style={s.muted}>{open ? "▾" : "▸"}</Text>

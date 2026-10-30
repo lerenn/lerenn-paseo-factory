@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -482,6 +483,40 @@ describe("gates", () => {
     await verdict("agent-5", "fix", { criteria: "1. it works fast" });
     expect(items.size).toBe(2);
     expect(engine.require(third.id).stage).toBe("criteria");
+  });
+
+  it("finds an approval stored under the key format before approval_scope existed", async () => {
+    const { start, verdict, items, engine, store } = setup();
+    const sha = createHash("sha256").update("1. it works").digest("hex");
+    store.approve(`ABC-1:criteria:${sha}`, "approve", "louis", 1);
+    const run = await start();
+    await verdict("agent-1", "fix", { criteria: "1. it works" });
+    expect(items.size).toBe(0);
+    expect(engine.require(run.id).stages.criteria.summary).toMatch(/reused/);
+    expect(engine.require(run.id).stage).toBe("build");
+  });
+
+  it("keys approvals by a custom approval_scope and names the run by a custom label", async () => {
+    const custom = flow.replace('confirm = ["ticket"]', 'confirm = ["ticket"]\nlabel = "{{ticket}} ({{bump}})"\napproval_scope = "{{bump}}"');
+    const { start, verdict, answer, items, engine, store, spawned } = setup(custom);
+    const first = await start({ ticket: "ABC-1", ticket_confirmed: "true", bump: "no" });
+    expect(spawned[0].title).toBe("flow · think · ABC-1 (no)");
+    expect(spawned[0].workspaceTitle).toBe("Investigator: ABC-1 (no)");
+    expect(engine.view(engine.require(first.id)).label).toBe("ABC-1 (no)");
+    await verdict("agent-1", "fix", { criteria: "1. it works" });
+    await answer("item-1", "approve");
+    const sha = createHash("sha256").update("1. it works").digest("hex");
+    expect(store.approval(`no:criteria:${sha}`)).toMatchObject({ optionId: "approve" });
+    expect(store.approval(`ABC-1:criteria:${sha}`)).toBeUndefined();
+    // another ticket in the same scope reuses it
+    const second = await start({ ticket: "XYZ-2", ticket_confirmed: "true", bump: "no" });
+    await verdict("agent-3", "fix", { criteria: "1. it works" });
+    expect(items.size).toBe(1);
+    expect(engine.require(second.id).stages.criteria.summary).toMatch(/reused/);
+  });
+
+  it("refuses a label naming an unknown variable", () => {
+    expect(() => parseBlueprint(flow.replace('confirm = ["ticket"]', 'confirm = ["ticket"]\nlabel = "{{tikcet}}"'))).toThrow(/unknown variable \{\{tikcet\}\}/);
   });
 
   it("skip_if follows the skipped edge", async () => {

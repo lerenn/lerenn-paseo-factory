@@ -5,6 +5,7 @@
 // Known means: an agent of a run lives (lived) in it, the Factory recorded creating it (even when its agent never came: a dispatch
 // refused by a role's limit), or its title is one the Factory gives a stage of a run it holds (workspaces leaked before the record).
 // The last two wait a grace period after creation, so a worker still starting is not raced.
+import { customLabel } from "../../shared/blueprints/label";
 import { pathExcluded } from "../exclusions";
 import { isTrusted } from "../trust";
 import { workspaceTitle } from "../workspace-title";
@@ -79,7 +80,7 @@ export function agentlessWorkspaces(
 }
 
 /** The workspace titles the Factory gives the agent stages (and the PM) of these runs: how a leaked workspace is recognised. Pure. */
-export function factoryWorkspaceTitles(runs: { id: string; blueprint: string; vars: Record<string, string>; def?: { stage?: unknown[] } }[], pmRole?: string): Set<string> {
+export function factoryWorkspaceTitles(runs: { id: string; blueprint: string; vars: Record<string, string>; def?: { stage?: unknown[]; label?: string } }[], pmRole?: string): Set<string> {
   const titles = new Set<string>();
   for (const run of runs) {
     const name = `${run.blueprint} ${run.id}`;
@@ -88,7 +89,7 @@ export function factoryWorkspaceTitles(runs: { id: string; blueprint: string; va
       const role = (st as { role?: unknown }).role;
       if (typeof role === "string" && role) roles.add(role);
     }
-    for (const role of roles) titles.add(workspaceTitle(role, run.vars, name));
+    for (const role of roles) titles.add(workspaceTitle(role, run.vars, name, customLabel(run)));
   }
   return titles;
 }

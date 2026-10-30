@@ -1,3 +1,4 @@
+import { runLabel } from "../shared/blueprints/label";
 import type { Run } from "./blueprints/store";
 
 /** The Factory's own kinds of events. An extension event carries its own type (see `extensionType`). */
@@ -66,7 +67,7 @@ export function buildActivity(input: {
 }): ActivityItem[] {
   const out: ActivityItem[] = [];
   for (const run of input.runs) {
-    const label = run.vars.ticket || run.vars.incident_id || run.id;
+    const label = runLabel(run);
     for (const h of run.history) {
       const known = RUN_EVENTS[h.event];
       if (!known) continue;
