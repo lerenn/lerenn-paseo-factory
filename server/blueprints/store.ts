@@ -80,6 +80,11 @@ export interface StageState {
   startedAt: number | null;
   endedAt: number | null;
   lastNudgeAt: number | null;
+  /**
+   * PR-facts reads of this stage failing for a transient reason (GitHub 5xx, rate limit, network, timeout), in a row: since when,
+   * how many, when to read again, the last error, whether the 30-min notice went out, and whether a gate answer waits to be applied.
+   */
+  factsRetry?: { since: number; n: number; at: number; last: string; noticed?: boolean; answer?: boolean } | null;
   /** A gate answered "hold" is asked again at this time. */
   reopenAt?: number | null;
   /** The worker of this attempt already got its one free "call your verdict" nudge (decision c8125131). */

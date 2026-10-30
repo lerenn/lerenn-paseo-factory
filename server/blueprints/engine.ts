@@ -12,9 +12,12 @@ import { PostRun } from "./post";
 import { buildDigest } from "./digest";
 import { escalationHow, PM_DEFAULTS, pmCalls, pmKey, pmLive, pmPrompt, pmTitle, type PmSettings } from "./pm";
 import type { PmCall, PmPoint } from "./store";
+import { GitHubUnavailableError, isTransientError, TRANSIENT_NOTICE_MS, transientBackoffMs, withQuickRetry } from "./transient";
 
 export class UsageError extends Error {}
 export class NotFoundError extends UsageError {}
+/** GitHub did not answer a read the action needs (after quick retries): nothing was changed, try again. */
+export class RetryLaterError extends UsageError {}
 
 /** How long a worker may say it waits on a person or an outside system (no nudges meanwhile) before the run pauses for a person. */
 const WORKER_WAIT_CEILING_MS = 120 * 60_000;
@@ -113,6 +116,8 @@ export interface Ports {
   settings(): { defaultCwd: string | undefined; pmRole: string; idleGraceSeconds: number; archiveOnFinish: boolean; shareWorkspace?: boolean; flakeRetries?: number; runsMailTo?: string; criteriaReminderMinutes?: number; pm?: Partial<PmSettings>; /** One free "call your verdict" nudge per attempt (decision c8125131). */ verdictNudge?: boolean };
   /** Where an on-demand PM escalates first: "supervisor", an agent address or alias, or "" (straight to the human). */
   escalationTarget?(): string;
+  /** Pause between the quick retries of a transient PR-facts read (default a real timer; tests pass a no-op). */
+  sleep?(ms: number): Promise<void>;
 }
 
 /** The usage-limit controller as the engine sees it (server/blueprints/usage-limit). Absent or disabled: nothing changes. */
@@ -227,6 +232,56 @@ export class Engine {
     private readonly ports: Ports,
   ) {
     this.observer = new PostRun(store, ports);
+  }
+
+  private sleep = (ms: number): Promise<void> => (this.ports.sleep ? this.ports.sleep(ms) : new Promise((resolve) => setTimeout(resolve, ms)));
+
+  /** Facts of `url` read now, retried quickly on a transient error (then a `GitHubUnavailableError`). */
+  private freshFacts(url: string): Promise<PrFacts> {
+    return withQuickRetry(() => this.ports.prFacts(url, { maxAgeMs: 0 }), this.sleep);
+  }
+
+  /**
+   * A PR-facts read of stage `id` failed for a transient reason (GitHub 5xx, rate limit, network, timeout): the stage keeps waiting
+   * and reads again after a back-off (30 s doubling to 10 min). `facts_transient` is logged once per streak, a person is told once
+   * when the streak reaches 30 min, and the run never fails for it. `reopen`: the gate could not even open, the tick opens it at
+   * the retry time.
+   */
+  private factsUnavailable(run: Run, id: string, error: unknown, how: "poll" | "reopen" | "answer"): void {
+    const st = run.stages[id];
+    const now = this.ports.now();
+    const cause = error instanceof GitHubUnavailableError ? error.cause : error;
+    const message = clip(cause instanceof Error ? cause.message : String(cause), 200);
+    const r = (st.factsRetry ??= { since: now, n: 0, at: now, last: "" });
+    r.n += 1;
+    r.at = now + transientBackoffMs(r.n);
+    r.last = message;
+    r.answer = how === "answer" || r.answer;
+    const retryIn = `${Math.round((r.at - now) / 1000)} s`;
+    if (r.n === 1) this.log(run, "facts_transient", id, `GitHub unavailable (${message}): ${how === "answer" ? "the answer is applied" : "reading again"} in ${retryIn}, the stage keeps waiting`);
+    if (how === "reopen") {
+      st.gate = null;
+      st.reopenAt = r.at;
+    }
+    st.status = "waiting";
+    run.status = "waiting";
+    run.waitingFor = `GitHub unavailable since ${Math.max(1, Math.round((now - r.since) / 60_000))} min (${message}); reading again in ${retryIn}`;
+    if (!r.noticed && now - r.since >= TRANSIENT_NOTICE_MS) {
+      r.noticed = true;
+      const mins = Math.round((now - r.since) / 60_000);
+      this.log(run, "facts_transient_long", id, `GitHub unavailable for ${mins} min (${r.n} reads): ${message}`);
+      this.notify(run, { kind: "waiting", stage: id, reason: `GitHub has not answered the PR reads of stage ${id} for ${mins} min (${message}). The run keeps waiting and reads again every few minutes; nothing to do unless GitHub stays down.`, key: `${run.id}:facts-transient:${id}:${r.since}` });
+    }
+    this.store.save();
+  }
+
+  /** A PR-facts read of stage `id` worked again after a transient streak. */
+  private factsRecovered(run: Run, id: string): void {
+    const st = run.stages[id];
+    if (!st?.factsRetry) return;
+    this.log(run, "facts_recovered", id, `GitHub answers again after ${Math.max(1, Math.round((this.ports.now() - st.factsRetry.since) / 60_000))} min (${st.factsRetry.n} failed reads)`);
+    st.factsRetry = null;
+    this.store.save();
   }
 
   private notify(run: Run, e: RunEvent): void {
@@ -1093,6 +1148,18 @@ export class Engine {
         const busy = this.store.active().find((r) => Object.entries(r.stages).some(([sid, other]) => (r.id !== run.id || sid !== stage) && other.agentId === attach && (other.status === "running" || other.status === "entering")));
         if (busy) throw new UsageError(`Agent ${attach} is the worker of another running stage (run ${busy.id}).`);
       }
+      // A gate tied to PRs reads them as it opens: read them first (quick retries), so a GitHub outage refuses the resume
+      // with the run left exactly as it was, instead of half-resuming it (bp-98295f48: "gh: HTTP 500" twice).
+      if (def.kind === "gate" && (def as GateStage).pr) {
+        for (const url of this.r(run, (def as GateStage).pr!).split(",").map((x) => x.trim()).filter(Boolean)) {
+          try {
+            await this.freshFacts(url);
+          } catch (error) {
+            if (error instanceof GitHubUnavailableError) throw new RetryLaterError(`Run ${run.id} not resumed: ${error.message}`);
+            throw error;
+          }
+        }
+      }
       const st = (run.stages[stage] ??= freshStage());
       st.extra += Math.max(0, input.extraAttempts ?? 0);
       if (input.note) st.notes.push(input.note);
@@ -1700,7 +1767,7 @@ export class Engine {
     for (const url of toCheck) {
       let f: PrFacts;
       try {
-        f = await this.ports.prFacts(url, { maxAgeMs: 0 });
+        f = await this.freshFacts(url);
       } catch (error) {
         throw new UsageError(`Cannot verify ${url} on GitHub (${(error as Error).message}); try again.`);
       }
@@ -1733,11 +1800,17 @@ export class Engine {
     const heads: Record<string, string> = {};
     let facts = "";
     if (def.pr) {
-      for (const url of this.r(run, def.pr).split(",").map((s) => s.trim()).filter(Boolean)) {
-        const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
-        heads[url] = f.head;
-        facts += `\n- ${url} @ ${f.head.slice(0, 12)}: ${f.state}, CI ${f.ci}`;
+      try {
+        for (const url of this.r(run, def.pr).split(",").map((s) => s.trim()).filter(Boolean)) {
+          const f = await this.freshFacts(url);
+          heads[url] = f.head;
+          facts += `\n- ${url} @ ${f.head.slice(0, 12)}: ${f.state}, CI ${f.ci}`;
+        }
+      } catch (error) {
+        if (!isTransientError(error)) throw error;
+        return this.factsUnavailable(run, id, error, "reopen");
       }
+      this.factsRecovered(run, id);
     }
     if (def.wait === "merge") return this.openMergeWait(run, id, def, heads);
     const options = def.options ?? (def.free_text ? [] : APPROVAL);
@@ -1804,11 +1877,22 @@ export class Engine {
       case "resume":
       case "resume1":
       case "resume3":
-        await this.doResume(run, { stage: info.stage, extraAttempts: gate.optionId === "resume3" ? 3 : gate.optionId === "resume1" ? 1 : 0 });
-        return;
+        return this.resumeFromInbox(run, info.stage, { stage: info.stage, extraAttempts: gate.optionId === "resume3" ? 3 : gate.optionId === "resume1" ? 1 : 0 });
       default:
         // "Other…": the text goes to the worker as a note and the stage gets one more try.
-        await this.doResume(run, { stage: info.stage, extraAttempts: 1, note: gate.text ? `Instruction from the human: ${gate.text}` : undefined });
+        return this.resumeFromInbox(run, info.stage, { stage: info.stage, extraAttempts: 1, note: gate.text ? `Instruction from the human: ${gate.text}` : undefined });
+    }
+  }
+
+  /** A resume chosen in the Inbox that GitHub could not serve leaves the run as it was and says so; it never fails the run. */
+  private async resumeFromInbox(run: Run, stage: string, input: { stage: string; extraAttempts: number; note?: string }): Promise<void> {
+    try {
+      await this.doResume(run, input);
+    } catch (error) {
+      if (!(error instanceof RetryLaterError)) throw error;
+      this.log(run, "resume_refused", stage, error.message);
+      this.store.save();
+      this.notify(run, { kind: "waiting", stage, reason: `${error.message} Resume it from the Blueprints tab or with blueprint_resume.`, key: `${run.id}:resume-refused:${stage}:${run.history.length}` });
     }
   }
 
@@ -1837,6 +1921,19 @@ export class Engine {
         return this.go(run, id, def.on.expired ?? def.on.exhausted ?? "failed", "gate expired");
       }
       const answer = gate.optionId ?? "answered";
+      // The PR facts the answer is checked against, read before anything changes: on a GitHub outage the answer stays pending
+      // in the run and the tick applies it once GitHub answers.
+      let read: Record<string, PrFacts> | null = null;
+      if (def.pr && Object.keys(st.gate!.heads).length) {
+        read = {};
+        try {
+          for (const url of Object.keys(st.gate!.heads)) read[url] = await this.freshFacts(url);
+        } catch (error) {
+          if (!isTransientError(error)) throw error;
+          return this.factsUnavailable(run, id, error, "answer");
+        }
+        this.factsRecovered(run, id);
+      }
       if (def.store_as && gate.text) {
         const spec = run.def.vars[def.store_as];
         if (spec?.pattern && !new RegExp(spec.pattern).test(gate.text.trim())) {
@@ -1859,8 +1956,8 @@ export class Engine {
         this.store.save();
         return;
       }
-      if (def.pr && Object.keys(st.gate!.heads).length) {
-        const verdict = await this.prGateCheck(run, id, def, answer);
+      if (read) {
+        const verdict = await this.prGateCheck(run, id, def, answer, read);
         if (verdict === "refused") return;
       }
       st.verdict = answer;
@@ -1880,11 +1977,11 @@ export class Engine {
   }
 
   /** "merged" must be true on GitHub. Anything else on a PR gate is checked for a head that moved meanwhile. */
-  private async prGateCheck(run: Run, id: string, def: GateStage, answer: string): Promise<"ok" | "refused"> {
+  private async prGateCheck(run: Run, id: string, def: GateStage, answer: string, read: Record<string, PrFacts>): Promise<"ok" | "refused"> {
     const st = run.stages[id];
     const heads = st.gate!.heads;
     for (const [url, head] of Object.entries(heads)) {
-      const f = await this.ports.prFacts(url, { maxAgeMs: 0 });
+      const f = read[url];
       if (answer === "merged" && f.state === "open" && f.queued) {
         // In the merge queue: wait for the merge on GitHub instead of asking "merged?" again (human decision d82771ac).
         this.log(run, "merge_queued", id, `${url} is in the merge queue: waiting for the merge, no new question`);
@@ -2146,8 +2243,26 @@ export class Engine {
             run.waitingFor = null;
             await this.openGate(run, id, this.stageDef(run, id) as GateStage);
           });
+        } else if (st.status === "waiting" && st.gate?.itemId && st.factsRetry?.answer) {
+          // An answer GitHub was down for: apply it once the back-off is over.
+          if (now < st.factsRetry.at) continue;
+          await this.exclusive(run.id, async () => {
+            if (run.stage !== id || st.status !== "waiting" || !st.gate?.itemId) return;
+            await this.handleGate(run, st.gate.itemId);
+          });
         } else if (st.status === "waiting" && st.gate && (st.gate.itemId || st.gate.passive) && Object.keys(st.gate.heads).length) {
-          await this.pollPrGate(run, id);
+          // GitHub was down on the last poll: wait out the back-off, the stage keeps waiting.
+          if (st.factsRetry && now < st.factsRetry.at) continue;
+          try {
+            await this.pollPrGate(run, id);
+          } catch (error) {
+            if (!isTransientError(error)) throw error;
+            await this.exclusive(run.id, async () => {
+              if (run.stage === id && st.status === "waiting" && st.gate) this.factsUnavailable(run, id, error, "poll");
+            });
+            continue;
+          }
+          if (st.factsRetry && !st.factsRetry.answer) this.factsRecovered(run, id);
           if (st.gate?.passive) await this.expireMergeWait(run, id);
         } else if (st.status === "waiting" && st.gate?.itemId) this.remindGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
@@ -2320,7 +2435,9 @@ export class Engine {
     if (!st.gate?.passive || !def.expires_in_minutes || this.ports.now() - (st.gate.expiresFrom ?? st.gate.openedAt ?? this.ports.now()) < def.expires_in_minutes * 60_000) return;
     await this.exclusive(run.id, async () => {
       if (run.stage !== id || st.status !== "waiting" || !st.gate?.passive) return;
-      if (await this.stillQueued(Object.keys(st.gate.heads))) {
+      const queued = await this.stillQueued(Object.keys(st.gate.heads));
+      if (queued === "unknown") return; // GitHub did not answer: expire on a later tick, not on a guess
+      if (queued) {
         st.gate.expiresFrom = this.ports.now();
         st.gate.rearms = (st.gate.rearms ?? 0) + 1;
         this.log(run, "merge_wait_rearmed", id, `still in the merge queue after ${def.expires_in_minutes} min: waiting ${def.expires_in_minutes} min more (re-arm ${st.gate.rearms})`);
@@ -2340,11 +2457,16 @@ export class Engine {
     });
   }
 
-  /** Every PR is merged or in a merge queue, and at least one is still queued (read fresh; a read that fails is "not queued"). */
-  private async stillQueued(urls: string[]): Promise<boolean> {
+  /**
+   * Every PR is merged or in a merge queue, and at least one is still queued (read fresh; a read that fails for good is "not
+   * queued", a transient failure is "unknown").
+   */
+  private async stillQueued(urls: string[]): Promise<boolean | "unknown"> {
     let queued = 0;
     for (const url of urls) {
-      const f = await this.ports.prFacts(url, { maxAgeMs: 0 }).catch(() => null);
+      let transient = false;
+      const f = await this.ports.prFacts(url, { maxAgeMs: 0 }).catch((e) => ((transient = isTransientError(e)), null));
+      if (transient) return "unknown";
       if (!f) return false;
       if (f.state === "merged") continue;
       // Auto-merge alone with red CI never merges: only a PR with a queue place, or auto-merge on a head that is not red, counts.

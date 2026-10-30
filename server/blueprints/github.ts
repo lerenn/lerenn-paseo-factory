@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import type { PrFacts } from "./engine";
+import { isTransientError } from "./transient";
 
 const PR_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)$/;
 
@@ -9,8 +10,14 @@ export const isGitHubPrUrl = (url: string): boolean => PR_URL.test(url);
 function run(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout: 60_000, maxBuffer: 4_000_000 }, (error, stdout, stderr) => {
-      if (error) reject(new Error((stderr || error.message).trim().slice(0, 300)));
-      else resolve(stdout);
+      if (!error) return resolve(stdout);
+      // Keep what tells a transient failure apart (killed by the timeout, a network errno) for `isTransientError`.
+      const e = error as Error & { killed?: boolean; code?: unknown };
+      const out = Object.assign(new Error((e.killed ? `gh timed out: ${stderr || e.message}` : stderr || e.message).trim().slice(0, 300)), {
+        killed: e.killed === true,
+        ...(typeof e.code === "string" ? { code: e.code } : {}),
+      });
+      reject(out);
     });
   });
 }
@@ -86,12 +93,13 @@ export async function ghFacts(url: string): Promise<PrFacts> {
     try {
       out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,statusCheckRollup,reviewDecision,isDraft,autoMergeRequest"]);
     } catch (error) {
-      if (!/403|Resource not accessible/i.test((error as Error).message)) throw error;
+      if (isTransientError(error) || !/403|Resource not accessible/i.test((error as Error).message)) throw error;
       rolledUp = false;
       out = await run("gh", ["pr", "view", url, "--json", "state,headRefOid,mergeable,reviewDecision,isDraft,autoMergeRequest"]);
     }
   } catch (error) {
-    if (/Could not resolve|not found|404/i.test((error as Error).message)) {
+    // A missing PR, not GitHub failing to answer: "Could not resolve host" or a 5xx must not read as "the PR does not exist".
+    if (!isTransientError(error) && /Could not resolve|not found|404/i.test((error as Error).message)) {
       return { url, exists: false, state: "closed", head: "", ci: "none", mergeable: null, draft: false, review: "" };
     }
     throw error;
