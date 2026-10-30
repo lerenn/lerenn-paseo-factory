@@ -1,17 +1,48 @@
 import type { Paseo } from "../host";
 
+/** The workspace did not come up (no terminal could be opened in it) within the boot budget: nothing was probed. */
+export type NotUp = { notUp: string };
+
 /**
  * Runs a short shell script in a terminal of the workspace and returns the lines it printed, or the reason it did not answer
  * within `timeoutMs`. The terminal is killed in every case, also one that only comes up after the timeout.
+ *
+ * Without `bootMs`, one budget covers opening the terminal and the script. With `bootMs`, opening the terminal has its own
+ * budget (a cold Kubernetes Runtime pod only opens a terminal once it has booted, which takes minutes with the warm pool off),
+ * a failed open is retried within it, and `timeoutMs` only starts once the terminal is up; a workspace that never came up
+ * returns `notUp`, which is not an answer of the script.
  */
-async function runInWorkspace(paseo: Paseo, workspaceId: string, name: string, script: string, timeoutMs: number): Promise<{ lines: string[] } | { error: string }> {
+async function runInWorkspace(
+  paseo: Paseo,
+  workspaceId: string,
+  name: string,
+  script: string,
+  timeoutMs: number,
+  bootMs?: number,
+): Promise<{ lines: string[] } | { error: string } | NotUp> {
   let terminal: Awaited<ReturnType<Paseo["terminals"]["create"]>> | null = null;
-  const until = Date.now() + timeoutMs;
+  let until = Date.now() + (bootMs ?? timeoutMs);
   const left = () => Math.max(0, until - Date.now());
   const within = <T>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), left()))]);
-  const creating = paseo.terminals.create({ workspaceId, name, command: "sh", args: ["-c", `echo FACTORY_TRACE_BEGIN; ${script}; echo FACTORY_TRACE_END`] });
+  const open = () => paseo.terminals.create({ workspaceId, name, command: "sh", args: ["-c", `echo FACTORY_TRACE_BEGIN; ${script}; echo FACTORY_TRACE_END`] });
+  let creating = open();
   try {
-    terminal = await within(creating);
+    if (bootMs === undefined) terminal = await within(creating);
+    else {
+      let lastError = "";
+      while (!terminal) {
+        try {
+          terminal = await within(creating);
+        } catch (error) {
+          if ((error as Error).message === "timeout") return { notUp: `workspace not up after ${Math.round(bootMs / 1000)} s${lastError ? ` (${lastError})` : ""}` };
+          lastError = (error as Error).message;
+          await new Promise((r) => setTimeout(r, Math.min(BOOT_RETRY_MS, left())));
+          if (left() <= 0) return { notUp: `workspace not up after ${Math.round(bootMs / 1000)} s (${lastError})` };
+          creating = open();
+        }
+      }
+      until = Date.now() + timeoutMs;
+    }
     while (left() > 0) {
       await new Promise((r) => setTimeout(r, Math.min(500, Math.max(1, left()))));
       const lines = (await within(terminal.capture({ stripAnsi: true }))).lines.map((l) => l.trimEnd());
@@ -21,13 +52,16 @@ async function runInWorkspace(paseo: Paseo, workspaceId: string, name: string, s
     }
     return { error: `${Math.round(timeoutMs / 1000)} s` };
   } catch (error) {
-    // A terminal that comes up after the timeout (a pod that was resuming) is killed too, not left running in the pod.
-    if (!terminal) void creating.then((late) => late.kill()).catch(() => undefined);
     return { error: (error as Error).message === "timeout" ? `${Math.round(timeoutMs / 1000)} s` : (error as Error).message };
   } finally {
-    void terminal?.kill().catch(() => undefined);
+    // A terminal that comes up after the timeout (a pod that was resuming) is killed too, not left running in the pod.
+    if (terminal) void terminal.kill().catch(() => undefined);
+    else void creating.then((late) => late.kill()).catch(() => undefined);
   }
 }
+
+/** Pause between two attempts to open a terminal in a workspace that is still booting. */
+const BOOT_RETRY_MS = 5_000;
 
 /**
  * A trace for the run history, never a gate: `git status --short` of the workspace, read in a short-lived terminal. A workspace is
@@ -36,7 +70,7 @@ async function runInWorkspace(paseo: Paseo, workspaceId: string, name: string, s
  */
 export async function statusTrace(paseo: Paseo, workspaceId: string, timeoutMs = 5_000): Promise<string> {
   const out = await runInWorkspace(paseo, workspaceId, "factory-trace", "git status --short 2>&1", timeoutMs);
-  if ("error" in out) return `no answer (${out.error})`;
+  if (!("lines" in out)) return `no answer (${"error" in out ? out.error : out.notUp})`;
   const files = out.lines;
   return files.length ? `${files.length} entries: ${files.slice(0, 10).join("; ")}${files.length > 10 ? "; …" : ""}` : "clean";
 }
@@ -44,13 +78,25 @@ export async function statusTrace(paseo: Paseo, workspaceId: string, timeoutMs =
 /**
  * Decision 12885996: a fresh worker's checkout answers git within `timeoutMs` (the worktree exists, git is not stuck on a lock or
  * a dead mount). `ok: false` says why; the engine retries the worker once, then stops the run instead of letting it hang.
+ *
+ * `timeoutMs` starts once the workspace is up (a terminal opened in it), not at spawn: a cold pod may take minutes to boot, and
+ * that is not a git stall. A workspace still not up after `bootMs` is `unchecked`: the probe never ran, so it is not a failure.
  */
-export async function worktreeCheck(paseo: Paseo, workspaceId: string, timeoutMs: number): Promise<{ ok: boolean; detail: string }> {
-  const out = await runInWorkspace(paseo, workspaceId, "factory-worktree-check", "git rev-parse --is-inside-work-tree 2>&1 && git rev-parse --short HEAD 2>&1", timeoutMs);
+export async function worktreeCheck(
+  paseo: Paseo,
+  workspaceId: string,
+  timeoutMs: number,
+  bootMs = WORKTREE_BOOT_GRACE_MS,
+): Promise<{ ok: boolean; detail: string; unchecked?: boolean }> {
+  const out = await runInWorkspace(paseo, workspaceId, "factory-worktree-check", "git rev-parse --is-inside-work-tree 2>&1 && git rev-parse --short HEAD 2>&1", timeoutMs, bootMs);
+  if ("notUp" in out) return { ok: false, unchecked: true, detail: out.notUp };
   if ("error" in out) return { ok: false, detail: `git gave no answer (${out.error})` };
   if (out.lines[0] !== "true") return { ok: false, detail: `not a git worktree: ${out.lines.slice(0, 3).join("; ") || "no output"}` };
   return { ok: true, detail: `worktree at ${out.lines[1] ?? "?"}` };
 }
+
+/** Default time a fresh worker's workspace has to come up (pod scheduled and booted) before its `worktree_check` starts. */
+export const WORKTREE_BOOT_GRACE_MS = 10 * 60_000;
 
 /** A workspace whose agents ended their last turn longer ago than this may have an idle-suspended pod (Kubernetes Runtime). */
 export const TRACE_FRESH_MS = 5 * 60_000;

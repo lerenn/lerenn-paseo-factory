@@ -85,7 +85,7 @@ head_moved = "check"
 /** No on-demand PM: judgement points go to the human, as the engine did before PMs. */
 const NO_PM = { maxPerRun: 0 };
 
-function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean; pm?: Partial<PmSettings>; escalationTarget?: string; verdictNudge?: boolean; worktree?: { ok: boolean; detail: string }[] } = {}, withReport = false) {
+function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean; pm?: Partial<PmSettings>; escalationTarget?: string; verdictNudge?: boolean; worktree?: { ok: boolean; detail: string; unchecked?: boolean }[] } = {}, withReport = false) {
   let time = 1_000_000;
   const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string; title: string }[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -94,6 +94,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
   const pr: Record<string, PrFacts> = {};
   const wardens: string[] = [];
   const archived: string[] = [];
+  const worktreeCalls: { timeoutMs: number; bootMs?: number }[] = [];
   const store = new RunStore(null);
   let agents = 0;
   const spawnErrors: string[] = [];
@@ -147,7 +148,14 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     async prFacts(url) {
       return pr[url] ?? { url, exists: false, state: "closed", head: "", ci: "none", mergeable: null, draft: false, review: "" };
     },
-    ...(over.worktree ? { worktreeCheck: async () => over.worktree!.shift() ?? { ok: true, detail: "worktree at abc" } } : {}),
+    ...(over.worktree
+      ? {
+          worktreeCheck: async (_ws: string, timeoutMs: number, bootMs?: number) => {
+            worktreeCalls.push({ timeoutMs, bootMs });
+            return over.worktree!.shift() ?? { ok: true, detail: "worktree at abc" };
+          },
+        }
+      : {}),
     ...(withReport ? { report: async (to: string, r: { subject: string; body: string; kind: string }) => void reports.push({ to, ...r }) } : {}),
     tool: () => null,
     stageKind: () => null,
@@ -175,7 +183,7 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     return out;
   };
   states.set("pm-agent", "idle");
-  return { engine, store, spawned, sent, states, pods, spawnErrors, reports, items, pr, wardens, archived, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
+  return { engine, store, spawned, sent, states, pods, spawnErrors, reports, items, pr, wardens, archived, worktreeCalls, start, verdict, answer, settle, advance: (ms: number) => (time += ms), ports };
 }
 
 const okPr = (url: string, head = "abc123"): PrFacts => ({ url, exists: true, state: "open", head, ci: "green", mergeable: true, draft: false, review: "" });
@@ -1968,6 +1976,26 @@ describe("decision 12885996: worktree check and already-merged PRs", () => {
     expect(ctx.spawned.filter((x) => x.role === "investigator")).toHaveLength(2);
     expect(ctx.engine.require(run.id).status).toBe("paused");
     expect(ctx.engine.require(run.id).stages.think.summary).toContain("not a git worktree");
+  });
+
+  it("a workspace that never came up was not probed: logged, not counted, the worker keeps running", async () => {
+    const ctx = setup(checked, { pods: true, worktree: [{ ok: false, unchecked: true, detail: "workspace not up after 600 s" }] });
+    const run = await ctx.start();
+    expect(ctx.archived).not.toContain("agent-1");
+    expect(ctx.spawned).toHaveLength(1);
+    const live = ctx.engine.require(run.id);
+    expect(live.stages.think).toMatchObject({ status: "running", agentId: "agent-1" });
+    expect(live.stages.think.worktreeFailures ?? 0).toBe(0);
+    expect(live.history.map((h) => h.event)).toContain("worktree_unchecked");
+  });
+
+  it("passes worktree_boot_grace to the check, and leaves the default boot grace when it is absent", async () => {
+    const graced = setup(checked.replace("worktree_check = 30", "worktree_check = 30\nworktree_boot_grace = 900"), { pods: true, worktree: [] });
+    await graced.start();
+    expect(graced.worktreeCalls).toEqual([{ timeoutMs: 30_000, bootMs: 900_000 }]);
+    const plain = setup(checked, { pods: true, worktree: [] });
+    await plain.start();
+    expect(plain.worktreeCalls).toEqual([{ timeoutMs: 30_000, bootMs: undefined }]);
   });
 
   const merged = flow

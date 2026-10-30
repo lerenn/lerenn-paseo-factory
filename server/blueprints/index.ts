@@ -197,7 +197,7 @@ export function startBlueprints(host: FactoryHost) {
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
     trace: traceWorkspace,
-    worktreeCheck: (workspaceId, timeoutMs) => worktreeCheck(host.paseo, workspaceId, timeoutMs),
+    worktreeCheck: (workspaceId, timeoutMs, bootMs) => worktreeCheck(host.paseo, workspaceId, timeoutMs, bootMs),
     liveAgentsIn,
     suspendWorkspace: suspendPod,
     wakeWorkspace: wakePod,

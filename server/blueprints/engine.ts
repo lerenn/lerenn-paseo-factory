@@ -67,8 +67,11 @@ export interface Ports {
   wakeWorkspace?(workspaceId: string): Promise<void>;
   /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
   trace?(workspaceId: string): Promise<string>;
-  /** The fresh worker's checkout answers git within `timeoutMs` (`worktree_check`); never throws. Absent: no check. */
-  worktreeCheck?(workspaceId: string, timeoutMs: number): Promise<{ ok: boolean; detail: string }>;
+  /**
+   * The fresh worker's checkout answers git within `timeoutMs` (`worktree_check`), counted from when its workspace is up, which
+   * may take `bootMs` (`worktree_boot_grace`); never throws. `unchecked`: the workspace never came up, nothing was probed. Absent: no check.
+   */
+  worktreeCheck?(workspaceId: string, timeoutMs: number, bootMs?: number): Promise<{ ok: boolean; detail: string; unchecked?: boolean }>;
   /** Ids of the agents still alive in a workspace, or null when they could not be listed. Absent: only the run's own agents are known. */
   liveAgentsIn?(workspaceId: string): Promise<string[] | null>;
   /** Usage recorded for a run / an agent. */
@@ -1451,7 +1454,7 @@ export class Engine {
       return this.pause(run, id, st.summary);
     }
     if (def.worktree_check && freshWorkspace && st.agentId && this.ports.worktreeCheck) {
-      const failed = await this.checkWorktree(run, id, st.agentId, freshWorkspace, def.worktree_check);
+      const failed = await this.checkWorktree(run, id, st.agentId, freshWorkspace, def.worktree_check, def.worktree_boot_grace);
       if (failed) {
         if ((st.worktreeFailures ?? 0) < 2) return this.dispatch(run, id, "retry", { free: true, fresh: true });
         st.worktreeFailures = 0;
@@ -1470,13 +1473,21 @@ export class Engine {
   /**
    * Decision 12885996: a fresh worker whose checkout does not answer git within the stage's `worktree_check` seconds would hang its
    * stage. Its agent and workspace go, and the failure is counted; the caller starts one fresh worker, then pauses the run.
-   * Returns why it failed, or null when the worktree answered.
+   * The `seconds` start once the workspace is up (`bootSeconds` at most): a cold pod still booting is not a git stall, and a
+   * workspace that never came up was not probed, so neither counts as a failure (the warden still watches the worker).
+   * Returns why it failed, or null when the worktree answered or could not be checked.
    */
-  private async checkWorktree(run: Run, id: string, agentId: string, workspaceId: string, seconds: number): Promise<string | null> {
+  private async checkWorktree(run: Run, id: string, agentId: string, workspaceId: string, seconds: number, bootSeconds?: number): Promise<string | null> {
     const st = run.stages[id];
-    const out = await this.ports.worktreeCheck!(workspaceId, seconds * 1000).catch((e: Error) => ({ ok: false, detail: e.message }));
+    const out: { ok: boolean; detail: string; unchecked?: boolean } = await this.ports
+      .worktreeCheck!(workspaceId, seconds * 1000, bootSeconds === undefined ? undefined : bootSeconds * 1000)
+      .catch((e: Error) => ({ ok: false, detail: e.message }));
     if (out.ok) {
       this.log(run, "worktree_ok", id, `${agentId}: ${out.detail}`);
+      return null;
+    }
+    if (out.unchecked) {
+      this.log(run, "worktree_unchecked", id, `${agentId} (${workspaceId}): ${out.detail}; not counted as a failure`);
       return null;
     }
     st.worktreeFailures = (st.worktreeFailures ?? 0) + 1;

@@ -57,10 +57,16 @@ export const agentStageSchema = z.strictObject({
   /** The stage whose `data.pr_urls` is the PR set. */
   pr_urls_from: stageId.optional(),
   /**
-   * Seconds a freshly spawned worker's checkout has to answer git (`rev-parse` in its workspace). No answer, or not a worktree:
-   * the worker and its workspace are archived and one fresh worker is started; a second failure pauses the run with the reason.
+   * Seconds a freshly spawned worker's checkout has to answer git (`rev-parse` in its workspace), counted from when the workspace
+   * is up (a terminal opens in it), not from the spawn. No answer, or not a worktree: the worker and its workspace are archived and
+   * one fresh worker is started; a second failure pauses the run with the reason.
    */
   worktree_check: z.number().int().min(5).max(300).optional(),
+  /**
+   * Seconds the workspace of a `worktree_check` has to come up (a cold Kubernetes Runtime pod booting) before the check starts;
+   * default 600. A workspace not up by then is logged `worktree_unchecked` and not counted as a failure.
+   */
+  worktree_boot_grace: z.number().int().min(0).max(3600).optional(),
   /** Verdict -> facts that must hold on GitHub (`ci_green`, `mergeable`, `open`) for the verdict to be accepted. */
   verify: z.record(z.string(), z.array(z.enum(["ci_green", "mergeable", "open", "exists"]))).optional(),
 });
