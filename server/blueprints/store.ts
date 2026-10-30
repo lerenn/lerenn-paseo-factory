@@ -70,6 +70,11 @@ export interface StageState {
     expiresFrom?: number;
     /** Times the merge wait was re-armed that way. */
     rearms?: number;
+    /** A merge wait (not a "merged" answer): PRs seen in the merge queue, polls in a row each was then seen out of it, and the
+     *  head each "left the merge queue" notice was sent for (one per PR head). */
+    inQueue?: Record<string, true>;
+    outPolls?: Record<string, number>;
+    leftNoticed?: Record<string, string>;
   } | null;
   childRunId: string | null;
   startedAt: number | null;
