@@ -1,0 +1,7 @@
+{
+  "id": "factory-github",
+  "name": "Factory GitHub",
+  "description": "GitHub pull request facts and merge-queue reads for the Paseo Factory, through the daemon's gh login.",
+  "requirements": { "paseo": ">=0.11.2" },
+  "build": [["npm", "ci"]]
+}
