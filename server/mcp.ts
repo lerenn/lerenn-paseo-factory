@@ -8,8 +8,9 @@ function allowed(t: HostTool, labels: Record<string, string>): boolean {
   if (t.requiresLabel && labels[t.requiresLabel.key] !== t.requiresLabel.value) return false;
   if (t.requiresTrusted && !isTrusted(labels) && !(t.alsoLabel && labels[t.alsoLabel.key] === t.alsoLabel.value)) return false;
   // Trusted agents act for the human without asking (bypassPermissions): they get an extension's reads, not its
-  // writes, which stay with the extension's own agents or with agents a person confirms each call for.
-  if (t.extension && !t.readOnly && isTrusted(labels)) return false;
+  // writes, which stay with the extension's own agents or with agents a person confirms each call for. The one
+  // exception is a write the extension marked `trustedWrite`: that goes to trusted agents, and only to them.
+  if (t.extension && !t.readOnly) return t.trustedWrite === true ? isTrusted(labels) : !isTrusted(labels);
   return true;
 }
 
@@ -83,7 +84,9 @@ export class McpServer {
         const parsed = tool.input.safeParse(req.params?.arguments ?? {});
         if (!parsed.success) return reply(textResult(`Invalid arguments: ${z.prettifyError(parsed.error)}`, true));
         try {
-          return reply(textResult(await tool.run(parsed.data, ctx)));
+          // An extension learns whether its caller is trusted, so it can check a `trustedWrite` call again itself.
+          const runCtx = tool.extension ? { ...ctx, trusted: isTrusted(await ctx.labels()) } : ctx;
+          return reply(textResult(await tool.run(parsed.data, runCtx)));
         } catch (err) {
           return reply(textResult(err instanceof UsageError || err instanceof Error ? err.message : String(err), true));
         }

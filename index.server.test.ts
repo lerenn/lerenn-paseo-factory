@@ -598,6 +598,49 @@ describe("extension tools for trusted agents and across restarts", () => {
     expect((await f.call(plain, "lanes_drop")).content[0].text).toBe("dropped");
   });
 
+  it("offers a trustedWrite tool to trusted agents only, and tells the extension the caller is trusted", async () => {
+    const seen: any[] = [];
+    const url = await extServer({
+      "/tools/lanes_drop": (body) => (seen.push(body), { result: "dropped" }),
+      "/tools/lanes_unblock": (body) => (seen.push(body), { result: "unblocked" }),
+    });
+    const f = await start();
+    cleanups.push(f.b.cleanup as () => void);
+    const reg = registration(url);
+    reg.tools.push({ name: "lanes_unblock", description: "Clear a lane block", trustedWrite: true } as never);
+    expect((await f.post("/extensions/register", reg)).status).toBe(200);
+    const [assistant, plain] = [await f.login("assistant"), await f.login("plain")];
+    // The trusted agent gets the reads and exactly the trustedWrite tools; not the extension's other writes.
+    const forAssistant = (await f.listed(assistant)).map((t) => t.name);
+    expect(forAssistant).toEqual(expect.arrayContaining(["lanes_board", "lanes_unblock"]));
+    expect(forAssistant).not.toContain("lanes_drop");
+    expect((await f.call(assistant, "lanes_unblock")).content[0].text).toBe("unblocked");
+    expect(seen.at(-1)).toMatchObject({ callerId: "assistant", trusted: true });
+    // Every other agent keeps what it had and never sees, nor runs, the trustedWrite tool.
+    const forPlain = (await f.listed(plain)).map((t) => t.name);
+    expect(forPlain).toEqual(expect.arrayContaining(["lanes_board", "lanes_drop"]));
+    expect(forPlain).not.toContain("lanes_unblock");
+    const refused = await f.call(plain, "lanes_unblock");
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toMatch(/not available to this agent/);
+    expect(seen).toHaveLength(1);
+    expect((await f.call(plain, "lanes_drop")).content[0].text).toBe("dropped");
+    expect(seen.at(-1)).toMatchObject({ callerId: "plain", trusted: false });
+  });
+
+  it("keeps the trustedWrite rule for a remote extension's remembered tools while it is away", async () => {
+    const url = await extServer({});
+    const f = await start();
+    cleanups.push(f.b.cleanup as () => void);
+    const reg = registration(url);
+    reg.tools.push({ name: "lanes_unblock", description: "Clear a lane block", trustedWrite: true } as never);
+    expect((await f.post("/extensions/register", reg)).status).toBe(200);
+    expect((await f.post("/extensions/unregister", { id: "lanes" })).status).toBe(200);
+    const [assistant, plain] = [await f.login("assistant"), await f.login("plain")];
+    expect((await f.listed(assistant)).map((t) => t.name)).toContain("lanes_unblock");
+    expect((await f.listed(plain)).map((t) => t.name)).not.toContain("lanes_unblock");
+  });
+
   it("keeps listing a remote extension's tools while it is away, also after a Factory restart", async () => {
     const url = await extServer({ "/tools/lanes_board": () => ({ result: "live" }) });
     const first = await start();

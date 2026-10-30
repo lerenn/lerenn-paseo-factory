@@ -127,10 +127,12 @@ const unregister = factory.registerExtension({
 
 Paseo runs each plugin's server in its own process, so `globalThis` registration only works for code inside the Factory's process. Other plugins register over the Factory's loopback endpoint (`~/.paseo/factory/endpoint.json`, bearer = its token) and serve a small loopback API of their own:
 
-`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema }], rpc: [{ name, readOnly? }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
+`POST /extensions/register` `{ id, version, tab?, callback: { url, token }, tools: [{ name, description, inputSchema, readOnly?, trustedWrite? }], rpc: [{ name, readOnly? }], stageKinds: [{ kind }], roles? }` (`callback.url` must be `http://127.0.0.1|localhost|[::1]`). Registration is idempotent: send it at start and again every minute or so; a Factory restart forgets everything and the next registration restores it. `POST /extensions/unregister` `{ id }` removes it.
+
+An extension tool not marked `readOnly` is not offered to agents with a trusted label (`trustedLabels`), unless it is marked `trustedWrite: true`: such a tool is offered to trusted agents only, and hidden from every other agent. Each tool call carries `trusted` (`{ input, callerId, trusted }`), so the extension can check it again.
 
 The Factory forwards, with `Authorization: Bearer <callback.token>`:
-- `POST <callback>/tools/<name>` `{ input, callerId }` → `{ result }` (the tool is served under the `factory` MCP server with your `inputSchema`; validate the input yourself; an error status with `{ error }` becomes the tool error).
+- `POST <callback>/tools/<name>` `{ input, callerId, trusted }` → `{ result }` (the tool is served under the `factory` MCP server with your `inputSchema`; validate the input yourself; an error status with `{ error }` becomes the tool error).
 - `POST <callback>/rpc/<name>` `{ input, callerId }` → `{ output }` (for the tab, through `factory.extension.call`).
 
 An rpc registered with `readOnly: true` (in-process or remote) is also reachable by other plugins on the Factory's loopback endpoint: `POST /extensions/<id>/rpc/<name>` `{ input }` → `200 { output }`, bearer = the endpoint token (`~/.paseo/factory/endpoint.json`), `callerId` `loopback`. Other rpcs answer 403, an unknown extension or rpc 404, input that fails the rpc's schema 400. Mark only rpcs with no side effect and no secret in the output; this is how one extension reads another's facts (for example the releaser's `ticket-facts`).

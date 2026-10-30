@@ -433,7 +433,7 @@ export class FactoryHost {
     const handle = buildRemote(raw, this.pending);
     const removeInner = this.registerExtension(handle.registration);
     this.droppedExtensions.delete(raw.id);
-    this.known.remember(raw.id, raw.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, readOnly: t.readOnly })));
+    this.known.remember(raw.id, raw.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, readOnly: t.readOnly, trustedWrite: t.trustedWrite })));
     const entry = {
       handle,
       remove: (away = false) => {
