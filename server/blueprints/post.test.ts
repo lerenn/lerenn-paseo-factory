@@ -257,8 +257,16 @@ describe("retro", () => {
     return t.engine.require(run.id);
   }
 
-  it("a run that did not go straight through gets a separate retro agent, in a pod, with the digest and the destination", async () => {
-    const t = setup();
+  it.each([undefined, "", "  "])("a retro with retro.runtime %j runs on the Factory's runtime (no override)", async (runtime) => {
+    const t = setup({ retro: { runtime } });
+    await failed(t);
+    const retro = t.spawned.find((s) => s.role === "retro")!;
+    expect(retro).toBeTruthy();
+    expect(retro).not.toHaveProperty("runtime");
+  });
+
+  it("a run that did not go straight through gets a separate retro agent, on retro.runtime, with the digest and the destination", async () => {
+    const t = setup({ retro: { runtime: "kubernetes" } });
     const run = await failed(t);
     const retro = t.spawned.find((s) => s.role === "retro")!;
     expect(retro).toBeTruthy();

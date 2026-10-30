@@ -1,4 +1,4 @@
-import { flakeReason, flakeSummary, isBusyError, isGitTimeout, isQuotaError, MAX_BUSY_RETRIES, MAX_GIT_TIMEOUTS, quotaBackoffMs, SESSION_GONE } from "./flake";
+import { flakeReason, flakeSummary, isStartFailure, isBusyError, isGitTimeout, isQuotaError, MAX_BUSY_RETRIES, MAX_GIT_TIMEOUTS, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
 import { TERMINALS, stageVerdicts, type AgentStage, type Blueprint, type CallStage, type GateStage, type BlueprintStage, type Stage } from "../../shared/blueprints/blueprint";
@@ -49,7 +49,7 @@ export type GateState = {
 
 export interface Ports {
   now(): number;
-  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; /** Overrides the Blueprints runtime setting for this agent. */ runtime?: "kubernetes" | "local"; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
+  spawn(o: { idempotencyKey: string; role: string; prompt: string; title: string; workspaceTitle?: string; cwd?: string; labels: Record<string, string>; env: Record<string, string>; /** Overrides the Factory runtime setting for this agent. */ runtime?: string; joinWorkspaceId?: string }): Promise<{ agentId: string; workspaceId?: string | null }>;
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
@@ -59,11 +59,11 @@ export interface Ports {
   post?(): PostSettings;
   /** No model call should start now (the Factory is paused for a usage limit): the retro waits. */
   quiet?(): boolean;
-  /** Archive a workspace (the pod of a Kubernetes agent). */
+  /** Archive a workspace (the pod of an agent on a runtime plugin). */
   archiveWorkspace?(workspaceId: string): Promise<void>;
-  /** Suspend the pod of a workspace (volume kept). `busy` says why it was refused (an agent is running in it). Absent: nothing to suspend. */
+  /** Suspend a workspace through its runtime (volume kept). `busy` says why it was refused (an agent is running in it). Absent: nothing to suspend. */
   suspendWorkspace?(workspaceId: string, force: boolean): Promise<{ ok: boolean; message?: string }>;
-  /** Wake a suspended pod ahead of the prompt that would wake it anyway. */
+  /** Wake a suspended workspace ahead of the prompt that would wake it anyway. */
   wakeWorkspace?(workspaceId: string): Promise<void>;
   /** `git status --short` of the workspace, for the history only (5 s at most, never throws): it never keeps a workspace. */
   trace?(workspaceId: string): Promise<string>;
@@ -128,7 +128,7 @@ export interface UsageLimitHook {
 export interface PostSettings {
   /** Who gets the event mails ("" = nobody). */
   eventsMailTo: string;
-  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean; prompt?: string };
+  retro: { enabled: boolean; mailTo: string; role: string; maxUsd: number; timeoutMinutes: number; skipTrivial: boolean; prompt?: string; /** Empty or absent: the Factory's runtime. */ runtime?: string };
   janitor: { enabled: boolean; dryRun: boolean };
 }
 
@@ -1011,7 +1011,7 @@ export class Engine {
     const workspaceId = st?.agentId ? run.agents?.[st.agentId]?.workspaceId : null;
     if (st?.status === "running" && (def?.kind ?? "agent") === "agent" && st.agentId) {
       if (!workspaceId) pods.push(`worker ${st.agentId}: local, not prompted any more`);
-      else if (!this.ports.suspendWorkspace) pods.push(`worker ${st.agentId}: pod ${workspaceId} not suspended (no Kubernetes Runtime handle)`);
+      else if (!this.ports.suspendWorkspace) pods.push(`worker ${st.agentId}: pod ${workspaceId} not suspended (the runtime offers no workspace control)`);
       else {
         const out = await this.ports.suspendWorkspace(workspaceId, !!input.force).catch((e: Error) => ({ ok: false, message: e.message }));
         pods.push(`worker ${st.agentId}: pod ${workspaceId} ${out.ok ? "suspended" : `not suspended (${out.message ?? "refused"})`}`);
@@ -1427,7 +1427,7 @@ export class Engine {
       }
       const flake = flakeReason((error as Error).message);
       // Two pod starts in a row that failed: alert instead of spending more retries (human decision d82771ac).
-      if (flake && POD_START_FLAKES.has(flake)) {
+      if (isStartFailure(flake)) {
         st.podStartFailures = (st.podStartFailures ?? 0) + 1;
         if (st.podStartFailures >= MAX_POD_START_FAILURES) {
           const message = (error as Error).message;
@@ -2427,6 +2427,4 @@ export class Engine {
 
 export { TERMINALS };
 
-/** Flake reasons that mean the worker's pod never came up. */
-const POD_START_FLAKES = new Set(["pod did not start", "pod not ready", "bridge.mjs not written", "container not found"]);
 const MAX_POD_START_FAILURES = 2;

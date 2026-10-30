@@ -15,6 +15,44 @@ export const DEFAULT_RETRO_PROMPT =
   "4. If the janitor kept a worktree, say which one and why.\n" +
   "Use only the digest; do not read repositories or call any other tool. Send the mail, then stop.";
 
+/**
+ * An infrastructure failure of a worker, recognised in a failed turn's message or a spawn error: retried with a fresh turn and
+ * workspace without using an attempt. `pattern` is a case-insensitive regular expression; the first match names the reason
+ * (`label`). `startFailure`: the worker's workspace never came up (two in a row pause the run instead of retrying).
+ */
+export const flakePatternSchema = z.object({
+  pattern: z.string().min(1).refine(validRegex, "a valid regular expression"),
+  label: z.string().min(1),
+  startFailure: z.boolean().default(false),
+});
+export type FlakePattern = z.output<typeof flakePatternSchema>;
+
+function validRegex(source: string): boolean {
+  try {
+    new RegExp(source, "i");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Today's patterns: the Kubernetes Runtime's failures (OOM kills, pods that did not start...). */
+export const DEFAULT_FLAKE_PATTERNS: FlakePattern[] = [
+  { pattern: /exit(?:ed)?(?: with)?(?: code)?[ :=]*137\b|OOMKilled|\bSIGKILL\b/.source, label: "OOMKilled / exit 137", startFailure: false },
+  { pattern: /exit(?:ed)?(?: with)?(?: code)?[ :=]*143\b|\bSIGTERM\b/.source, label: "exit 143 (SIGTERM)", startFailure: false },
+  { pattern: /could not write bridge\.mjs/.source, label: "bridge.mjs not written", startFailure: true },
+  { pattern: /could not start the pod|pod[^.\n]{0,60}(?:did not start|failed to start)/.source, label: "pod did not start", startFailure: true },
+  { pattern: /container not found/.source, label: "container not found", startFailure: true },
+  { pattern: /channel ended/.source, label: "channel ended", startFailure: false },
+  { pattern: /pod[^.\n]{0,60}not ready|not ready after \d+ ?s/.source, label: "pod not ready", startFailure: true },
+  { pattern: /pod[^.\n]{0,40}(?:evicted|replaced|failed|deleted)|\bevicted\b|worker gone/.source, label: "pod failed / evicted / replaced", startFailure: false },
+];
+
+/** Today's retro pattern: infrastructure flakes worth naming in a retro (OOM kills, pods that never started, scheduling and image errors). */
+export const DEFAULT_RETRO_FLAKE_PATTERNS: string[] = [
+  /exit(?:ed)?(?: code)?[ :=]*137|OOMKilled|\bSIGKILL\b|pod[^.\n]{0,60}(?:time(?:d)? ?out|did not start|failed to start)|(?:time(?:d)? ?out|start timeout)[^.\n]{0,40}pod|ImagePullBackOff|ErrImagePull|FailedScheduling|worker gone after restart/.source,
+];
+
 export const settingsSchema = z.object({
   /** Folder new workers start in when a stage names none. */
   defaultCwd: z.string().optional(),
@@ -36,6 +74,17 @@ export const settingsSchema = z.object({
   shareWorkspace: z.boolean().default(false),
   /** Infrastructure failures of a worker (exit 137/143, pod did not start, container not found, evicted...) retried per stage entry with a fresh pod, without using an attempt. A stage's own `flake_retries` raises it. */
   flakeRetries: z.number().int().min(0).default(3),
+  /**
+   * What counts as an infrastructure flake. `patterns`: retried for free (see flakePatternSchema; a provider session that is
+   * gone is always one, built in). `retroPatterns`: case-insensitive regular expressions of the flakes a retro names. The
+   * defaults are the Kubernetes Runtime's failures; another runtime sets its own.
+   */
+  flakes: z
+    .object({
+      patterns: z.array(flakePatternSchema).default(() => DEFAULT_FLAKE_PATTERNS.map((p) => ({ ...p }))),
+      retroPatterns: z.array(z.string().min(1).refine(validRegex, "a valid regular expression")).default(() => [...DEFAULT_RETRO_FLAKE_PATTERNS]),
+    })
+    .default(() => ({ patterns: DEFAULT_FLAKE_PATTERNS.map((p) => ({ ...p })), retroPatterns: [...DEFAULT_RETRO_FLAKE_PATTERNS] })),
   /**
    * Notices of a run that ended or needs a PM judgement. Empty: the run's end is reported to the agent that started it, and every
    * judgement point spawns an on-demand PM (see `pm`). An address or alias (e.g. @assistant): one mail there instead, no live
@@ -85,8 +134,10 @@ export const settingsSchema = z.object({
       skipTrivial: z.boolean().default(true),
       /** Prompt of the retro agent; see DEFAULT_RETRO_PROMPT for the placeholders. */
       prompt: z.string().default(DEFAULT_RETRO_PROMPT),
+      /** Runtime of the retro agent (`local` or a runtime plugin id such as `kubernetes`). Empty: the Factory's `runtime` setting. */
+      runtime: z.string().trim().default(""),
     })
-    .default({ enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT }),
+    .default({ enabled: true, mailTo: "", role: "retro", maxUsd: 0.3, timeoutMinutes: 10, skipTrivial: true, prompt: DEFAULT_RETRO_PROMPT, runtime: "" }),
   /** After the retro, archive the run's workers and their workspaces, except worktrees with uncommitted or unpushed work. */
   janitor: z
     .object({

@@ -1,6 +1,9 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/** The runtime that needs no plugin: the agent runs on the daemon. */
+export const LOCAL_RUNTIME = "local";
+
 export const MODULES = ["roles", "blueprints", "leases", "warden", "inbox", "supervisor"] as const;
 export type ModuleId = (typeof MODULES)[number];
 
@@ -16,8 +19,12 @@ export const factorySettingsSchema = z.object({
       supervisor: z.boolean().default(true),
     })
     .default({ roles: true, blueprints: true, leases: true, warden: true, inbox: true, supervisor: true }),
-  /** Where every workspace the Factory creates (Supervisor, PMs, stage workers) runs: a pod, or the daemon. */
-  runtime: z.enum(["kubernetes", "local"]).default("kubernetes"),
+  /**
+   * Runtime of every workspace the Factory creates (Supervisor, PMs, stage workers): `local` runs the agent on the daemon,
+   * any other value is the id of a workspace runtime plugin (`runtime.id` of `workspaces.create`), for example `kubernetes`
+   * for the Kubernetes Runtime.
+   */
+  runtime: z.string().trim().min(1).default(LOCAL_RUNTIME),
   /**
    * Projects the Factory stays out of: it never lists, watches, digests or spawns an agent whose directory is inside one
    * (matched by path, so an agent recreated with a new id stays excluded). Empty: none.

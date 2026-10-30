@@ -139,8 +139,8 @@ export class PostRun implements Observer {
         cwd: this.ports.settings().defaultCwd,
         labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": s.retro.role, "paseo.factory.stage": "retro" },
         env: { PASEO_AGENT_ROLE: s.retro.role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: "retro" },
-        // Always a pod: a retro in the daemon adds load to the host every run ends on (decision e833ea19).
-        runtime: "kubernetes",
+        // `retro.runtime`, else the Factory's: a deployment keeps retros off the daemon by setting it (decision e833ea19).
+        ...(s.retro.runtime?.trim() ? { runtime: s.retro.runtime.trim() } : {}),
       });
       (run.agents ??= {})[agentId] = { role: s.retro.role, stage: "retro", workspaceId: workspaceId ?? null };
       post.retro = { agentId, startedAt: now };

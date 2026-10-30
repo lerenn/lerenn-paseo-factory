@@ -73,13 +73,18 @@ export const roleSchema = z.strictObject({
    */
   maxConcurrent: z.number().int().min(1).optional(),
   /**
-   * Kubernetes Runtime pod profile for this role's workspaces (same name as the Runtime's profile),
-   * passed as the runtime option `profile`, which wins over its `projectProfiles`. Ignored on the
-   * `local` runtime and when a worker joins an existing shared workspace. Omit for the default.
+   * Options of the workspaces the Factory creates for this role, passed as-is to the workspace runtime plugin (the Factory
+   * setting `runtime`) under the Factory's own `cwd`, `slug`, `ref` and `title`; for example `{ profile: "small" }` picks a
+   * Kubernetes Runtime pod profile. Ignored on the `local` runtime and when a worker joins an existing shared workspace.
+   */
+  runtimeOptions: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * Deprecated, read for one release: use `runtimeOptions: { profile: ... }`, which wins when both are set. A runtime
+   * profile name passed as the runtime option `profile`.
    */
   runtimeProfile: z
     .string()
-    .regex(/^[a-z][a-z0-9-]{0,31}$/, "a Kubernetes Runtime profile name: lowercase letters, digits and '-', starting with a letter, 32 characters at most")
+    .regex(/^[a-z][a-z0-9-]{0,31}$/, "a profile name: lowercase letters, digits and '-', starting with a letter, 32 characters at most")
     .optional(),
   /**
    * Defaults for other plugins, passed as the environment those plugins read. Each is optional and
@@ -87,7 +92,12 @@ export const roleSchema = z.strictObject({
    */
   plugins: z
     .strictObject({
-      /** Kube Agents template: `PASEO_KUBE_TEMPLATE`. */
+      /**
+       * Any other plugin's defaults, as the environment variables it reads (for example `PASEO_KUBE_TEMPLATE` for Kube Agents).
+       * They sit below the role's `env` and what the creator passes. Values are literals.
+       */
+      env: z.record(z.string(), z.string()).optional(),
+      /** Deprecated, read for one release: use `env: { PASEO_KUBE_TEMPLATE: ... }`, which wins when both are set. */
       kubeTemplate: z.string().optional(),
       /**
        * Agents Warder. `on` or `off` sets `PASEO_WARDER`; the object form also sets the agent's
@@ -118,3 +128,23 @@ export const roleSchema = z.strictObject({
 });
 
 export type Role = z.output<typeof roleSchema>;
+
+/** The runtime options of a role's new workspaces: `runtimeOptions`, over the deprecated `runtimeProfile`. Undefined: none. */
+export function roleRuntimeOptions(role: Pick<Role, "runtimeOptions" | "runtimeProfile"> | null | undefined): Record<string, unknown> | undefined {
+  if (!role) return undefined;
+  const out = { ...(role.runtimeProfile ? { profile: role.runtimeProfile } : {}), ...role.runtimeOptions };
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Other plugins' defaults a role sets (`plugins`), as the environment variables they read. */
+export function rolePluginEnv(role: Pick<Role, "plugins">): Record<string, string> {
+  const p = role.plugins;
+  const warder = typeof p?.warder === "string" ? { mode: p.warder, interval: undefined } : p?.warder;
+  return {
+    ...(p?.kubeTemplate ? { PASEO_KUBE_TEMPLATE: p.kubeTemplate } : {}),
+    ...p?.env,
+    ...(warder?.mode ? { PASEO_WARDER: warder.mode } : {}),
+    ...(warder?.interval ? { PASEO_WARDER_INTERVAL: warder.interval } : {}),
+    ...(p?.ticket ? { PASEO_AGENT_TICKET: p.ticket } : {}),
+  };
+}
