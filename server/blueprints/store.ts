@@ -66,6 +66,10 @@ export interface StageState {
     notQueuedPolls?: number;
     /** The "still in the merge queue" notice went out. */
     slowNoticed?: boolean;
+    /** A merge wait re-armed at expiry because its PRs were still in the merge queue: the timeout counts from here (decision 9b98fade). */
+    expiresFrom?: number;
+    /** Times the merge wait was re-armed that way. */
+    rearms?: number;
   } | null;
   childRunId: string | null;
   startedAt: number | null;
@@ -73,6 +77,10 @@ export interface StageState {
   lastNudgeAt: number | null;
   /** A gate answered "hold" is asked again at this time. */
   reopenAt?: number | null;
+  /** The worker of this attempt already got its one free "call your verdict" nudge (decision c8125131). */
+  verdictNudged?: boolean;
+  /** Worktree checks of a fresh worker that failed in this entry (`worktree_check`, decision 12885996). */
+  worktreeFailures?: number;
 }
 
 export interface HistoryEvent {

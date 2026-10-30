@@ -12,7 +12,7 @@ import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
-import { statusTrace } from "./worktree";
+import { ActivityClock, freshTrace, statusTrace, worktreeCheck } from "./worktree";
 import { suspendPod, wakePod } from "./pod-control";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
@@ -120,6 +120,14 @@ export function startBlueprints(host: FactoryHost) {
     }
   };
 
+  // The trace of a workspace (git status, for the history) only while one of its agents was active lately: a trace in a
+  // suspended pod would resume it just before its archive (decision 12885996).
+  const activity = new ActivityClock();
+  const traceWorkspace = (workspaceId: string) => {
+    const agentIds = store.all().flatMap((run) => Object.entries(run.agents ?? {}).filter(([, a]) => a.workspaceId === workspaceId).map(([id]) => id));
+    return freshTrace((ws) => statusTrace(host.paseo, ws), workspaceId, activity.latest(agentIds), Date.now());
+  };
+
   /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
   let spawning = 0;
   // One cache for every PR lookup of the engine; GET /blueprints/runs only reads it (ADR "factory tickets view").
@@ -159,6 +167,7 @@ export function startBlueprints(host: FactoryHost) {
         console.error(`blueprints: joining workspace ${o.joinWorkspaceId} failed (${error.message}); creating a new one`);
         return spawnAgent(host.paseo, runtime, input);
       });
+      activity.touch(agentId);
       return { agentId, workspaceId };
       } finally {
         spawning--;
@@ -187,7 +196,8 @@ export function startBlueprints(host: FactoryHost) {
       const result = await host.paseo.workspaces.archive(workspaceId);
       if (result.error && !/archived|not found|unknown/i.test(result.error)) throw new Error(result.error);
     },
-    trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
+    trace: traceWorkspace,
+    worktreeCheck: (workspaceId, timeoutMs) => worktreeCheck(host.paseo, workspaceId, timeoutMs),
     liveAgentsIn,
     suspendWorkspace: suspendPod,
     wakeWorkspace: wakePod,
@@ -252,7 +262,7 @@ export function startBlueprints(host: FactoryHost) {
       const needsCwd = def.stage.some((st) => (st.kind ?? "agent") === "agent" && !(st as { cwd?: string }).cwd);
       return needsCwd && !cfg().defaultCwd ? "Blueprints setting defaultCwd is not set: workers need a working directory. Set it in Factory > Blueprints > Settings." : null;
     },
-    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30, pm: cfg().pm }),
+    settings: () => ({ defaultCwd: cfg().defaultCwd, pmRole: cfg().pmRole, idleGraceSeconds: cfg().idleGraceSeconds, archiveOnFinish: cfg().archiveOnFinish, shareWorkspace: cfg().shareWorkspace, flakeRetries: cfg().flakeRetries ?? 3, runsMailTo: cfg().runs?.notifyMailTo ?? "", criteriaReminderMinutes: cfg().gates?.criteriaReminderMinutes ?? 30, pm: cfg().pm, verdictNudge: cfg().verdictNudge ?? true }),
     escalationTarget() {
       const to = cfg().pm?.escalateTo?.trim();
       if (to) return to;
@@ -371,7 +381,7 @@ export function startBlueprints(host: FactoryHost) {
         {
           workspaceOf: (id) => store.all().find((run) => run.agents?.[id])?.agents?.[id]?.workspaceId ?? null,
           liveAgentsIn,
-          trace: (workspaceId) => statusTrace(host.paseo, workspaceId),
+          trace: traceWorkspace,
           archiveWorkspace: ports.archiveWorkspace!,
           log: (line) => console.log(line),
         },
@@ -379,6 +389,7 @@ export function startBlueprints(host: FactoryHost) {
       ).catch((e) => console.error("blueprints: archive workspace failed", e));
     }),
     host.on("blueprints", "agent.turn_ended", ({ agent, outcome, turnId }) => {
+      activity.touch(agent.id);
       void retitleFactoryWorkspaces(host.paseo, runVars, agent.id);
       void recordSpend(agent.id, turnId).finally(() => {
         engine.observer.retroEnded?.(agent.id);

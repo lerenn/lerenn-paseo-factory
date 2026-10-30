@@ -218,3 +218,38 @@ describe("merge wait and the merge queue", () => {
     expect(t.engine.require(run.id)).toMatchObject({ stage: "wait-merge", status: "waiting" });
   });
 });
+
+describe("decision 9b98fade: a merge wait still in the merge queue at expiry is re-armed", () => {
+  it("re-arms while every PR is queued, and expires once a PR leaves the queue", async () => {
+    const t = setup();
+    const run = await t.startAt("qa");
+    await t.verdict("agent-1", "pending_merge", "needs the merged code");
+    t.facts.pr = { ...pr("open"), queued: true, queuePosition: 2 };
+    t.advance(481 * 60_000);
+    await t.tick();
+    const live = t.engine.require(run.id);
+    expect(live).toMatchObject({ stage: "wait-merge", status: "waiting" });
+    expect(live.stages["wait-merge"].gate?.rearms).toBe(1);
+    expect(live.history.map((h) => h.event)).toContain("merge_wait_rearmed");
+    // still queued but not yet a full timeout since the re-arm: nothing happens
+    t.advance(100 * 60_000);
+    await t.tick();
+    expect(t.engine.require(run.id).stages["wait-merge"].gate?.rearms).toBe(1);
+    // dequeued (auto-merge off, out of the queue): the next expiry follows the expired edge
+    t.facts.pr = { ...pr("open"), queued: false };
+    t.advance(381 * 60_000);
+    await t.tick();
+    await t.tick();
+    expect(t.engine.require(run.id).stage).toBe("ask-blocked");
+  });
+
+  it("auto-merge on a red head is not a queue: the wait expires", async () => {
+    const t = setup();
+    const run = await t.startAt("qa");
+    await t.verdict("agent-1", "pending_merge", "x");
+    t.facts.pr = { ...pr("open"), queued: true, ci: "red" };
+    t.advance(481 * 60_000);
+    await t.tick();
+    expect(t.engine.require(run.id).stage).toBe("ask-blocked");
+  });
+});

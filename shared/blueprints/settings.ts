@@ -26,6 +26,8 @@ export const settingsSchema = z.object({
   pollSeconds: z.number().int().min(10).default(60),
   /** A worker idle this long without a verdict gets nudged. */
   idleGraceSeconds: z.number().int().min(10).default(90),
+  /** A worker that ends a turn without a verdict first gets ONE explicit "call your verdict" reminder that uses no attempt (decision c8125131). */
+  verdictNudge: z.boolean().default(true),
   /** Archive the workers of a finished run. */
   archiveOnFinish: z.boolean().default(false),
   /** When an agent the Factory spawned is archived (by anyone), archive its workspace (pod) too, if it has no other live agent and its worktree is clean. */
@@ -57,8 +59,13 @@ export const settingsSchema = z.object({
       escalateTo: z.string().default(""),
       /** An escalation unanswered this long goes to the human through the Inbox (a blocking inbox_ask). */
       escalateTimeoutMinutes: z.number().min(1).default(30),
+      /**
+       * An exhausted stage pages the on-demand PM at once, also while `runs.notifyMailTo` is set (the mail then only informs and
+       * says which PM took it). Decision c8125131: a mailed judgement waited until its reader was idle.
+       */
+      pageOnExhausted: z.boolean().default(true),
     })
-    .default({ maxPerRun: 4, maxUsd: 0.5, timeoutMinutes: 10, escalateTo: "", escalateTimeoutMinutes: 30 }),
+    .default({ maxPerRun: 4, maxUsd: 0.5, timeoutMinutes: 10, escalateTo: "", escalateTimeoutMinutes: 30, pageOnExhausted: true }),
   /** Gates waiting for a person. */
   gates: z.object({ criteriaReminderMinutes: z.number().min(0).default(30) }).default({ criteriaReminderMinutes: 30 }),
   /** Mails to an agent when a run waits for a person or the PM, fails, is aborted or exhausts a stage. Empty: no mail. */

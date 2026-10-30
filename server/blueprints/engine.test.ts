@@ -85,7 +85,7 @@ head_moved = "check"
 /** No on-demand PM: judgement points go to the human, as the engine did before PMs. */
 const NO_PM = { maxPerRun: 0 };
 
-function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean; pm?: Partial<PmSettings>; escalationTarget?: string } = {}, withReport = false) {
+function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string; pods?: boolean; pm?: Partial<PmSettings>; escalationTarget?: string; verdictNudge?: boolean; worktree?: { ok: boolean; detail: string }[] } = {}, withReport = false) {
   let time = 1_000_000;
   const spawned: { role: string; prompt: string; labels: Record<string, string>; env: Record<string, string>; key: string; workspaceTitle?: string; title: string }[] = [];
   const sent: { to: string; text: string }[] = [];
@@ -147,11 +147,12 @@ function setup(source = flow, over: { flakeRetries?: number; runsMailTo?: string
     async prFacts(url) {
       return pr[url] ?? { url, exists: false, state: "closed", head: "", ci: "none", mergeable: null, draft: false, review: "" };
     },
+    ...(over.worktree ? { worktreeCheck: async () => over.worktree!.shift() ?? { ok: true, detail: "worktree at abc" } } : {}),
     ...(withReport ? { report: async (to: string, r: { subject: string; body: string; kind: string }) => void reports.push({ to, ...r }) } : {}),
     tool: () => null,
     stageKind: () => null,
     blueprint: (name) => (name === "flow" ? parseBlueprint(source) : undefined),
-    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, flakeRetries: over.flakeRetries, runsMailTo: over.runsMailTo, pm: over.pm }),
+    settings: () => ({ defaultCwd: "/w", pmRole: "pm", idleGraceSeconds: 90, archiveOnFinish: false, flakeRetries: over.flakeRetries, runsMailTo: over.runsMailTo, pm: over.pm, verdictNudge: over.verdictNudge }),
     escalationTarget: () => over.escalationTarget ?? "",
   };
   const engine = new Engine(store, ports);
@@ -1906,5 +1907,97 @@ describe("the on-demand run PM (ADR 20261029-factory-on-demand-run-pm)", () => {
     await ctx.settle();
     expect(ctx.engine.require(run.id).pm.calls![`${run.id}:exhausted:think:1`].state).toBe("gone");
     expect([...ctx.items.values()].some((i) => /stuck at stage think/.test(i.question))).toBe(true);
+  });
+});
+
+describe("decision c8125131: one free verdict reminder, the PM paged at once", () => {
+  it("a turn without a verdict first gets an explicit reminder that uses no attempt, then an ordinary nudge that does", async () => {
+    const ctx = setup(flow, { verdictNudge: true, pm: NO_PM });
+    const run = await ctx.start();
+    ctx.states.set("agent-1", "idle");
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    expect(ctx.sent.at(-1)?.text).toContain("CALL YOUR VERDICT NOW");
+    expect(ctx.engine.require(run.id).stages.think.attempts).toBe(1);
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    expect(ctx.sent.at(-1)?.text).toMatch(/without giving a verdict/);
+    expect(ctx.engine.require(run.id).stages.think.attempts).toBe(2);
+    // the new attempt gets its own reminder before the stage is exhausted
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    expect(ctx.sent.at(-1)?.text).toContain("CALL YOUR VERDICT NOW");
+    expect(ctx.engine.require(run.id).stages.think.attempts).toBe(2);
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    expect(ctx.engine.require(run.id).stages.think.status).toBe("exhausted");
+  });
+
+  it("in mail mode an exhausted stage spawns the PM at once and the mail only informs", async () => {
+    const ctx = setup(flow, { runsMailTo: "@assistant", pm: { pageOnExhausted: true } }, true);
+    const run = await ctx.start();
+    ctx.states.set("agent-1", "idle");
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    await ctx.engine.turnEnded("agent-1", { kind: "completed" });
+    await ctx.settle();
+    expect(ctx.spawned.map((x) => x.role)).toEqual(["investigator", "pm"]);
+    expect(ctx.engine.require(run.id).pmAgentId).toBe("agent-2");
+    const mail = ctx.reports.find((r) => r.to === "@assistant" && r.subject.includes("exhausted"));
+    expect(mail?.subject).toContain("PM agent-2 paged");
+  });
+});
+
+describe("decision 12885996: worktree check and already-merged PRs", () => {
+  const checked = flow.replace('prompt = "Investigate {{ticket}}"', 'prompt = "Investigate {{ticket}}"\nworktree_check = 30');
+
+  it("a fresh worker whose worktree does not answer is replaced once, with a new spawn key", async () => {
+    const ctx = setup(checked, { pods: true, worktree: [{ ok: false, detail: "git gave no answer (30 s)" }] });
+    const run = await ctx.start();
+    expect(ctx.archived).toContain("agent-1");
+    expect(ctx.spawned).toHaveLength(2);
+    expect(ctx.spawned[1].key).toMatch(/:w1$/);
+    const live = ctx.engine.require(run.id);
+    expect(live.stages.think).toMatchObject({ status: "running", agentId: "agent-2", attempts: 1 });
+    expect(live.history.map((h) => h.event)).toEqual(expect.arrayContaining(["worktree_check_failed", "worktree_ok"]));
+  });
+
+  it("a second failure pauses the run instead of hanging", async () => {
+    const ctx = setup(checked, { pods: true, worktree: [{ ok: false, detail: "no answer" }, { ok: false, detail: "not a git worktree: fatal" }] });
+    const run = await ctx.start();
+    expect(ctx.spawned.filter((x) => x.role === "investigator")).toHaveLength(2);
+    expect(ctx.engine.require(run.id).status).toBe("paused");
+    expect(ctx.engine.require(run.id).stages.think.summary).toContain("not a git worktree");
+  });
+
+  const merged = flow
+    .replace('[stage.verify]\ndone = ["exists", "open"]\n', "")
+    .replace('pr_urls_from = "build"\nmax_runs = 2', 'pr_urls_from = "build"\nmax_runs = 2\nskip_if_merged = "build"')
+    .replace('pass = "land"\nfail = "repair"', 'pass = "land"\nfail = "repair"\nalready_merged = "done"');
+
+  it("a stage whose PRs are all merged already is skipped to on.already_merged", async () => {
+    const ctx = setup(merged, { pm: NO_PM });
+    const run = await ctx.start(undefined, { at: "build" });
+    ctx.pr[PR] = { ...okPr(PR), state: "merged" };
+    await ctx.verdict("agent-1", "done", { pr_urls: [PR] });
+    const live = ctx.engine.require(run.id);
+    expect(live.status).toBe("done");
+    expect(live.stages.check).toMatchObject({ status: "skipped", verdict: "already_merged" });
+    expect(ctx.spawned.map((x) => x.role)).toEqual(["implementer"]);
+  });
+
+  it("one PR still open: the stage runs", async () => {
+    const ctx = setup(merged, { pm: NO_PM });
+    const run = await ctx.start(undefined, { at: "build" });
+    const other = "https://github.com/acme/web/pull/9";
+    ctx.pr[PR] = { ...okPr(PR), state: "merged" };
+    ctx.pr[other] = okPr(other);
+    await ctx.verdict("agent-1", "done", { pr_urls: [PR, other] });
+    expect(ctx.engine.require(run.id).stages.check.status).toBe("running");
+  });
+
+  it("skip_if_merged needs an on.already_merged edge and a known stage", () => {
+    expect(() => parseBlueprint(merged.replace('\nalready_merged = "done"', ""))).toThrow(/already_merged/);
+    expect(() => parseBlueprint(merged.replace('skip_if_merged = "build"', 'skip_if_merged = "nope"'))).toThrow(/unknown stage nope/);
   });
 });
