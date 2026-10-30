@@ -2186,13 +2186,15 @@ export class Engine {
     let merged = 0;
     let queuedNow = false;
     const places: string[] = [];
+    const unplaced: string[] = [];
     for (const [url, head] of Object.entries(heads)) {
       // A queued PR is read fresh: LEFT_QUEUE_POLLS counts distinct reads, not one cached answer seen twice.
-      const f = await this.ports.prFacts(url, st.gate?.queued ? { maxAgeMs: 0 } : undefined);
+      const f = await this.ports.prFacts(url, st.gate?.queued || st.gate?.inQueue?.[url] ? { maxAgeMs: 0 } : undefined);
       if (f.state === "open" && f.queued) queuedNow = true;
       if (f.state === "open" && f.queuePosition !== undefined) {
         places.push(`${url} #${f.queuePosition}${f.queueEtaSeconds !== undefined ? `, ETA ~${Math.max(1, Math.round(f.queueEtaSeconds / 60))} min` : ""}`);
-      }
+      } else if (f.state !== "merged") unplaced.push(st.gate?.leftNoticed?.[url] === f.head && !f.queued ? `${url} (out of the merge queue)` : url);
+      if (st.gate?.passive && !st.gate.queued && f.state === "open" && f.head === head) this.watchLeftQueue(run, id, url, f);
       if (f.state === "merged") merged += 1;
       else if (st.gate?.queued && f.state === "open" && f.queued !== false) st.gate.notQueuedPolls = 0;
       else if (st.gate?.queued && f.state === "open" && (st.gate.notQueuedPolls = (st.gate.notQueuedPolls ?? 0) + 1) < LEFT_QUEUE_POLLS) {
@@ -2224,9 +2226,10 @@ export class Engine {
         return;
       }
     }
-    // The run's status says where the PRs stand in the queue.
-    if (st.gate && places.length) {
-      const where = `merge queue: ${places.join("; ")}`;
+    // The run's status says where the unmerged PRs stand, never naming one already merged (OPS-378: it kept a merged PR's place).
+    if (st.gate && places.length + unplaced.length) {
+      const rest = unplaced.length ? `merge of ${unplaced.join(", ")}` : "";
+      const where = places.length ? `merge queue: ${places.join("; ")}${rest ? `; ${rest}` : ""}` : rest;
       if (run.waitingFor !== where) {
         run.waitingFor = where;
         this.store.save();
@@ -2275,6 +2278,30 @@ export class Engine {
         await this.go(run, id, def.on.merged, "merged on GitHub");
       });
     }
+  }
+
+  /**
+   * A merge wait (`wait = "merge"`) watches each PR it saw in the merge queue: one that is out of it for LEFT_QUEUE_POLLS reads in a
+   * row while still open (auto-merge off, removed from the queue) is said once per PR head, and the wait goes on (OPS-378: a dequeued
+   * PR sat unnoticed until a person re-queued it). A "merged" answer that found the PR queued has its own path (`gate.queued`).
+   */
+  private watchLeftQueue(run: Run, id: string, url: string, f: PrFacts): void {
+    const gate = run.stages[id].gate!;
+    if (f.queued) {
+      (gate.inQueue ??= {})[url] = true;
+      if (gate.outPolls?.[url]) gate.outPolls[url] = 0;
+      return;
+    }
+    if (f.queued !== false || !gate.inQueue?.[url] || gate.leftNoticed?.[url] === f.head) return;
+    const polls = ((gate.outPolls ??= {})[url] ?? 0) + 1;
+    gate.outPolls[url] = polls;
+    if (polls < LEFT_QUEUE_POLLS) return this.store.save();
+    (gate.leftNoticed ??= {})[url] = f.head;
+    delete gate.inQueue[url];
+    delete gate.outPolls[url];
+    this.log(run, "merge_left_queue", id, `${url} left the merge queue without merging (head ${f.head.slice(0, 12)})`);
+    this.notify(run, { kind: "waiting", stage: id, reason: `${url} left the merge queue without merging (head ${f.head.slice(0, 12)}): re-queue it, or say what to do with the run`, key: `${run.id}:left-queue:${id}:${url}:${f.head}` });
+    this.store.save();
   }
 
   /**
