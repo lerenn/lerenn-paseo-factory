@@ -19,5 +19,7 @@ describe("known extensions", () => {
     const [t] = placeholderTools("lanes", [{ name: "lanes_board", description: "d", inputSchema: { type: "object" }, readOnly: true }]);
     expect(t).toMatchObject({ name: "lanes_board", readOnly: true, extension: true, jsonSchema: { type: "object" } });
     expect(() => t!.run({}, {} as never)).toThrow(/not connected to the Factory right now/);
+    const [w] = placeholderTools("lanes", [{ name: "lanes_unblock", description: "d", inputSchema: { type: "object" }, trustedWrite: true }]);
+    expect(w).toMatchObject({ name: "lanes_unblock", trustedWrite: true, extension: true });
   });
 });

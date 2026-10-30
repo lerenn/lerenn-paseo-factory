@@ -10,6 +10,8 @@ export interface CallContext {
   labelsOf(agentId: string): Promise<Record<string, string>>;
   /** A readable name for any agent (its title, else its id). */
   nameOf(agentId: string): Promise<string>;
+  /** Set for an extension tool's call: whether the caller carries a trusted label (factory setting `trustedLabels`). */
+  trusted?: boolean;
 }
 
 /** A tool as the `factory` MCP server serves it, whichever module or extension owns it. */
@@ -29,6 +31,12 @@ export interface HostTool {
   alsoLabel?: { key: string; value: string };
   /** Changes nothing (advertised as the MCP `readOnlyHint`). An extension's tools that are not read-only are not offered to trusted agents. */
   readOnly?: boolean;
+  /**
+   * An extension tool that changes something and is meant for trusted agents: offered to and callable by agents with a
+   * trusted label only, and hidden from every other agent. Without it (and without `readOnly`) an extension tool goes to
+   * every agent except the trusted ones. Ignored with `readOnly`.
+   */
+  trustedWrite?: boolean;
   /** Served for an extension (set by the host). */
   extension?: boolean;
   run(input: any, ctx: CallContext): Promise<unknown> | unknown;

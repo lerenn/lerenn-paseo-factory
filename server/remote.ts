@@ -8,7 +8,7 @@ export const remoteRegistrationSchema = z.object({
   version: z.string(),
   tab: z.string().optional(),
   callback: z.object({ url: z.string(), token: z.string().min(8) }),
-  tools: z.array(z.object({ name: z.string(), description: z.string().default(""), inputSchema: z.record(z.string(), z.unknown()).default({ type: "object" }), readOnly: z.boolean().optional() })).default([]),
+  tools: z.array(z.object({ name: z.string(), description: z.string().default(""), inputSchema: z.record(z.string(), z.unknown()).default({ type: "object" }), readOnly: z.boolean().optional(), trustedWrite: z.boolean().optional() })).default([]),
   rpc: z.array(z.object({ name: z.string(), readOnly: z.boolean().optional() })).default([]),
   stageKinds: z.array(z.object({ kind: z.string() })).default([]),
   roles: z.array(z.object({ name: z.string(), yaml: z.string() })).default([]),
@@ -87,7 +87,7 @@ async function post(h: { callback: { url: string; token: string }; failures: num
 
 /**
  * Turn a remote registration into a normal one whose tools, rpc and stage kinds forward to the extension:
- *   POST <callback>/tools/<name>   {input, callerId}              -> {result}
+ *   POST <callback>/tools/<name>   {input, callerId, trusted}     -> {result}
  *   POST <callback>/rpc/<name>     {input, callerId}              -> {output}
  *   POST <callback>/stages/<kind>  {runId, stageId, blueprint, params, vars, outcomeToken} -> {outcome} | {pending: true}
  * A pending stage is completed later by the extension with POST <factory>/stages/<outcomeToken>/outcome.
@@ -110,8 +110,9 @@ export function buildRemote(raw: RemoteRegistration, pending: PendingOutcomes): 
         input: z.looseObject({}) as never,
         jsonSchema: t.inputSchema,
         readOnly: t.readOnly,
-        async run(input: unknown, call: { callerId: string }) {
-          return (await post(handle, `/tools/${encodeURIComponent(t.name)}`, { input, callerId: call.callerId }))?.result;
+        trustedWrite: t.trustedWrite,
+        async run(input: unknown, call: { callerId: string; trusted?: boolean }) {
+          return (await post(handle, `/tools/${encodeURIComponent(t.name)}`, { input, callerId: call.callerId, trusted: call.trusted === true }))?.result;
         },
       })),
       rpc: raw.rpc.map((r) => ({

@@ -12,6 +12,7 @@ export interface KnownTool {
   description: string;
   inputSchema: Record<string, unknown>;
   readOnly?: boolean;
+  trustedWrite?: boolean;
 }
 
 interface Entry {
@@ -74,6 +75,7 @@ export function placeholderTools(id: string, tools: KnownTool[]): Omit<HostTool,
     input: z.looseObject({}) as never,
     jsonSchema: t.inputSchema,
     readOnly: t.readOnly,
+    trustedWrite: t.trustedWrite,
     extension: true,
     run() {
       throw new UsageError(`${t.name}: the ${id} extension is not connected to the Factory right now (it registers again within a minute of a restart). Try again in a minute.`);
