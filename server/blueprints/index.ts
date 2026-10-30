@@ -6,7 +6,8 @@ import type { FactoryHost } from "../host";
 import { HttpError } from "../host";
 import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
-import { ghDiff, ghFacts } from "./github";
+import { ghDiff, ghFacts, isGitHubPrUrl } from "./github";
+import { factsSource } from "./facts-provider";
 import { PrFactsCache } from "./pr-facts-cache";
 import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
@@ -135,7 +136,9 @@ export function startBlueprints(host: FactoryHost) {
   /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
   let spawning = 0;
   // One cache for every PR lookup of the engine; GET /blueprints/runs only reads it (ADR "factory tickets view").
-  const prFacts = new PrFactsCache({ fetch: ghFacts });
+  // Reads go to a registered facts provider (paseo-factory-github), else to the Factory's own `gh` reads.
+  const facts = factsSource({ prFacts: ghFacts, prDiff: ghDiff, matches: isGitHubPrUrl });
+  const prFacts = new PrFactsCache({ fetch: facts.prFacts });
   let prunedAt = 0;
   /** Forget the facts of PRs no stored run refers to any more (at most every 10 min). */
   const prunePrFacts = () => {
@@ -251,6 +254,7 @@ export function startBlueprints(host: FactoryHost) {
       if (task && task.state === "active") w.finish(task, "done", result);
     },
     prFacts: (url, opts) => prFacts.get(url, opts),
+    isPrUrl: facts.isPrUrl,
     tool: (name) => host.toolRunner(name),
     stageKind(kind) {
       for (const ext of host.listExtensions()) {
@@ -520,7 +524,7 @@ export function startBlueprints(host: FactoryHost) {
     const run = store.get(runId);
     const urls = new Set<string>();
     for (const st of Object.values(run?.stages ?? {})) if (Array.isArray(st.data.pr_urls)) for (const u of st.data.pr_urls) if (typeof u === "string") urls.add(u);
-    const diff = host.overrides.prDiff ?? ghDiff;
+    const diff = host.overrides.prDiff ?? facts.prDiff;
     const prs = await Promise.all(
       [...urls].map(async (url) => {
         try {

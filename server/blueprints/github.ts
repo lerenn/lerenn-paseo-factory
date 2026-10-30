@@ -3,6 +3,9 @@ import type { PrFacts } from "./engine";
 
 const PR_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)$/;
 
+/** A GitHub pull request URL, the only kind the fallback reads. */
+export const isGitHubPrUrl = (url: string): boolean => PR_URL.test(url);
+
 function run(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout: 60_000, maxBuffer: 4_000_000 }, (error, stdout, stderr) => {
@@ -70,7 +73,10 @@ async function mergeQueue(owner: string, repo: string, number: string): Promise<
   }
 }
 
-/** Facts about a PR from GitHub itself (through the daemon's own `gh` login; the agents' GitHub access is the GitHub MCP server). */
+/**
+ * Facts about a PR from GitHub itself (through the daemon's own `gh` login; the agents' GitHub access is the GitHub MCP server).
+ * The fallback when no facts provider is registered (`facts-provider.ts`); paseo-factory-github registers the same reads.
+ */
 export async function ghFacts(url: string): Promise<PrFacts> {
   const match = PR_URL.exec(url);
   if (!match) throw new Error(`not a GitHub pull request URL: ${url}`);
