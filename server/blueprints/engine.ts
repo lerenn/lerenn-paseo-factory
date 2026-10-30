@@ -1160,7 +1160,7 @@ export class Engine {
         lines.push(`- ${url}: facts unavailable (${(error as Error).message})`);
       }
     }
-    return `## GitHub facts (read by the Factory just now, not reported by a worker)\n${lines.join("\n")}`;
+    return `## PR facts (read by the Factory just now, not reported by a worker)\n${lines.join("\n")}`;
   }
 
   private prUrls(run: Run, from: string | undefined): string[] {
@@ -1619,7 +1619,7 @@ export class Engine {
   /**
    * A worker saves the result of one step of its stage (for a QA, one criterion) in the run store. A replacement worker of the
    * same entry (after a pod eviction, an OOMKill, a lost session) gets the saved results in its prompt and only does what is
-   * missing (ANY-2748 retro, decision a6decaa8). A record with the same key replaces the earlier one.
+   * missing (decision a6decaa8). A record with the same key replaces the earlier one.
    */
   workerProgress(callerId: string, input: { key: string; status: string; note?: string }): { stage: string; saved: number } {
     const run = this.store.active().find((r) => r.stage && r.stages[r.stage]?.agentId === callerId && (r.stages[r.stage].status === "running" || r.stages[r.stage].status === "entering"));
@@ -2147,7 +2147,7 @@ export class Engine {
         } else if (st.status === "waiting" && st.gate?.itemId) this.remindGate(run, id);
         else if (st.status === "running" && run.status === "running" && (this.stageDef(run, id).kind ?? "agent") === "agent" && st.agentId) {
           // A worker that said it waits on a person or an outside system (a review) watches it with events: no nudges, no attempts,
-          // until the ceiling; then a person is asked (decision f1cd49be: babysit was nudged every minute while Codex had not answered).
+          // until the ceiling; then a person is asked (decision f1cd49be: babysit was nudged every minute while a review bot had not answered).
           if (st.workerWaitSince) {
             if (now - st.workerWaitSince < WORKER_WAIT_CEILING_MS) continue;
             await this.exclusive(run.id, async () => {

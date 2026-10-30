@@ -1,10 +1,17 @@
 import type { Run } from "./blueprints/store";
 
-export type ActivityType = "run" | "stage" | "gate" | "escalation" | "lease" | "merge" | "deploy" | "inbox" | "extension";
+/** The Factory's own kinds of events. An extension event carries its own type (see `extensionType`). */
+export type BuiltinActivityType = "run" | "stage" | "gate" | "escalation" | "lease" | "merge" | "inbox" | "extension";
+export const BUILTIN_ACTIVITY_TYPES: readonly BuiltinActivityType[] = ["run", "stage", "gate", "escalation", "lease", "merge", "inbox", "extension"];
+export type ActivityType = BuiltinActivityType | (string & {});
+export type ActivityTone = "success" | "warning" | "danger";
+const TONES: readonly string[] = ["success", "warning", "danger"];
 
 export interface ActivityItem {
   at: number;
   type: ActivityType;
+  /** Colour of the type badge; null: muted. */
+  tone: ActivityTone | null;
   title: string;
   detail: string | null;
   blueprint: string | null;
@@ -16,12 +23,21 @@ export interface ActivityItem {
 export interface ExtensionEvent {
   at: number;
   extension: string;
-  /** "merge", "deploy" or any label; unknown types show as "extension". */
+  /** The extension's own label (for example "deploy"): lowercase letters, digits, - and _, at most 24; anything else shows as "extension". */
   type: string;
+  /** Colour of the type badge ("success", "warning", "danger"); absent: muted ("merge" defaults to success). */
+  tone?: string | null;
   title: string;
   detail?: string | null;
   link?: { tab: string; id: string } | null;
 }
+
+/** The type an extension event shows under: its own label, unless it is malformed or one of the Factory's own kinds other than merge. */
+export function extensionType(type: string): ActivityType {
+  return /^[a-z][a-z0-9_-]{0,23}$/.test(type) && (type === "merge" || !BUILTIN_ACTIVITY_TYPES.includes(type as BuiltinActivityType)) ? type : "extension";
+}
+
+const builtinTone = (type: ActivityType): ActivityTone | null => (type === "escalation" ? "warning" : type === "merge" ? "success" : null);
 
 const RUN_EVENTS: Record<string, { type: ActivityType; label: string }> = {
   started: { type: "run", label: "started" },
@@ -58,6 +74,7 @@ export function buildActivity(input: {
       out.push({
         at: h.at,
         type: known.type,
+        tone: builtinTone(known.type),
         title: `${run.blueprint} ${label}: ${known.label}${h.stage && h.event !== "started" ? ` · ${h.stage}` : ""}`,
         detail: h.detail,
         blueprint: run.blueprint,
@@ -69,16 +86,17 @@ export function buildActivity(input: {
   const askedLabel: Record<string, string> = { asked: "asked", answered: "answered", expired: "expired", withdrawn: "withdrawn" };
   for (const e of input.inbox) {
     if (!askedLabel[e.type]) continue;
-    out.push({ at: e.at, type: "inbox", title: `Inbox item ${e.itemId} ${askedLabel[e.type]}`, detail: e.detail ? `${e.actor}: ${e.detail}` : e.actor, blueprint: null, role: null, link: { tab: "inbox", id: e.itemId } });
+    out.push({ at: e.at, type: "inbox", tone: null, title: `Inbox item ${e.itemId} ${askedLabel[e.type]}`, detail: e.detail ? `${e.actor}: ${e.detail}` : e.actor, blueprint: null, role: null, link: { tab: "inbox", id: e.itemId } });
   }
   const leaseLabel: Record<string, string> = { acquired: "taken", granted: "granted from the queue", taken_over: "taken over", released: "released", force_released: "force-released", expired: "expired" };
   for (const e of input.leases) {
     if (!leaseLabel[e.type]) continue;
-    out.push({ at: e.at, type: "lease", title: `Lease ${e.lease} ${leaseLabel[e.type]}`, detail: e.detail ? `${e.actor}: ${e.detail}` : e.actor, blueprint: null, role: null, link: { tab: "leases", id: e.lease } });
+    out.push({ at: e.at, type: "lease", tone: null, title: `Lease ${e.lease} ${leaseLabel[e.type]}`, detail: e.detail ? `${e.actor}: ${e.detail}` : e.actor, blueprint: null, role: null, link: { tab: "leases", id: e.lease } });
   }
   for (const e of input.extensions) {
-    const type: ActivityType = e.type === "merge" || e.type === "deploy" ? e.type : "extension";
-    out.push({ at: e.at, type, title: e.title, detail: e.detail ?? null, blueprint: null, role: null, link: e.link ?? { tab: `ext:${e.extension}`, id: "" } });
+    const type = extensionType(e.type);
+    const tone = e.tone && TONES.includes(e.tone) ? (e.tone as ActivityTone) : builtinTone(type);
+    out.push({ at: e.at, type, tone, title: e.title, detail: e.detail ?? null, blueprint: null, role: null, link: e.link ?? { tab: `ext:${e.extension}`, id: "" } });
   }
   return out.sort((a, b) => b.at - a.at).slice(0, input.limit ?? 300);
 }

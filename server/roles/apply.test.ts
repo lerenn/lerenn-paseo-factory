@@ -34,14 +34,14 @@ describe("applyRole", () => {
   });
 
   it("sets other plugins' defaults as the env they read, below role env and creation env", () => {
-    const r = role({ plugins: { kubeTemplate: "dev", warder: "off", ticket: "ANY-1" }, env: { PASEO_KUBE_TEMPLATE: "from-env" } });
+    const r = role({ plugins: { kubeTemplate: "dev", warder: "off", ticket: "ABC-1" }, env: { PASEO_KUBE_TEMPLATE: "from-env" } });
     expect(applyRole(base, r).env).toMatchObject({
       PASEO_KUBE_TEMPLATE: "from-env",
       PASEO_WARDER: "off",
-      PASEO_AGENT_TICKET: "ANY-1",
+      PASEO_AGENT_TICKET: "ABC-1",
     });
-    const explicit = applyRole({ ...base, env: { ...base.env, PASEO_AGENT_TICKET: "ANY-9" } }, r);
-    expect(explicit.env?.PASEO_AGENT_TICKET).toBe("ANY-9");
+    const explicit = applyRole({ ...base, env: { ...base.env, PASEO_AGENT_TICKET: "ABC-9" } }, r);
+    expect(explicit.env?.PASEO_AGENT_TICKET).toBe("ABC-9");
     expect(applyRole(base, role({})).env).toEqual({ PASEO_AGENT_ROLE: "r" });
   });
 

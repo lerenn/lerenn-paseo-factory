@@ -44,19 +44,19 @@ describe("extension tab registry", () => {
   it("keeps a tab registered before a Factory reload (installRegistry run again from a fresh module)", async () => {
     const first = await freshRegistry();
     first.installRegistry();
-    const remove = g[KEY].registerTab("release-trains", Tab);
+    const remove = g[KEY].registerTab("shipit", Tab);
 
     const second = await freshRegistry();
     expect(second).not.toBe(first);
     second.installRegistry();
-    expect(second.extensionTabView("release-trains")).toEqual({ kind: "tab", Component: Tab });
+    expect(second.extensionTabView("shipit")).toEqual({ kind: "tab", Component: Tab });
 
     // The unregister handed out before the reload still works, and notifies the new module's listeners.
     const seen = vi.fn();
     const stop = second.subscribeTabs(seen);
     remove();
     expect(seen).toHaveBeenCalled();
-    expect(second.extensionTabView("release-trains")).toEqual({ kind: "info" });
+    expect(second.extensionTabView("shipit")).toEqual({ kind: "info" });
     stop();
   });
 
@@ -74,10 +74,10 @@ describe("extension tab registry", () => {
   it("shows the info card only when no tab is registered for the extension", async () => {
     const r = await freshRegistry();
     r.installRegistry();
-    expect(r.extensionTabView("release-trains")).toEqual({ kind: "info" });
+    expect(r.extensionTabView("shipit")).toEqual({ kind: "info" });
     g[KEY].registerTab("other", Tab);
-    expect(r.extensionTabView("release-trains")).toEqual({ kind: "info" });
-    g[KEY].registerTab("release-trains", Tab);
-    expect(r.extensionTabView("release-trains").kind).toBe("tab");
+    expect(r.extensionTabView("shipit")).toEqual({ kind: "info" });
+    g[KEY].registerTab("shipit", Tab);
+    expect(r.extensionTabView("shipit").kind).toBe("tab");
   });
 });

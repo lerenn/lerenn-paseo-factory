@@ -26,9 +26,9 @@ describe("nextDigest", () => {
 
 describe("restartAllowed", () => {
   it("allows one restart per extension per hour", () => {
-    const restarts = [{ extension: "release-trains", at: 0 }];
-    expect(restartAllowed(restarts, "release-trains", 59 * MIN)).toEqual({ ok: false, minutesAgo: 59 });
-    expect(restartAllowed(restarts, "release-trains", 61 * MIN)).toEqual({ ok: true });
+    const restarts = [{ extension: "shipit", at: 0 }];
+    expect(restartAllowed(restarts, "shipit", 59 * MIN)).toEqual({ ok: false, minutesAgo: 59 });
+    expect(restartAllowed(restarts, "shipit", 61 * MIN)).toEqual({ ok: true });
     expect(restartAllowed(restarts, "tickets-dispatcher", 5 * MIN)).toEqual({ ok: true });
   });
 });

@@ -65,7 +65,7 @@ describe("the factory MCP server", () => {
     const keep = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/leases/keep`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
     expect((await keep({ agentId: "a1", ttlSeconds: 1800 }, "wrong")).status).toBe(401);
     expect((await keep({ ttlSeconds: 1800 })).status).toBe(400);
-    const res = await keep({ agentId: "a1", ttlSeconds: 1800, by: "release-trains" });
+    const res = await keep({ agentId: "a1", ttlSeconds: 1800, by: "shipit" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ kept: ["pr:x#1@abc"] });
     const list = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lease_list", arguments: {} } });
@@ -184,15 +184,15 @@ describe("extensions", () => {
   it("add tools to the factory server and a tab, with no sidebar row of their own", async () => {
     const { create, open, rpc, ctx } = boot();
     const remove = register({
-      id: "release-trains",
+      id: "shipit",
       version: "1.0.0",
-      tab: "Release Trains",
+      tab: "Ship It",
       tools: [{ name: "train_status", description: "Status", input: z.object({}), run: () => ({ ok: true }) }],
     });
     const out = await create(request());
     await open({ agentId: "a1", env: out.env });
     const overview = await rpc["factory.overview"]({}, ctx);
-    expect(overview.extensions).toEqual([{ id: "release-trains", version: "1.0.0", tab: "Release Trains", tools: ["train_status"], stageKinds: [], health: "ok" }]);
+    expect(overview.extensions).toEqual([{ id: "shipit", version: "1.0.0", tab: "Ship It", tools: ["train_status"], stageKinds: [], health: "ok" }]);
     const listed = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(listed.body.result.tools.map((t: any) => t.name)).toContain("train_status");
     const called = await mcp(overview.endpoint.url, out.env.PASEO_FACTORY_CAPABILITY, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "train_status", arguments: {} } });
@@ -292,9 +292,9 @@ describe("remote extensions (another plugin's process)", () => {
     });
     const { register, rpc, ctx, create, open, endpoint, token } = await factory();
     const body = {
-      id: "release-trains",
+      id: "shipit",
       version: "1",
-      tab: "Release Trains",
+      tab: "Ship It",
       callback: { url: ext.url, token: "ext-secret-token" },
       tools: [{ name: "train_status", description: "Status", inputSchema: { type: "object", properties: { lane: { type: "string" } } } }],
       rpc: [{ name: "board" }],
@@ -313,8 +313,8 @@ describe("remote extensions (another plugin's process)", () => {
     const called = await mcp(endpoint.url, cap, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "train_status", arguments: { lane: "dev" } } });
     expect(JSON.parse(called.body.result.content[0].text)).toEqual({ echoed: { lane: "dev" }, by: "a1" });
     expect(ext.calls[0].auth).toBe("Bearer ext-secret-token");
-    expect(await rpc["factory.extension.call"]({ id: "release-trains", name: "board", input: { n: 3 } }, ctx)).toEqual({ ok: true, output: { lanes: 3 }, error: null });
-    expect((await rpc["factory.overview"]({}, ctx)).extensions.map((e: any) => e.id)).toEqual(["release-trains"]);
+    expect(await rpc["factory.extension.call"]({ id: "shipit", name: "board", input: { n: 3 } }, ctx)).toEqual({ ok: true, output: { lanes: 3 }, error: null });
+    expect((await rpc["factory.overview"]({}, ctx)).extensions.map((e: any) => e.id)).toEqual(["shipit"]);
     void token;
   });
 
@@ -324,16 +324,16 @@ describe("remote extensions (another plugin's process)", () => {
       "/rpc/board": () => ({ output: { lanes: 1 } }),
     });
     const f = await factory();
-    expect((await f.register({ id: "releaser", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, rpc: [{ name: "ticket-facts", readOnly: true }, { name: "board" }] })).status).toBe(200);
+    expect((await f.register({ id: "shipit", version: "1", callback: { url: ext.url, token: "ext-secret-token" }, rpc: [{ name: "ticket-facts", readOnly: true }, { name: "board" }] })).status).toBe(200);
     const call = (p: string, body: object, auth = f.token) => fetch(`${f.endpoint.url}${p}`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
-    const ok = await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: ["ANY-1"] } });
+    const ok = await call("/extensions/shipit/rpc/ticket-facts", { input: { keys: ["ABC-1"] } });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ output: { facts: { "ANY-1": [{ label: "lane", value: "dev" }] }, by: "loopback" } });
-    expect((await call("/extensions/releaser/rpc/ticket-facts", { input: { keys: [] } }, "wrong")).status).toBe(401);
-    expect((await call("/extensions/releaser/rpc/board", { input: {} })).status).toBe(403);
-    expect((await call("/extensions/releaser/rpc/nope", { input: {} })).status).toBe(404);
+    expect(await ok.json()).toEqual({ output: { facts: { "ABC-1": [{ label: "lane", value: "dev" }] }, by: "loopback" } });
+    expect((await call("/extensions/shipit/rpc/ticket-facts", { input: { keys: [] } }, "wrong")).status).toBe(401);
+    expect((await call("/extensions/shipit/rpc/board", { input: {} })).status).toBe(403);
+    expect((await call("/extensions/shipit/rpc/nope", { input: {} })).status).toBe(404);
     expect((await call("/extensions/missing/rpc/ticket-facts", { input: {} })).status).toBe(404);
-    expect((await fetch(`${f.endpoint.url}/extensions/releaser/rpc/ticket-facts`, { headers: { authorization: `Bearer ${f.token}` } })).status).toBe(405);
+    expect((await fetch(`${f.endpoint.url}/extensions/shipit/rpc/ticket-facts`, { headers: { authorization: `Bearer ${f.token}` } })).status).toBe(405);
     expect(ext.calls.filter((c) => c.path === "/rpc/board")).toEqual([]); // refused before the extension is reached
   });
 
@@ -428,11 +428,11 @@ describe("activity, run diffs and transcripts", () => {
     const { endpoint } = await b.rpc["factory.overview"]({}, b.ctx);
     const { token } = JSON.parse(readFileSync(`${b.dir}/endpoint.json`, "utf8"));
     const post = (body: object, auth = token) => fetch(`${endpoint.url}/extensions/event`, { method: "POST", headers: { authorization: `Bearer ${auth}` }, body: JSON.stringify(body) });
-    expect((await post({ id: "release-trains", title: "x" }, "bad")).status).toBe(401);
-    expect((await post({ id: "release-trains" })).status).toBe(400);
-    expect((await post({ id: "release-trains", type: "deploy", title: "prd deploy of backend v1.2.3" })).status).toBe(200);
+    expect((await post({ id: "shipit", title: "x" }, "bad")).status).toBe(401);
+    expect((await post({ id: "shipit" })).status).toBe(400);
+    expect((await post({ id: "shipit", type: "deploy", tone: "success", title: "prd deploy of backend v1.2.3" })).status).toBe(200);
     const feed = await b.rpc["factory.activity"]({ limit: 50 }, b.ctx);
-    expect(feed.items[0]).toMatchObject({ type: "deploy", title: "prd deploy of backend v1.2.3", link: { tab: "ext:release-trains" } });
+    expect(feed.items[0]).toMatchObject({ type: "deploy", tone: "success", title: "prd deploy of backend v1.2.3", link: { tab: "ext:shipit" } });
   });
 
   it("summarises a run's PRs from GitHub, per PR, with errors kept per PR", async () => {
@@ -701,7 +701,7 @@ describe("the Supervisor", () => {
       expect(status).toMatchObject({ agent_id: "sup" });
 
       // ask -> the Supervisor gets the caller's NAME -> reply -> answer comes back to the asker
-      const asking = call(coord, "supervisor_ask", { question: "Is release-trains healthy?" });
+      const asking = call(coord, "supervisor_ask", { question: "Is shipit healthy?" });
       const relayed = await until(async () => sent.find((m) => /Supervisor request/.test(m.text)), (m) => !!m);
       expect(relayed!.text).toMatch(/from "Coordinator" \(coord\)/);
       const id = /request (sq-\w+)/.exec(relayed!.text)![1];

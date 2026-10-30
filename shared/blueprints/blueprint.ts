@@ -52,7 +52,7 @@ export const agentStageSchema = z.strictObject({
    * For the stages that own the code one after the other (investigate, implement, babysit); QA stays "new" for an independent checkout.
    */
   workspace: z.enum(["new", "run"]).default("new"),
-  /** "pr": give the worker the GitHub facts of the PRs in `pr_urls_from`, and check its verdicts against them. */
+  /** "pr": give the worker the facts of the PRs (state, head, CI, mergeability, review) in `pr_urls_from`, and check its verdicts against them. */
   facts: z.enum(["pr"]).optional(),
   /** The stage whose `data.pr_urls` is the PR set. */
   pr_urls_from: stageId.optional(),

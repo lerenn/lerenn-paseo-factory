@@ -303,11 +303,11 @@ describe("a worker that waits", () => {
     const run = t.engine.start({ blueprint: "flow", vars: {}, requestedBy: "x" });
     await t.settle();
     expect(() => t.engine.workerWaiting("nobody", "waiting for a review")).toThrow(/not the worker/);
-    t.engine.workerWaiting("agent-1", "waiting for sjourdan's review on o/r#1");
+    t.engine.workerWaiting("agent-1", "waiting for a reviewer's review on o/r#1");
     let r = t.engine.require(run.id);
-    expect(r.waitingFor).toBe("waiting for sjourdan's review on o/r#1");
+    expect(r.waitingFor).toBe("waiting for a reviewer's review on o/r#1");
     expect(r.history.filter((h) => h.event === "worker_waiting")).toHaveLength(1);
-    t.engine.workerWaiting("agent-1", "waiting for sjourdan's review on o/r#1"); // same reason: logged once
+    t.engine.workerWaiting("agent-1", "waiting for a reviewer's review on o/r#1"); // same reason: logged once
     expect(t.engine.require(run.id).history.filter((h) => h.event === "worker_waiting")).toHaveLength(1);
     await t.verdict("agent-1", "done");
     r = t.engine.require(run.id);

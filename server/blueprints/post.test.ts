@@ -117,7 +117,7 @@ function setup(post: PostOverrides = {}) {
     for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
   };
   const start = async () => {
-    const run = engine.start({ blueprint: "flow", vars: { ticket: "ANY-1", ticket_confirmed: "true" }, requestedBy: "pm", ownerAgentId: "pm-agent" });
+    const run = engine.start({ blueprint: "flow", vars: { ticket: "ABC-1", ticket_confirmed: "true" }, requestedBy: "pm", ownerAgentId: "pm-agent" });
     await settle();
     return run;
   };
@@ -240,7 +240,7 @@ describe("ask-blocked names the stage that blocked", () => {
     await t.start();
     await t.verdict("agent-1", "ok", "INVESTIGATION SUMMARY");
     await t.verdict("agent-2", "blocked", "needs a database grant");
-    expect(t.questions.at(-1)).toBe("ANY-1 is blocked at build (blocked): needs a database grant");
+    expect(t.questions.at(-1)).toBe("ABC-1 is blocked at build (blocked): needs a database grant");
     expect(t.questions.at(-1)).not.toContain("INVESTIGATION");
   });
 });

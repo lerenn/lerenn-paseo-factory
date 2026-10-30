@@ -104,8 +104,8 @@ describe("labels", () => {
 
   it("shows owner/repo@ref on GitHub and host/owner/repo@ref elsewhere", () => {
     const label = (url: string, ref = "main") => sourceLabel({ url, ref });
-    expect(label("git@github.com:anyshift-io/lfradin-lab.git")).toBe("anyshift-io/lfradin-lab@main");
-    expect(label("ssh://git@github.com/anyshift-io/lfradin-lab.git")).toBe("anyshift-io/lfradin-lab@main");
+    expect(label("git@github.com:acme/lab.git")).toBe("acme/lab@main");
+    expect(label("ssh://git@github.com/acme/lab.git")).toBe("acme/lab@main");
     expect(label("ssh://git@github.com:22/a/b")).toBe("a/b@main");
     expect(label("https://github.com/lerenn/paseo-agents-roles.git")).toBe("lerenn/paseo-agents-roles@main");
     expect(label("https://github.com/lerenn/paseo-agents-roles")).toBe("lerenn/paseo-agents-roles@main");

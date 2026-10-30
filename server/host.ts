@@ -607,12 +607,12 @@ export class FactoryHost {
       }
       if (pathname === "/extensions/event") {
         if (typeof input?.id !== "string" || typeof input?.title !== "string") return { status: 400, body: { error: "id and title are required" } };
-        this.extensionEvents.push({ at: Date.now(), extension: input.id, type: String(input.type ?? "extension"), title: input.title.slice(0, 300), detail: typeof input.detail === "string" ? input.detail.slice(0, 1000) : null, link: input.link ?? null });
+        this.extensionEvents.push({ at: Date.now(), extension: input.id, type: String(input.type ?? "extension"), tone: typeof input.tone === "string" ? input.tone : null, title: input.title.slice(0, 300), detail: typeof input.detail === "string" ? input.detail.slice(0, 1000) : null, link: input.link ?? null });
         if (this.extensionEvents.length > 500) this.extensionEvents.splice(0, this.extensionEvents.length - 500);
         return { status: 200, body: { ok: true } };
       }
       if (pathname === "/extensions/leases/keep") {
-        // An extension that runs agents (Release Trains' job runner) keeps a live agent's leases while it waits.
+        // An extension that runs agents (a release extension's job runner) keeps a live agent's leases while it waits.
         if (!this.engines.leases || !this.enabled("leases")) return { status: 404, body: { error: "leases are off" } };
         const ttl = Number(input?.ttlSeconds);
         if (typeof input?.agentId !== "string" || !input.agentId || !Number.isFinite(ttl)) return { status: 400, body: { error: "agentId and ttlSeconds are required" } };

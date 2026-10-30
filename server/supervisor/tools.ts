@@ -69,7 +69,7 @@ export function supervisorTools(supervisor: Supervisor): Omit<HostTool, "owner">
       name: "extension_restart",
       description:
         "Supervisor only: ask a crashed or unreachable extension to restart itself (the extension must support it). At most once per hour per extension; a second request within the hour is refused, so ask the user through inbox_ask.",
-      input: z.object({ id: z.string().describe("Extension id, for example release-trains.") }),
+      input: z.object({ id: z.string().describe("Extension id, as shown in the Overview tab.") }),
       requiresLabel: supervisorOnly,
       async run({ id }) {
         return { result: await supervisor.restartExtension(id) };

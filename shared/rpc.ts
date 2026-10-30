@@ -22,7 +22,9 @@ export const extensionCallRpc = defineRpc({
 
 export const activityItemSchema = z.object({
   at: z.number(),
-  type: z.enum(["run", "stage", "gate", "escalation", "lease", "merge", "deploy", "inbox", "extension"]),
+  /** A Factory kind (run, stage, gate, escalation, lease, merge, inbox, extension) or an extension's own label. */
+  type: z.string(),
+  tone: z.enum(["success", "warning", "danger"]).nullable().default(null),
   title: z.string(),
   detail: z.string().nullable(),
   blueprint: z.string().nullable(),
