@@ -12,8 +12,10 @@ import { loadCatalog, type Catalog } from "./loader";
 import { aggregate, SpendStore } from "./spend";
 import { resolveAgentConfig } from "../spawn-config";
 import { spawnAgent } from "../spawn-agent";
+import { roleRuntimeOptions } from "../../shared/roles/role";
 import { ActivityClock, freshTrace, statusTrace, worktreeCheck } from "./worktree";
-import { suspendPod, wakePod } from "./pod-control";
+import { suspendWorkspace, wakeWorkspace } from "./workspace-control";
+import { setFlakePatterns } from "./flake";
 import { archiveWorkspaceWithAgent } from "./archive-workspace";
 import { listAgents } from "../list-agents";
 import { RunStore } from "./store";
@@ -72,6 +74,7 @@ export function startBlueprints(host: FactoryHost) {
   let current: BlueprintsSettings | null = null;
   const apply = (state: Awaited<ReturnType<typeof settings.read>>) => {
     current = state.status === "ready" ? state.values : null;
+    setFlakePatterns(current?.flakes);
   };
   const ready = settings.read().then(apply);
   const unsubscribeSettings = settings.subscribe(apply);
@@ -156,7 +159,7 @@ export function startBlueprints(host: FactoryHost) {
         prompt: o.prompt,
         labels: o.labels,
         env: o.env,
-        profile: role?.runtimeProfile,
+        runtimeOptions: roleRuntimeOptions(role),
         // Recorded before the agent exists, so the orphan sweep finds the workspace even if the agent never comes.
         onWorkspaceCreated: (id: string) => store.noteWorkspace(id, { at: Date.now(), run: o.labels["paseo.factory.run"] ?? null, title: o.workspaceTitle ?? o.title }),
       };
@@ -199,8 +202,8 @@ export function startBlueprints(host: FactoryHost) {
     trace: traceWorkspace,
     worktreeCheck: (workspaceId, timeoutMs, bootMs) => worktreeCheck(host.paseo, workspaceId, timeoutMs, bootMs),
     liveAgentsIn,
-    suspendWorkspace: suspendPod,
-    wakeWorkspace: wakePod,
+    suspendWorkspace: (workspaceId, force) => suspendWorkspace(host.runtime, workspaceId, force),
+    wakeWorkspace: (workspaceId) => wakeWorkspace(host.runtime, workspaceId),
     spend(runId) {
       const total = aggregate(spend.all().filter((r) => r.run === runId)).total;
       return total.turns ? { costUsd: total.costUsd, turns: total.turns } : null;

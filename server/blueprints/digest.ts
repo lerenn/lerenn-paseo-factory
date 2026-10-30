@@ -1,11 +1,9 @@
 import { buildTimeline } from "../../shared/blueprints/timeline";
-import { flakeReason } from "./flake";
+import { flakeReason, retroFlake } from "./flake";
 import type { HistoryEvent, Run } from "./store";
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-/** Infrastructure flakes worth naming in a retro: OOM kills, pods that never started, scheduling and image errors. */
-export const FLAKE = /exit(?:ed)?(?: code)?[ :=]*137|OOMKilled|\bSIGKILL\b|pod[^.\n]{0,60}(?:time(?:d)? ?out|did not start|failed to start)|(?:time(?:d)? ?out|start timeout)[^.\n]{0,40}pod|ImagePullBackOff|ErrImagePull|FailedScheduling|worker gone after restart/i;
 
 const ENDS = new Set(["verdict", "transition", "exhausted", "skipped", "dispatch_failed"]);
 
@@ -38,7 +36,8 @@ export function spans(run: Run, now: number): Span[] {
 export function flakesOf(run: Run): string[] {
   const out: string[] = [];
   const seen = (text: string | null | undefined, where: string) => {
-    if (text && FLAKE.test(text)) out.push(`${where}: ${clip(FLAKE.exec(text)![0], 60)}`);
+    const flake = retroFlake(text);
+    if (flake) out.push(`${where}: ${clip(flake, 60)}`);
   };
   for (const h of run.history) {
     if (h.event === "flake_retry") out.push(`${h.stage}: flake retry (${clip(h.detail ?? "", 100)})`);

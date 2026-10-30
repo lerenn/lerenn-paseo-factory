@@ -3,7 +3,7 @@ import { ExternalLink, SettingsInput, SettingsSelect } from "@getpaseo/plugin/cl
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { ROLE_ENV } from "../../shared/roles/role";
+import { ROLE_ENV, rolePluginEnv } from "../../shared/roles/role";
 import { SubTabs } from "../subtabs";
 import { TranscriptPeek } from "../transcript-peek";
 import { LaunchFields } from "./launch-fields";
@@ -272,14 +272,7 @@ function launchSummary(role: NonNullable<RoleEntry["role"]>): string {
 
 /** The plugin defaults a role sets, by the environment variable they become. */
 function pluginDefaults(role: NonNullable<RoleEntry["role"]>): Record<string, string> {
-  const p = role.plugins;
-  const warder = typeof p?.warder === "string" ? { mode: p.warder, interval: undefined } : p?.warder;
-  return {
-    ...(p?.kubeTemplate ? { PASEO_KUBE_TEMPLATE: p.kubeTemplate } : {}),
-    ...(warder?.mode ? { PASEO_WARDER: warder.mode } : {}),
-    ...(warder?.interval ? { PASEO_WARDER_INTERVAL: warder.interval } : {}),
-    ...(p?.ticket ? { PASEO_AGENT_TICKET: p.ticket } : {}),
-  };
+  return rolePluginEnv(role);
 }
 
 function gitStatusText(status?: GitStatus): string {

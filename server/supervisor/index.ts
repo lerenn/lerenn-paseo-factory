@@ -9,6 +9,8 @@ import { supervisorSettings, type SupervisorSettings } from "../../shared/superv
 import { settingsSchema } from "../../shared/supervisor/settings";
 import { workspaceTitle } from "../workspace-title";
 import { spawnAgent } from "../spawn-agent";
+import { roleRuntimeOptions } from "../../shared/roles/role";
+import { LOCAL_RUNTIME } from "../../shared/settings";
 
 export function startSupervisor(host: FactoryHost) {
   const { server } = host;
@@ -36,7 +38,7 @@ export function startSupervisor(host: FactoryHost) {
         idempotencyKey,
         config: resolveAgentConfig(role, current.defaultProvider) as never,
         cwd,
-        profile: role?.runtimeProfile,
+        runtimeOptions: roleRuntimeOptions(role),
         title: "Factory Supervisor",
         workspaceTitle: workspaceTitle(current.role),
         prompt,
@@ -59,9 +61,9 @@ export function startSupervisor(host: FactoryHost) {
       }
     },
     async archive(agentId, workspaceId) {
-      // The pod of the agent is its workspace: archive both, or the pod leaks. Locally the workspace is the user's checkout, left alone.
+      // On a runtime plugin the agent's workspace (a pod) is its own: archive both, or it leaks. Locally the workspace is the user's checkout, left alone.
       let workspace = workspaceId;
-      if (!workspace && host.runtime === "kubernetes") {
+      if (!workspace && host.runtime !== LOCAL_RUNTIME) {
         const found = await host.paseo.agents.ref(agentId).refresh().catch(() => null);
         workspace = (found?.agent as { workspaceId?: string | null } | undefined)?.workspaceId ?? null;
       }

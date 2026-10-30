@@ -45,6 +45,13 @@ describe("applyRole", () => {
     expect(applyRole(base, role({})).env).toEqual({ PASEO_AGENT_ROLE: "r" });
   });
 
+  it("sets plugins.env as other plugins' defaults, over the deprecated kubeTemplate and below role env", () => {
+    expect(applyRole(base, role({ plugins: { env: { PASEO_KUBE_TEMPLATE: "dev", OTHER: "1" } } })).env).toMatchObject({ PASEO_KUBE_TEMPLATE: "dev", OTHER: "1" });
+    expect(applyRole(base, role({ plugins: { kubeTemplate: "old", env: { PASEO_KUBE_TEMPLATE: "new" } } })).env?.PASEO_KUBE_TEMPLATE).toBe("new");
+    expect(applyRole(base, role({ plugins: { kubeTemplate: "old" } })).env?.PASEO_KUBE_TEMPLATE).toBe("old");
+    expect(applyRole(base, role({ plugins: { env: { OTHER: "plugin" } }, env: { OTHER: "role" } })).env?.OTHER).toBe("role");
+  });
+
   it("maps plugins.warder to PASEO_WARDER and PASEO_WARDER_INTERVAL", () => {
     const env = (warder: unknown) => applyRole(base, role({ plugins: { warder } })).env;
     expect(env("off")).toMatchObject({ PASEO_WARDER: "off" });

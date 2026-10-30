@@ -27,10 +27,19 @@ describe("spawnAgent", () => {
     expect(agentCreate).not.toHaveBeenCalled();
   });
 
-  it("kubernetes: passes the role's runtime profile as the runtime option", async () => {
+  it("kubernetes: passes the role's runtime options, under the Factory's own", async () => {
     const { paseo, wsCreate } = fakePaseo();
-    await spawnAgent(paseo as never, "kubernetes", { ...input, profile: "small" });
+    await spawnAgent(paseo as never, "kubernetes", { ...input, runtimeOptions: { profile: "small", cwd: "/elsewhere" } });
     expect((wsCreate.mock.calls[0][0] as any).runtime.options).toMatchObject({ cwd: "/repo", profile: "small" });
+  });
+
+  it("any other runtime id: creates the workspace on that runtime plugin", async () => {
+    const { paseo, wsCreate } = fakePaseo();
+    const out = await spawnAgent(paseo as never, "nomad", { ...input, runtimeOptions: { datacenter: "eu" } });
+    expect(out).toEqual({ agentId: "ag-pod", workspaceId: "ws1" });
+    const req = wsCreate.mock.calls[0][0] as any;
+    expect(req.runtime.id).toBe("nomad");
+    expect(req.runtime.options).toMatchObject({ cwd: "/repo", ref: null, datacenter: "eu" });
   });
 
   it("kubernetes: no profile means no profile option", async () => {
@@ -39,9 +48,9 @@ describe("spawnAgent", () => {
     expect((wsCreate.mock.calls[0][0] as any).runtime.options).not.toHaveProperty("profile");
   });
 
-  it("local: ignores the profile", async () => {
+  it("local: ignores the runtime options", async () => {
     const { paseo, wsCreate, agentCreate } = fakePaseo();
-    await spawnAgent(paseo as never, "local", { ...input, profile: "small" });
+    await spawnAgent(paseo as never, "local", { ...input, runtimeOptions: { profile: "small" } });
     expect(wsCreate).not.toHaveBeenCalled();
     expect(JSON.stringify(agentCreate.mock.calls[0][0])).not.toContain("small");
   });

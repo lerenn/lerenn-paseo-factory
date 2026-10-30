@@ -3,7 +3,10 @@ import type { Paseo } from "./host";
 import { pathExcluded } from "./exclusions";
 import { setWorkspaceTitle } from "./workspace-title";
 
-export type Runtime = "kubernetes" | "local";
+import { LOCAL_RUNTIME } from "../shared/settings";
+
+/** `local`, or the id of a workspace runtime plugin (Factory setting `runtime`). */
+export type Runtime = string;
 
 export interface SpawnAgentInput {
   idempotencyKey: string;
@@ -16,11 +19,11 @@ export interface SpawnAgentInput {
   prompt: string;
   labels: Record<string, string>;
   env: Record<string, string>;
-  /** Kubernetes: put the agent in this existing workspace (pod) instead of creating one. */
+  /** Runtime plugin: put the agent in this existing workspace instead of creating one. */
   joinWorkspaceId?: string;
-  /** Kubernetes: pod profile of the new workspace (role `runtimeProfile`); unset keeps the Runtime's choice. */
-  profile?: string;
-  /** Kubernetes: told the id of a workspace created for this agent, before the agent is created (so a leak can be found later). */
+  /** Runtime plugin: options of the new workspace from the role (`runtimeOptions`, e.g. a pod `profile`); unset keeps the runtime's choice. */
+  runtimeOptions?: Record<string, unknown>;
+  /** Runtime plugin: told the id of a workspace created for this agent, before the agent is created (so a leak can be found later). */
   onWorkspaceCreated?: (workspaceId: string) => void;
 }
 
@@ -32,13 +35,15 @@ export function slugFor(title: string, suffix: string = randomBytes(2).toString(
 
 /**
  * Create a Factory agent in its own workspace on the configured runtime.
- * kubernetes: the workspace is a pod (same call as the Kubernetes Runtime plugin's location picker; the `runtime` field is newer than the pinned client types).
  * local: the agent runs on the daemon, as before.
+ * Any other runtime: a new workspace on that runtime plugin (for `kubernetes`, a pod: the same call as the Kubernetes Runtime's
+ * location picker; the `runtime` field is newer than the pinned client types), with the role's runtime options under the
+ * Factory's own (`cwd`, `slug`, `ref`, `title`).
  */
 export async function spawnAgent(paseo: Paseo, runtime: Runtime, o: SpawnAgentInput): Promise<{ agentId: string; workspaceId: string | null }> {
   if (pathExcluded(o.cwd)) throw new Error(`${o.cwd} is excluded from the Factory (Factory setting excludePaths): pick another working directory.`);
   const agent = { idempotencyKey: o.idempotencyKey, config: o.config, title: o.title, prompt: o.prompt, labels: o.labels, env: o.env };
-  if (runtime === "local") {
+  if (runtime === LOCAL_RUNTIME) {
     const handle = await paseo.agents.create({ ...agent, cwd: o.cwd } as never);
     await setWorkspaceTitle(paseo, handle.id, o.workspaceTitle);
     return { agentId: handle.id, workspaceId: null };
@@ -52,7 +57,7 @@ export async function spawnAgent(paseo: Paseo, runtime: Runtime, o: SpawnAgentIn
     source: { kind: "directory", path: o.cwd },
     title: o.workspaceTitle,
     idempotencyKey: `ws:${o.idempotencyKey}`,
-    runtime: { id: "kubernetes", options: { cwd: o.cwd, slug, ref: null, title: o.workspaceTitle, ...(o.profile ? { profile: o.profile } : {}) } },
+    runtime: { id: runtime, options: { ...o.runtimeOptions, cwd: o.cwd, slug, ref: null, title: o.workspaceTitle } },
   } as never);
   try {
     o.onWorkspaceCreated?.(workspace.id);

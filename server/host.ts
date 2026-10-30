@@ -189,8 +189,8 @@ export class FactoryHost {
   }
 
   /** Runtime of the workspaces the Factory creates. */
-  get runtime(): "kubernetes" | "local" {
-    return this.current?.runtime ?? "kubernetes";
+  get runtime(): string {
+    return this.current?.runtime ?? factorySettingsSchema.parse({}).runtime;
   }
 
   /** A module that is not switched off. Before the settings are read, everything is on. */

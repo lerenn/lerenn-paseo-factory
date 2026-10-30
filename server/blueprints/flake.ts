@@ -1,24 +1,70 @@
-/** Infrastructure failures of a worker: retried with a fresh turn and pod, without using an attempt. First match names the reason. */
+import { DEFAULT_FLAKE_PATTERNS, DEFAULT_RETRO_FLAKE_PATTERNS, type FlakePattern } from "../../shared/blueprints/settings";
+
+/**
+ * Infrastructure failures of a worker: retried with a fresh turn and workspace, without using an attempt. First match names the
+ * reason. The patterns are the Blueprints setting `flakes` (defaults: the Kubernetes Runtime's failures).
+ */
+
 /** The worker's provider session is gone (plugin disabled and enabled, pod recreated): resending to it can never work. */
 export const SESSION_GONE = "provider session gone";
 
-const PATTERNS: Array<[RegExp, string]> = [
-  [/No conversation found with session ID/i, SESSION_GONE],
-  [/exit(?:ed)?(?: with)?(?: code)?[ :=]*137\b|OOMKilled|\bSIGKILL\b/i, "OOMKilled / exit 137"],
-  [/exit(?:ed)?(?: with)?(?: code)?[ :=]*143\b|\bSIGTERM\b/i, "exit 143 (SIGTERM)"],
-  [/could not write bridge\.mjs/i, "bridge.mjs not written"],
-  [/could not start the pod|pod[^.\n]{0,60}(?:did not start|failed to start)/i, "pod did not start"],
-  [/container not found/i, "container not found"],
-  [/channel ended/i, "channel ended"],
-  [/pod[^.\n]{0,60}not ready|not ready after \d+ ?s/i, "pod not ready"],
-  [/pod[^.\n]{0,40}(?:evicted|replaced|failed|deleted)|\bevicted\b|worker gone/i, "pod failed / evicted / replaced"],
-];
+/** Built in, whatever the runtime: resending to a provider session that is gone can never work. */
+const SESSION_GONE_PATTERN = /No conversation found with session ID/i;
+
+interface Compiled {
+  source: FlakeSettings | null;
+  patterns: Array<[RegExp, string]>;
+  startFailures: Set<string>;
+  retro: RegExp | null;
+}
+
+type FlakeSettings = { patterns: FlakePattern[]; retroPatterns: string[] };
+
+function compile(source: FlakeSettings | null): Compiled {
+  const s = source ?? { patterns: DEFAULT_FLAKE_PATTERNS, retroPatterns: DEFAULT_RETRO_FLAKE_PATTERNS };
+  const patterns: Array<[RegExp, string]> = [[SESSION_GONE_PATTERN, SESSION_GONE]];
+  const startFailures = new Set<string>();
+  for (const p of s.patterns) {
+    const re = regex(p.pattern);
+    if (!re) continue;
+    patterns.push([re, p.label]);
+    if (p.startFailure) startFailures.add(p.label);
+  }
+  const retro = s.retroPatterns.filter((p) => regex(p)).map((p) => `(?:${p})`);
+  return { source, patterns, startFailures, retro: retro.length ? new RegExp(retro.join("|"), "i") : null };
+}
+
+function regex(source: string): RegExp | null {
+  try {
+    return new RegExp(source, "i");
+  } catch (error) {
+    console.error(`blueprints: flake pattern ${JSON.stringify(source)} is not a regular expression, skipped`, error);
+    return null;
+  }
+}
+
+let current = compile(null);
+
+/** Use the Blueprints setting `flakes` (null: the defaults). Recompiled only when it changes. */
+export function setFlakePatterns(settings: FlakeSettings | null | undefined): void {
+  if ((settings ?? null) !== current.source) current = compile(settings ?? null);
+}
 
 /** The short reason when `text` (a failed turn's message, a spawn error) is an infrastructure failure, else null. */
 export function flakeReason(text: string | null | undefined): string | null {
   if (!text) return null;
-  for (const [re, label] of PATTERNS) if (re.test(text)) return label;
+  for (const [re, label] of current.patterns) if (re.test(text)) return label;
   return null;
+}
+
+/** A flake reason that means the worker's workspace never came up (`startFailure` patterns). */
+export function isStartFailure(reason: string | null | undefined): boolean {
+  return !!reason && current.startFailures.has(reason);
+}
+
+/** The first flake worth naming in a retro (`flakes.retroPatterns`) in `text`, or null. */
+export function retroFlake(text: string | null | undefined): string | null {
+  return text && current.retro ? (current.retro.exec(text)?.[0] ?? null) : null;
 }
 
 /** "infra flakes ×3: OOMKilled / exit 137, pod did not start" (reasons in order of first appearance). */
