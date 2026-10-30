@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { templateNames } from "./label";
 
 /** Pseudo stages every `on` table may point at. */
 export const TERMINALS = ["done", "failed"] as const;
@@ -169,6 +170,10 @@ export const blueprintSchema = z
     pm_extra_max: z.number().int().min(0).max(10).default(2),
     /** Most runs of this blueprint active at once (pods are a quota); more wait as "queued" and start, oldest first, when one ends. */
     max_active: z.number().int().min(1).optional(),
+    /** What a run is called in the sidebar, titles, digests and mails: a template over the run's vars (`"{{ticket}}"`). Default: ticket, else incident_id, else the run id. */
+    label: z.string().min(1).optional(),
+    /** The scope reused approvals are keyed by (`<scope>:<gate>:<criteria sha>`), a template over the run's vars. Default: ticket, else the blueprint name. */
+    approval_scope: z.string().min(1).optional(),
     vars: z.record(z.string(), varSchema).default({}),
     stage: z.array(z.unknown()).min(1),
   })
@@ -224,6 +229,12 @@ export const blueprintSchema = z
         const verdicts = a.verdicts ?? Object.keys(a.on).filter((k) => !RESERVED_ON.includes(k));
         if (verdicts.length === 0) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "an agent stage needs at least one verdict" });
         for (const v of verdicts) if (!(v in a.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on", v], message: `verdict ${v} has no next stage` });
+      }
+    }
+    for (const field of ["label", "approval_scope"] as const) {
+      for (const name of templateNames(b[field] ?? "")) {
+        const key = name.startsWith("vars.") ? name.slice(5) : name;
+        if (name !== "run.id" && name !== "blueprint" && !(key in b.vars)) ctx.addIssue({ code: "custom", path: [field], message: `unknown variable {{${name}}}` });
       }
     }
     for (const name of b.confirm) if (!(name in b.vars)) ctx.addIssue({ code: "custom", path: ["confirm"], message: `confirm names unknown variable ${name}` });

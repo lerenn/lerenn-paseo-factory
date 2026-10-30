@@ -1,3 +1,4 @@
+import { runLabel } from "../../shared/blueprints/label";
 import { buildTimeline } from "../../shared/blueprints/timeline";
 import { flakeReason, retroFlake } from "./flake";
 import type { HistoryEvent, Run } from "./store";
@@ -78,7 +79,7 @@ export function buildDigest(run: Run, o: DigestOptions): string {
   const quick = gateSegs.reduce((n, g) => n + g.assistantMs, 0);
   const agent = total((s) => kind(s) === "agent");
   const lines: string[] = [];
-  lines.push(`Run ${run.id} · blueprint ${run.blueprint} · ${run.vars.ticket || run.vars.incident_id || ""} · ${run.status}${run.error ? ` (${clip(run.error, 200)})` : ""}`);
+  lines.push(`Run ${run.id} · blueprint ${run.blueprint} · ${runLabel(run, "")} · ${run.status}${run.error ? ` (${clip(run.error, 200)})` : ""}`);
   lines.push(`Total ${fmtDuration(end - run.createdAt)}; agent stages ${fmtDuration(agent)}, human gates ${fmtDuration(human)}${quick ? `, gates the Assistant answered at once ${fmtDuration(quick)}` : ""}, other ${fmtDuration(Math.max(0, end - run.createdAt - agent - human - quick))}${o.spend ? `; ${o.spend.turns} turns, $${o.spend.costUsd.toFixed(2)}` : ""}`);
 
   lines.push("", "Stages (entries / attempts of the last entry / flakes / verdict / time):");
@@ -121,7 +122,7 @@ export function buildDigest(run: Run, o: DigestOptions): string {
 
 /** The three-line mail for a run that went straight through. */
 export function trivialMail(run: Run, o: { now: number; janitor: string[] }): { subject: string; body: string } {
-  const label = run.vars.ticket || run.vars.incident_id || run.blueprint;
+  const label = runLabel(run, run.blueprint);
   const took = fmtDuration((run.endedAt ?? o.now) - run.createdAt);
   const human = buildTimeline(run.history, o.now, run.endedAt)
     .filter((g) => (run.def.stage.find((d) => d.id === g.stage)?.kind ?? "agent") === "gate")

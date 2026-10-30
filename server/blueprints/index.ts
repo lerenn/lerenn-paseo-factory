@@ -1,3 +1,4 @@
+import { customLabel, runLabel } from "../../shared/blueprints/label";
 import { AttentionNotifier, attentionPoints } from "./attention";
 import { agentlessWorkspaces, factoryWorkspaceTitles, type ListedAgent, type ListedWorkspace } from "./orphans";
 import path from "node:path";
@@ -280,7 +281,7 @@ export function startBlueprints(host: FactoryHost) {
     const out: { key: string; text: string }[] = [];
     const day = Date.now() - 24 * 3600_000;
     for (const run of store.all()) {
-      const label = `${run.blueprint} ${run.vars.ticket || run.vars.incident_id || run.id}`;
+      const label = `${run.blueprint} ${runLabel(run)}`;
       const finishedBad = run.status === "failed" && (run.endedAt ?? 0) > day;
       if (!(run.status === "paused" || finishedBad || (run.status === "waiting" && run.pm.pending))) continue;
       const hasPm = await engine.hasLivePm(run);
@@ -406,7 +407,7 @@ export function startBlueprints(host: FactoryHost) {
   ];
   const runVars = (id: string) => {
     const run = store.get(id);
-    return run ? { vars: run.vars, blueprint: run.blueprint } : undefined;
+    return run ? { vars: run.vars, blueprint: run.blueprint, label: customLabel(run) } : undefined;
   };
   host.whenPaseo((paseo) => void retitleFactoryWorkspaces(paseo, runVars));
   const unlisten = host.engines.inbox?.onResolved((item: { id: string; agentId: string }) => {
@@ -462,7 +463,7 @@ export function startBlueprints(host: FactoryHost) {
         archived.push(w.id);
         const recorded = store.createdWorkspaces()[w.id]?.run;
         store.forgetWorkspaces([w.id]);
-        const run = runs.find((r) => r.id === recorded) ?? runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => r.vars.ticket && title.includes(r.vars.ticket));
+        const run = runs.find((r) => r.id === recorded) ?? runs.find((r) => Object.values(r.agents ?? {}).some((a) => a.workspaceId === w.id)) ?? runs.find((r) => { const l = runLabel(r, ""); return !!l && title.includes(l); });
         if (run) store.log(run, "orphan_archived", null, `workspace ${w.id} "${title}": no live agent`, Date.now());
         console.log(`blueprints: orphan sweep archived agentless workspace ${w.id} "${title}"`);
       }

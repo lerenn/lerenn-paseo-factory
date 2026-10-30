@@ -79,7 +79,7 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
   const exts = factory.data?.extensions ?? [];
 
   const feed = [
-    ...allRuns.flatMap((r) => r.history.filter((h) => ["started", "done", "failed", "aborted", "gate_opened", "gate_answered", "pm_grant", "pm_rescope", "exhausted", "head_moved", "merged"].includes(h.event)).map((h) => ({ at: h.at, text: `${r.blueprint} ${r.vars.ticket || r.id}: ${h.event}${h.stage ? ` · ${h.stage}` : ""}`, bad: ["failed", "exhausted", "aborted"].includes(h.event) }))),
+    ...allRuns.flatMap((r) => r.history.filter((h) => ["started", "done", "failed", "aborted", "gate_opened", "gate_answered", "pm_grant", "pm_rescope", "exhausted", "head_moved", "merged"].includes(h.event)).map((h) => ({ at: h.at, text: `${r.blueprint} ${r.label}: ${h.event}${h.stage ? ` · ${h.stage}` : ""}`, bad: ["failed", "exhausted", "aborted"].includes(h.event) }))),
   ]
     .sort((a, b) => b.at - a.at)
     .slice(0, 12);
@@ -96,7 +96,7 @@ export function OverviewScreen({ theme, layout, go }: Pick<PluginScreenProps, "t
               <>
                 {runs.data?.factorySuspended ? line(`⚠ Factory suspended: ${runs.data.factorySuspended.reason}`, "factory-suspended", c.statusWarning) : null}
                 {active.length === 0 ? line("No active run.") : null}
-                {active.slice(0, 5).map((r) => line(`${bad(r) ? "⚠ " : ""}${r.blueprint} ${r.vars.ticket || r.id} · ${r.stage ?? "-"}${r.status === "suspended" ? ` · suspended${r.suspended?.reason ? `: ${r.suspended.reason}` : ""}` : r.pmPending ? " · PM judgement pending" : r.waitingFor ? ` · ${r.waitingFor}` : ""}`, r.id, bad(r) ? c.statusWarning : undefined))}
+                {active.slice(0, 5).map((r) => line(`${bad(r) ? "⚠ " : ""}${r.blueprint} ${r.label} · ${r.stage ?? "-"}${r.status === "suspended" ? ` · suspended${r.suspended?.reason ? `: ${r.suspended.reason}` : ""}` : r.pmPending ? " · PM judgement pending" : r.waitingFor ? ` · ${r.waitingFor}` : ""}`, r.id, bad(r) ? c.statusWarning : undefined))}
               </>,
               active.some(bad) ? "warn" : "ok",
             )

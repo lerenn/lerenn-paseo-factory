@@ -1,3 +1,4 @@
+import { runLabel } from "../../shared/blueprints/label";
 import type { Observer, Ports, RunEvent } from "./engine";
 import { DEFAULT_RETRO_PROMPT } from "../../shared/blueprints/settings";
 import { buildDigest, isTrivial, trivialMail } from "./digest";
@@ -47,7 +48,7 @@ export class PostRun implements Observer {
     post.mailed.push(e.key);
     if (post.mailed.length > 100) post.mailed.splice(0, post.mailed.length - 100);
     this.store.save();
-    const label = run.vars.ticket || run.vars.incident_id || run.blueprint;
+    const label = runLabel(run, run.blueprint);
     this.mail(to, `Factory ${run.id} ${e.kind}${e.stage ? ` · ${e.stage}` : ""}`, `Run ${run.id} (${run.blueprint} ${label}) is ${e.kind === "waiting" ? "waiting" : e.kind}.\nStage: ${e.stage ?? "?"}\nReason: ${clip(e.reason.replace(/\s+/g, " "), 300)}`, "run");
   }
 

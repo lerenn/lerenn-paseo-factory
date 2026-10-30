@@ -1,3 +1,4 @@
+import { runLabel } from "../../shared/blueprints/label";
 import { execFile } from "node:child_process";
 import type { FactoryHost, Issue } from "../host";
 import { resolveAgentConfig } from "../spawn-config";
@@ -95,7 +96,7 @@ export function startSupervisor(host: FactoryHost) {
       const runs: FactoryActivity["runs"] = [];
       let liveStageAgents = 0;
       for (const run of bp?.active() ?? []) {
-        runs.push({ id: run.id, label: `${run.blueprint} ${run.vars.ticket || run.vars.incident_id || run.id}`, status: run.status as "running" | "waiting" | "paused", stage: run.stage, detail: run.error ?? run.waitingFor });
+        runs.push({ id: run.id, label: `${run.blueprint} ${runLabel(run)}`, status: run.status as "running" | "waiting" | "paused", stage: run.stage, detail: run.error ?? run.waitingFor });
         for (const st of Object.values(run.stages)) if (st.status === "running" && st.agentId && (await ports.agentState(st.agentId)) !== "gone") liveStageAgents += 1;
       }
       return { runs, liveStageAgents };

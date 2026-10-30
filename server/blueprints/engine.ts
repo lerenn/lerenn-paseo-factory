@@ -1,3 +1,4 @@
+import { approvalKey, customLabel, runLabel } from "../../shared/blueprints/label";
 import { flakeReason, flakeSummary, isStartFailure, isBusyError, isGitTimeout, isQuotaError, MAX_BUSY_RETRIES, MAX_GIT_TIMEOUTS, quotaBackoffMs, SESSION_GONE } from "./flake";
 import { createHash } from "node:crypto";
 import type { StageKindContext, StageOutcome } from "../extensions";
@@ -581,7 +582,7 @@ export class Engine {
   }
 
   private askerTitle(run: Run): string {
-    return `Factory · ${run.blueprint} · ${run.vars.ticket || run.vars.incident_id || run.id}`;
+    return `Factory · ${run.blueprint} · ${runLabel(run)}`;
   }
 
   /** Stop the run where it is with a reason, ask the human through the Inbox, and wait for `blueprint_resume`. */
@@ -644,7 +645,7 @@ export class Engine {
   }
 
   private runLabel(run: Run): string {
-    return run.vars.ticket || run.vars.incident_id || run.blueprint;
+    return runLabel(run, run.blueprint);
   }
 
   /** Run id, blueprint and a short summary of its vars (not the internal *_confirmed flags). */
@@ -737,7 +738,7 @@ export class Engine {
         role,
         prompt,
         title: pmTitle(run, point),
-        workspaceTitle: workspaceTitle(role, run.vars, `${run.blueprint} ${run.id}`),
+        workspaceTitle: workspaceTitle(role, run.vars, `${run.blueprint} ${run.id}`, customLabel(run)),
         cwd: this.ports.settings().defaultCwd,
         labels: { "paseo.factory": "1", "paseo.factory.blueprint": run.blueprint, "paseo.factory.run": run.id, "paseo.factory.role": role, "paseo.factory.stage": "pm", "paseo.factory.pm.point": point },
         env: { PASEO_AGENT_ROLE: role, PASEO_FACTORY_RUN: run.id, PASEO_FACTORY_STAGE: "pm" },
@@ -1379,8 +1380,8 @@ export class Engine {
           idempotencyKey: `${run.id}:${id}:${st.runs}:${st.attempts}${st.flakes ? `:f${st.flakes}` : ""}${st.worktreeFailures ? `:w${st.worktreeFailures}` : ""}`,
           role: def.role,
           prompt: replaced ? `${prompt}\n\nNote: the worker that held this role earlier is gone; you are its replacement. Read the repository and PR state before continuing.` : prompt,
-          title: `${run.blueprint} · ${id} · ${run.vars.ticket || run.id}`,
-          workspaceTitle: workspaceTitle(def.role, run.vars, `${run.blueprint} ${run.id}`),
+          title: `${run.blueprint} · ${id} · ${runLabel(run)}`,
+          workspaceTitle: workspaceTitle(def.role, run.vars, `${run.blueprint} ${run.id}`, customLabel(run)),
           cwd: def.cwd ? this.r(run, def.cwd) : this.ports.settings().defaultCwd,
           joinWorkspaceId: share ? (run.sharedWorkspaceId ?? undefined) : undefined,
           labels: {
@@ -1714,7 +1715,7 @@ export class Engine {
     let criteriaSha: string | null = null;
     if (def.criteria) {
       criteriaSha = createHash("sha256").update(this.r(run, def.criteria).trim()).digest("hex");
-      const key = `${run.vars.ticket || run.blueprint}:${id}:${criteriaSha}`;
+      const key = approvalKey(run, id, criteriaSha);
       const prior = this.store.approval(key);
       if (prior && def.on[prior.optionId]) {
         st.gate = { itemId: "", heads: {}, criteriaSha, reused: true };
@@ -1865,7 +1866,7 @@ export class Engine {
       run.status = "running";
       run.waitingFor = null;
       if (st.gate?.criteriaSha && /approv|yes|ok/i.test(answer)) {
-        this.store.approve(`${run.vars.ticket || run.blueprint}:${id}:${st.gate.criteriaSha}`, answer, gate.by ?? "human", this.ports.now());
+        this.store.approve(approvalKey(run, id, st.gate.criteriaSha), answer, gate.by ?? "human", this.ports.now());
       }
       this.log(run, "gate_answered", id, `${answer} by ${gate.by ?? "?"}`);
       const next = def.on[answer] ?? def.on.default;
@@ -2407,6 +2408,7 @@ export class Engine {
       status: run.status,
       stage: run.stage,
       vars: run.vars,
+      label: runLabel(run),
       requestedBy: run.requestedBy,
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
