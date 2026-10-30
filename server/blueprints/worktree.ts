@@ -7,9 +7,11 @@ export type NotUp = { notUp: string };
  * Runs a short shell script in a terminal of the workspace and returns the lines it printed, or the reason it did not answer
  * within `timeoutMs`. The terminal is killed in every case, also one that only comes up after the timeout.
  *
- * Without `bootMs`, one budget covers opening the terminal and the script. With `bootMs`, opening the terminal has its own
- * budget (a cold Kubernetes Runtime pod only opens a terminal once it has booted, which takes minutes with the warm pool off),
- * a failed open is retried within it, and `timeoutMs` only starts once the terminal is up; a workspace that never came up
+ * Without `bootMs`, one budget covers opening the terminal and the script. With `bootMs`, the workspace has its own budget to
+ * come up (a cold Kubernetes Runtime pod takes minutes to boot with the warm pool off): a failed open is retried within it, and
+ * `timeoutMs` only starts once the script's first line (`FACTORY_TRACE_BEGIN`) shows, i.e. once the shell really runs in the
+ * workspace. An open terminal is not enough (bp-a221435b): `terminals.create` answers at once while the shell behind it only
+ * starts when the pod is ready, so a 60 s counted from the open still ran from spawn. A workspace whose script never started
  * returns `notUp`, which is not an answer of the script.
  */
 async function runInWorkspace(
@@ -22,8 +24,12 @@ async function runInWorkspace(
 ): Promise<{ lines: string[] } | { error: string } | NotUp> {
   let terminal: Awaited<ReturnType<Paseo["terminals"]["create"]>> | null = null;
   let until = Date.now() + (bootMs ?? timeoutMs);
+  // Without a boot budget the script counts as started at once; with one, `until` is the boot deadline until its first line shows.
+  let started = bootMs === undefined;
   const left = () => Math.max(0, until - Date.now());
   const within = <T>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), left()))]);
+  const notUp = (why: string) => ({ notUp: `workspace not up after ${Math.round(bootMs! / 1000)} s${why ? ` (${why})` : ""}` });
+  const neverRan = "the terminal opened but its shell never started";
   const open = () => paseo.terminals.create({ workspaceId, name, command: "sh", args: ["-c", `echo FACTORY_TRACE_BEGIN; ${script}; echo FACTORY_TRACE_END`] });
   let creating = open();
   try {
@@ -34,24 +40,36 @@ async function runInWorkspace(
         try {
           terminal = await within(creating);
         } catch (error) {
-          if ((error as Error).message === "timeout") return { notUp: `workspace not up after ${Math.round(bootMs / 1000)} s${lastError ? ` (${lastError})` : ""}` };
+          if ((error as Error).message === "timeout") return notUp(lastError);
           lastError = (error as Error).message;
           await new Promise((r) => setTimeout(r, Math.min(BOOT_RETRY_MS, left())));
-          if (left() <= 0) return { notUp: `workspace not up after ${Math.round(bootMs / 1000)} s (${lastError})` };
+          if (left() <= 0) return notUp(lastError);
           creating = open();
         }
       }
-      until = Date.now() + timeoutMs;
     }
     while (left() > 0) {
       await new Promise((r) => setTimeout(r, Math.min(500, Math.max(1, left()))));
-      const lines = (await within(terminal.capture({ stripAnsi: true }))).lines.map((l) => l.trimEnd());
+      let lines: string[];
+      try {
+        lines = (await within(terminal.capture({ stripAnsi: true }))).lines.map((l) => l.trimEnd());
+      } catch (error) {
+        // A terminal whose pod is still booting may not be readable yet: not an answer while the boot budget lasts.
+        if (started || (error as Error).message === "timeout") throw error;
+        continue;
+      }
       const end = lines.lastIndexOf("FACTORY_TRACE_END");
-      const begin = lines.lastIndexOf("FACTORY_TRACE_BEGIN", end);
+      const begin = end >= 0 ? lines.lastIndexOf("FACTORY_TRACE_BEGIN", end) : lines.lastIndexOf("FACTORY_TRACE_BEGIN");
       if (end > begin && begin >= 0) return { lines: lines.slice(begin + 1, end).filter(Boolean) };
+      if (!started && begin >= 0) {
+        // The shell runs in the workspace now (the pod is up): the script's own budget starts here.
+        started = true;
+        until = Date.now() + timeoutMs;
+      }
     }
-    return { error: `${Math.round(timeoutMs / 1000)} s` };
+    return started ? { error: `${Math.round(timeoutMs / 1000)} s` } : notUp(neverRan);
   } catch (error) {
+    if ((error as Error).message === "timeout" && !started) return notUp(neverRan);
     return { error: (error as Error).message === "timeout" ? `${Math.round(timeoutMs / 1000)} s` : (error as Error).message };
   } finally {
     // A terminal that comes up after the timeout (a pod that was resuming) is killed too, not left running in the pod.
@@ -79,8 +97,9 @@ export async function statusTrace(paseo: Paseo, workspaceId: string, timeoutMs =
  * Decision 12885996: a fresh worker's checkout answers git within `timeoutMs` (the worktree exists, git is not stuck on a lock or
  * a dead mount). `ok: false` says why; the engine retries the worker once, then stops the run instead of letting it hang.
  *
- * `timeoutMs` starts once the workspace is up (a terminal opened in it), not at spawn: a cold pod may take minutes to boot, and
- * that is not a git stall. A workspace still not up after `bootMs` is `unchecked`: the probe never ran, so it is not a failure.
+ * `timeoutMs` starts once the workspace is up (the probe's shell printed its first line in it), not at spawn and not when the
+ * terminal opened: a cold pod may take minutes to boot, and that is not a git stall. A workspace still not up after `bootMs` is
+ * `unchecked`: the probe never ran, so it is not a failure. The probe takes no optional lock (GIT_OPTIONAL_LOCKS=0).
  */
 export async function worktreeCheck(
   paseo: Paseo,
@@ -88,7 +107,7 @@ export async function worktreeCheck(
   timeoutMs: number,
   bootMs = WORKTREE_BOOT_GRACE_MS,
 ): Promise<{ ok: boolean; detail: string; unchecked?: boolean }> {
-  const out = await runInWorkspace(paseo, workspaceId, "factory-worktree-check", "git rev-parse --is-inside-work-tree 2>&1 && git rev-parse --short HEAD 2>&1", timeoutMs, bootMs);
+  const out = await runInWorkspace(paseo, workspaceId, "factory-worktree-check", "export GIT_OPTIONAL_LOCKS=0; git rev-parse --is-inside-work-tree 2>&1 && git rev-parse --short HEAD 2>&1", timeoutMs, bootMs);
   if ("notUp" in out) return { ok: false, unchecked: true, detail: out.notUp };
   if ("error" in out) return { ok: false, detail: `git gave no answer (${out.error})` };
   if (out.lines[0] !== "true") return { ok: false, detail: `not a git worktree: ${out.lines.slice(0, 3).join("; ") || "no output"}` };
