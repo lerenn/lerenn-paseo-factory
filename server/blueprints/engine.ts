@@ -1807,8 +1807,17 @@ export class Engine {
       if (gate.status === "withdrawn" || gate.status === "archived") return; // withdrawn by us, or the asker went away
       if (gate.status === "expired") {
         st.status = "done";
-        st.verdict = "expired";
+        st.endedAt = this.ports.now();
         run.status = "running";
+        run.waitingFor = null;
+        if (def.default_answer) {
+          const next = def.on[def.default_answer] ?? def.on.default!;
+          st.verdict = def.default_answer;
+          st.summary = `nobody answered in ${def.expires_in_minutes} min: default answer ${def.default_answer}`;
+          this.log(run, "gate_answered", id, `${def.default_answer} by default (expired after ${def.expires_in_minutes} min)`);
+          return this.go(run, id, next, `default answer ${def.default_answer}`);
+        }
+        st.verdict = "expired";
         return this.go(run, id, def.on.expired ?? def.on.exhausted ?? "failed", "gate expired");
       }
       const answer = gate.optionId ?? "answered";

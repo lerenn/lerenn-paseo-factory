@@ -81,6 +81,11 @@ export const gateStageSchema = z.strictObject({
   /** The answer text is added to the notes of this stage's worker prompt. */
   note_to: stageId.optional(),
   expires_in_minutes: z.number().min(1).optional(),
+  /**
+   * With `expires_in_minutes`: the answer (an option id) the gate takes by itself when nobody answered in time, instead of
+   * following `on.expired`. The history says it was the default (decision c8125131: ask-blocked waited for days).
+   */
+  default_answer: z.string().min(1).optional(),
   /** An answer with the option id "hold" asks the same question again after this many minutes. */
   hold_minutes: z.number().min(1).optional(),
   /** The run's on-demand PM is spawned when the gate opens and may answer it (and only it); the human can still answer it in the Inbox. */
@@ -195,6 +200,11 @@ export const blueprintSchema = z
           if (!g.pr) ctx.addIssue({ code: "custom", path: ["stage", i, "wait"], message: "a gate that waits for a merge needs pr" });
           if (!g.expires_in_minutes) ctx.addIssue({ code: "custom", path: ["stage", i, "expires_in_minutes"], message: "a gate that waits for a merge needs expires_in_minutes (its timeout)" });
           for (const edge of ["merged", "expired"]) if (!(edge in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: `a gate that waits for a merge needs an on.${edge} edge` });
+        }
+        if (g.default_answer) {
+          if (!g.expires_in_minutes) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: "default_answer needs expires_in_minutes" });
+          if (g.wait) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: "a merge wait has no answer to default to" });
+          if (!(g.default_answer in g.on) && !("default" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "default_answer"], message: `default_answer ${g.default_answer} has no edge (on.${g.default_answer} or on.default)` });
         }
         if (g.pr && !("head_moved" in g.on)) ctx.addIssue({ code: "custom", path: ["stage", i, "on"], message: "a gate tied to PRs needs an on.head_moved edge" });
       }

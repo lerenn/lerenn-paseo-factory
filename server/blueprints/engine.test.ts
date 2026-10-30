@@ -2001,3 +2001,25 @@ describe("decision 12885996: worktree check and already-merged PRs", () => {
     expect(() => parseBlueprint(merged.replace('skip_if_merged = "build"', 'skip_if_merged = "nope"'))).toThrow(/unknown stage nope/);
   });
 });
+
+describe("decision c8125131: a gate with a default answer", () => {
+  const withDefault = flow.replace('question = "Merge?"', 'question = "Merge?"\nexpires_in_minutes = 60\ndefault_answer = "merged"');
+
+  it("takes the default answer when its Inbox item expires", async () => {
+    const ctx = setup(withDefault, { pm: NO_PM });
+    const run = await ctx.start(undefined, { at: "land" });
+    const itemId = [...ctx.items.keys()].at(-1)!;
+    ctx.items.get(itemId)!.gate = { status: "expired", optionId: null, text: null, by: null };
+    await ctx.engine.gateResolved(itemId);
+    await ctx.settle();
+    const live = ctx.engine.require(run.id);
+    expect(live.status).toBe("done");
+    expect(live.stages.land).toMatchObject({ verdict: "merged" });
+    expect(live.history.find((h) => h.event === "gate_answered")?.detail).toContain("by default");
+  });
+
+  it("needs expires_in_minutes and an edge", () => {
+    expect(() => parseBlueprint(withDefault.replace("expires_in_minutes = 60\n", ""))).toThrow(/default_answer needs expires_in_minutes/);
+    expect(() => parseBlueprint(withDefault.replace('default_answer = "merged"', 'default_answer = "nope"'))).toThrow(/has no edge/);
+  });
+});
