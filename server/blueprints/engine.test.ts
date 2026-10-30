@@ -2086,3 +2086,135 @@ describe("decision c8125131: a gate with a default answer", () => {
     expect(() => parseBlueprint(withDefault.replace('default_answer = "merged"', 'default_answer = "nope"'))).toThrow(/has no edge/);
   });
 });
+
+describe("abort (decision 2d22d545)", () => {
+  const parentSrc = `
+version = 1
+name = "parent"
+[[stage]]
+id = "hand"
+kind = "blueprint"
+blueprint = "kid"
+[stage.on]
+done = "after"
+failed = "mark-failed"
+aborted = "mark-failed"
+[[stage]]
+id = "after"
+role = "implementer"
+prompt = "After"
+[stage.on]
+done = "done"
+[[stage]]
+id = "mark-failed"
+role = "implementer"
+prompt = "Mark failed"
+[stage.on]
+done = "failed"
+`;
+  const grandSrc = `
+version = 1
+name = "grand"
+[[stage]]
+id = "hand"
+kind = "blueprint"
+blueprint = "parent"
+[stage.on]
+done = "done"
+failed = "mark-failed"
+aborted = "mark-failed"
+[[stage]]
+id = "mark-failed"
+role = "implementer"
+prompt = "Mark failed"
+[stage.on]
+done = "failed"
+`;
+  const kidSrc = `
+version = 1
+name = "kid"
+[[stage]]
+id = "work"
+role = "implementer"
+prompt = "Work"
+[stage.on]
+done = "done"
+bad = "failed"
+`;
+  function family() {
+    const ctx = setup();
+    const srcs: Record<string, string> = { grand: grandSrc, parent: parentSrc, kid: kidSrc };
+    ctx.ports.blueprint = (name) => (srcs[name] ? parseBlueprint(srcs[name]) : undefined);
+    const children = (id: string) => ctx.store.all().filter((r) => r.parent?.runId === id);
+    return { ctx, children };
+  }
+  const entered = (run: { history: { event: string }[] }) => run.history.filter((e) => e.event === "transition");
+
+  it("a parent aborted while its child waits stays aborted when the child then finishes done", async () => {
+    const { ctx, children } = family();
+    const run = ctx.engine.start({ blueprint: "parent", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    const child = children(run.id)[0]!;
+    expect(ctx.engine.require(run.id).stages.hand.status).toBe("waiting");
+    // Aborted before abort cascaded (or by any path that leaves the child running): only the parent ended.
+    const p = ctx.engine.require(run.id);
+    p.status = "aborted";
+    p.endedAt = 1;
+    ctx.store.save();
+    const before = entered(p).length;
+    await ctx.verdict("agent-1", "done");
+    expect(ctx.engine.require(child.id).status).toBe("done");
+    expect(ctx.engine.require(run.id).status).toBe("aborted");
+    expect(entered(ctx.engine.require(run.id))).toHaveLength(before);
+    expect(ctx.spawned).toHaveLength(1);
+  });
+
+  it("aborting a parent aborts its waiting child; the child's end enters no on.* stage of the parent", async () => {
+    const { ctx, children } = family();
+    const run = ctx.engine.start({ blueprint: "parent", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    const child = children(run.id)[0]!;
+    const before = entered(ctx.engine.require(run.id)).length;
+    await ctx.engine.abort(run.id, "stop");
+    await ctx.settle();
+    expect(ctx.engine.require(child.id)).toMatchObject({ status: "aborted", error: `parent run ${run.id} aborted: stop` });
+    expect(ctx.engine.require(run.id)).toMatchObject({ status: "aborted", error: "stop", stage: "hand" });
+    expect(entered(ctx.engine.require(run.id))).toHaveLength(before);
+    expect(ctx.spawned).toHaveLength(1);
+    // A late verdict of the child's worker changes nothing.
+    await ctx.engine.verdict("agent-1", { verdict: "done", data: {}, summary: "" }).catch(() => undefined);
+    await ctx.settle();
+    expect(ctx.engine.require(run.id).status).toBe("aborted");
+    expect(ctx.engine.require(child.id).status).toBe("aborted");
+  });
+
+  it("cascades to grandchildren", async () => {
+    const { ctx, children } = family();
+    const run = ctx.engine.start({ blueprint: "grand", vars: {}, requestedBy: "x" });
+    await ctx.settle();
+    const mid = children(run.id)[0]!;
+    const kid = children(mid.id)[0]!;
+    expect(kid.blueprint).toBe("kid");
+    await ctx.engine.abort(run.id, "stop");
+    await ctx.settle();
+    expect(ctx.engine.require(run.id).status).toBe("aborted");
+    expect(ctx.engine.require(mid.id)).toMatchObject({ status: "aborted", error: `parent run ${run.id} aborted: stop` });
+    expect(ctx.engine.require(kid.id)).toMatchObject({ status: "aborted", error: `parent run ${mid.id} aborted: parent run ${run.id} aborted: stop` });
+    expect(ctx.spawned).toHaveLength(1);
+  });
+
+  it("stops (archives) a mid-turn stage worker, but never the caller", async () => {
+    const a = setup();
+    const run = await a.start();
+    expect(a.states.get("agent-1")).toBe("running");
+    await a.engine.abort(run.id, "stop");
+    expect(a.archived).toContain("agent-1");
+    expect(a.engine.require(run.id).history.some((e) => e.event === "worker_stopped")).toBe(true);
+
+    const b = setup();
+    const own = await b.start();
+    await b.engine.abort(own.id, "stop", { by: "agent-1" });
+    expect(b.archived).not.toContain("agent-1");
+    expect(b.engine.require(own.id).history.some((e) => e.event === "worker_stopped")).toBe(false);
+  });
+});

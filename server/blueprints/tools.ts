@@ -195,11 +195,11 @@ export function blueprintTools(deps: Deps): Omit<HostTool, "owner">[] {
     },
     {
       name: "blueprint_abort",
-      description: "Stop a run for good. Its workers keep their work; open gates are withdrawn.",
+      description: "Stop a run for good, with its child runs. Open gates are withdrawn; workers in the middle of a turn are stopped (archived); others keep their work.",
       input: z.object({ run: runArg, reason: z.string().max(1000).default("aborted") }),
       async run({ run, reason }, ctx) {
         await steer(engine.require(run), ctx);
-        const out = await engine.abort(run, reason);
+        const out = await engine.abort(run, reason, { by: ctx.callerId });
         return { run_id: out.id, status: out.status };
       },
     },
