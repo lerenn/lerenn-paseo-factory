@@ -279,3 +279,27 @@ describe("new item mail", () => {
     await new Promise((r) => setImmediate(r));
   });
 });
+
+describe("inform (information items)", () => {
+  it("files a non-blocking item from the Factory with one 'Got it' choice, deduped while pending", () => {
+    const { engine, store } = setup();
+    const asked: string[] = [];
+    engine.onAsked((i) => asked.push(i.id));
+    const a = engine.inform({ title: "Factory retro bp-1", body: "Timeline...", dedupeKey: "retro:bp-1" });
+    expect(a.item).toMatchObject({ agentId: "factory", kind: "info", blocking: false, allowFreeText: false, internal: true, expiresAt: null, context: "Timeline..." });
+    expect(a.item.options).toEqual([{ id: "ack", label: "Got it" }]);
+    expect(store.agent("factory")?.title).toBe("Factory");
+    expect(engine.inform({ title: "again", body: "", dedupeKey: "retro:bp-1" }).deduped).toBe(true);
+    expect(asked).toEqual([a.item.id]);
+  });
+
+  it("'Got it' closes it and nobody is messaged", async () => {
+    const { engine, sent } = setup();
+    const { item } = engine.inform({ title: "notice", body: "b" });
+    expect(engine.answer(item.id, { text: "free text" }).ok).toBe(false);
+    expect(engine.answer(item.id, { optionId: "ack" }).ok).toBe(true);
+    await engine.deliver();
+    expect(sent).toHaveLength(0);
+    expect(engine.views().find((v) => v.id === item.id)).toMatchObject({ kind: "info", status: "answered", delivery: "none" });
+  });
+});

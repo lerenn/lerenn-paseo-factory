@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import path from "node:path";
+import { Capabilities, mailEndpointFile } from "./capabilities";
 
-export const mailEndpointFile = () => process.env.FACTORY_MAIL_ENDPOINT ?? path.join(homedir(), ".paseo", "agents-mail", "endpoint.json");
+export { mailEndpointFile };
 
 export interface Report {
   subject: string;
@@ -18,41 +16,28 @@ interface Options {
   now?: () => number;
   /** The path Agents Mail replaces: steer the agent directly. */
   send(agentId: string, text: string): Promise<void>;
+  /**
+   * Without Agents Mail, for an address only Mail resolves (an alias such as `@user`): the report is filed elsewhere (the
+   * Factory Inbox, as information) instead of being lost in a direct message to an agent that does not exist.
+   */
+  fallback?(to: string, report: Report): Promise<void>;
   /** How long a health result (up or down) is reused. */
   ttlMs?: number;
+  /** Shared probe; built from `file`, `fetchImpl`, `now` and `ttlMs` when absent. */
+  capabilities?: Capabilities;
 }
 
 /**
  * Factory reports (information, not questions or tasks) go through Agents Mail when it is installed and answering;
- * otherwise, or if a mail fails, the message is sent directly as before. No hard dependency.
+ * otherwise, or if a mail fails, the message is sent directly as before (filed by `fallback` when the address is an alias).
+ * No hard dependency.
  */
 export function createReporter(opts: Options): (agentId: string, report: Report) => Promise<void> {
-  const file = opts.file ?? mailEndpointFile;
+  const caps = opts.capabilities ?? new Capabilities({ mailFile: opts.file, fetchImpl: opts.fetchImpl, now: opts.now, ttlMs: opts.ttlMs });
   const doFetch = opts.fetchImpl ?? fetch;
-  const now = opts.now ?? Date.now;
-  const ttl = opts.ttlMs ?? 60_000;
-  let cached: { at: number; endpoint: { url: string; token: string } | null } | null = null;
-
-  async function endpoint(): Promise<{ url: string; token: string } | null> {
-    if (cached && now() - cached.at < ttl) return cached.endpoint;
-    let found: { url: string; token: string } | null = null;
-    try {
-      const raw = JSON.parse(readFileSync(file(), "utf8")) as { url?: string; token?: string };
-      if (raw.url && raw.token) {
-        const abort = new AbortController();
-        const timer = setTimeout(() => abort.abort(), 2000);
-        const res = await doFetch(`${raw.url.replace(/\/$/, "")}/api/health`, { headers: { authorization: `Bearer ${raw.token}` }, signal: abort.signal as never }).finally(() => clearTimeout(timer));
-        if (res.ok) found = { url: raw.url.replace(/\/$/, ""), token: raw.token };
-      }
-    } catch {
-      found = null;
-    }
-    cached = { at: now(), endpoint: found };
-    return found;
-  }
 
   return async (agentId, report) => {
-    const mail = await endpoint();
+    const mail = await caps.mailEndpoint();
     if (mail) {
       try {
         const res = await doFetch(`${mail.url}/api/mails`, {
@@ -64,8 +49,16 @@ export function createReporter(opts: Options): (agentId: string, report: Report)
       } catch {
         // fall through to the direct path
       }
-      cached = { at: now(), endpoint: null };
+      caps.markMailDown();
     }
+    // A mail address (`@user`, `@assistant`, `label:k=v`) is not an agent: only Agents Mail can resolve it. An agent id is
+    // messaged directly as before, and its failure still reaches the caller (which may retry, as the Supervisor's digests do).
+    if (opts.fallback && isMailAddress(agentId)) return opts.fallback(agentId, report);
     await opts.send(agentId, report.body);
   };
+}
+
+/** An address only Agents Mail resolves: an alias (`@assistant`) or a label selector (`label:key=value`). */
+export function isMailAddress(to: string): boolean {
+  return /^(@|label:)/.test(to.trim());
 }

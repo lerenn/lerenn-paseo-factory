@@ -20,7 +20,8 @@ export function notifyNewItem(
   item: Item,
   o: { to: string; eventsMailTo: string; askedBy: string; send(to: string, mail: { subject: string; body: string }): Promise<void>; save(): void },
 ): void {
-  if (item.notified || !o.to) return;
+  // An information item is what the Factory files when it cannot mail: mailing it would loop.
+  if (item.notified || !o.to || item.kind === "info") return;
   item.notified = true;
   o.save();
   if (item.internal && o.eventsMailTo) return;

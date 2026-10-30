@@ -7,7 +7,8 @@ import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { PluginBeforeRequests, PluginHookContext, PluginLifecycleEvents, PluginServerContext } from "@getpaseo/plugin/server";
-import { createReporter } from "./report";
+import { Capabilities } from "./capabilities";
+import { createReporter, type Report } from "./report";
 import { setExclusions } from "./exclusions";
 import { setTrustedLabels } from "./trust";
 import { factorySettings, factorySettingsSchema, type FactorySettings, type ModuleId } from "../shared/settings";
@@ -156,8 +157,28 @@ export class FactoryHost {
   }
   private unsubscribe: () => void;
 
-  /** Information for an agent: through Agents Mail when it is there, else sent directly. */
-  readonly report = createReporter({ send: (id, text) => this.paseo.agents.ref(id).send(text, { activeTurnBehavior: "steer" }) as Promise<void> });
+  /** Which satellite plugins (Agents Mail, Events) are there, found at runtime: the Factory works without them. */
+  readonly capabilities = new Capabilities();
+
+  /** Information for an agent: through Agents Mail when it is there, else sent directly, else filed in the Inbox. */
+  readonly report = createReporter({
+    capabilities: this.capabilities,
+    send: (id, text) => this.paseo.agents.ref(id).send(text, { activeTurnBehavior: "steer" }) as Promise<void>,
+    fallback: async (to, report) => this.inform(to, report),
+  });
+
+  /**
+   * A report nobody could receive (no Agents Mail, or the address is an alias only Mail resolves): filed in the Factory
+   * Inbox as information for the human, so it is not lost. Without the Inbox module it is only logged.
+   */
+  inform(to: string, report: Report): void {
+    const inbox = this.enabled("inbox") ? (this.engines.inbox as { inform?(i: { title: string; body: string; dedupeKey?: string }): unknown } | undefined) : undefined;
+    if (!inbox?.inform) {
+      console.log(`factory: report "${report.subject}" for ${to} not delivered (no Agents Mail, no Inbox)`);
+      return;
+    }
+    inbox.inform({ title: report.subject, body: `${report.body}\n\n(For ${to}; filed here because Agents Mail is not available.)`, dedupeKey: `report:${to}:${report.subject}` });
+  }
 
   constructor(readonly server: PluginServerContext, opts: { sessionsFile?: string | null; knownExtensionsFile?: string | null } = {}) {
     this.sessions = new SessionStore(opts.sessionsFile === undefined ? path.join(dataDir(), "sessions.json") : opts.sessionsFile);
@@ -386,11 +407,13 @@ export class FactoryHost {
   onSessionOpen(env: Record<string, string>, agentId: string): void {
     const capability = env[CAPABILITY_ENV];
     if (capability) this.sessions.bind(capability, agentId);
+    this.capabilities.noteSession(agentId, env);
   }
 
   onArchived(agentId: string): void {
     this.sessions.forgetAgent(agentId);
     this.labelCache.delete(agentId);
+    this.capabilities.forget(agentId);
   }
 
   // ---- extensions ----
@@ -401,6 +424,16 @@ export class FactoryHost {
 
   extension(id: string): Extension | undefined {
     return this.extensions.get(id);
+  }
+
+  /**
+   * Who provides a stage kind: "registered" (an extension has it now), "away" (one registered it lately and is not back
+   * yet, e.g. during a restart), or null (no extension ever did: a blueprint that uses it cannot run).
+   */
+  stageKindProvider(kind: string): { state: "registered" | "away"; extension: string } | null {
+    for (const e of this.extensions.values()) if (e.stageKinds.some((k) => k.kind === kind)) return { state: "registered", extension: e.id };
+    const id = this.known.stageKind(kind);
+    return id ? { state: "away", extension: id } : null;
   }
 
   /** Listeners told when an extension registers (the Blueprints module reads stage kinds from them). */
@@ -414,6 +447,7 @@ export class FactoryHost {
     this.withdrawPlaceholders(ext.id);
     for (const t of ext.tools) if (this.tools.has(t.name)) throw new Error(`tool "${t.name}" already exists`);
     this.extensions.set(ext.id, ext);
+    this.known.rememberStageKinds(ext.id, ext.stageKinds.map((k) => k.kind));
     const removeTools = this.registerTools(ext.id, ext.tools.map((t) => ({ ...t, extension: true })));
     for (const l of this.onExtension) l(ext);
     return () => {
@@ -515,6 +549,8 @@ export class FactoryHost {
   // ---- http ----
 
   start(port = Number(process.env.FACTORY_PORT ?? DEFAULT_PORT)): void {
+    // The first look for Agents Mail, so synchronous decisions (PM mode, escalation) see it from the start.
+    void this.capabilities.mailEndpoint();
     const mcp = new McpServer(this.source());
     this.started = new Promise<void>((resolve) => {
       const server = createServer((req, res) => {

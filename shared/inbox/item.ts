@@ -25,13 +25,17 @@ export const APPROVAL_OPTIONS: InboxOption[] = [
   { id: "deny", label: "Deny" },
 ];
 
+/** The one choice of an information item. */
+export const INFO_OPTIONS: InboxOption[] = [{ id: "ack", label: "Got it" }];
+
 export const itemViewSchema = z.object({
   id: z.string(),
   agentId: z.string(),
   agentTitle: z.string().nullable(),
   projectName: z.string().nullable(),
   workspaceName: z.string().nullable(),
-  kind: z.enum(["question", "approval"]),
+  /** "info": something the Factory tells the human (a report it could not mail); acknowledged, never answered by an agent. */
+  kind: z.enum(["question", "approval", "info"]),
   question: z.string(),
   context: z.string().nullable(),
   options: z.array(optionSchema),

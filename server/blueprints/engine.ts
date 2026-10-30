@@ -23,6 +23,8 @@ export class RetryLaterError extends UsageError {}
 const WORKER_WAIT_CEILING_MS = 120 * 60_000;
 
 /** How long a stage waits for the extension that provides its kind to register (after a restart) before the run fails. */
+/** Stage kinds the engine runs itself; any other kind is an extension's. */
+const BUILTIN_KINDS = new Set(["agent", "gate", "call", "blueprint"]);
 const KIND_WAIT_MS = 15 * 60_000;
 
 /** Polls in a row that must not see a queued PR in the queue before the merge gate asks again. */
@@ -57,6 +59,13 @@ export interface Ports {
   send(agentId: string, text: string): Promise<void>;
   /** A new run exists (the Supervisor wakes on it). */
   runStarted?(run: Run): void;
+  /**
+   * Agents Mail is installed and answering (absent: taken as there). Without it `runs.notifyMailTo` is ignored (PMs are
+   * spawned, notices go to the run's owner) and a PM's escalation that would need a mail goes straight to the human.
+   */
+  mailUp?(): boolean;
+  /** The last thing an agent wrote (its final assistant message), or null. */
+  lastReply?(agentId: string): Promise<string | null>;
   /** Information for an agent (not a task): Agents Mail when installed, else `send`. */
   report?(agentId: string, report: { subject: string; body: string; kind: string }): Promise<void>;
   /** Settings of the event mails, the retro and the janitor. */
@@ -109,6 +118,8 @@ export interface Ports {
   isPrUrl?(url: string): boolean;
   /** A Factory or extension tool by name, else null. */
   tool(name: string): ((args: Record<string, unknown>) => Promise<unknown> | unknown) | null;
+  /** An extension provides this stage kind now, or did lately (it may be restarting); absent: not checked at start. */
+  stageKindKnown?(kind: string): boolean;
   stageKind(kind: string): ((ctx: Omit<StageKindContext, "paseo" | "services" | "signal">) => Promise<StageOutcome>) | null;
   blueprint(name: string): { blueprint: Blueprint; sha: string } | undefined;
   /** Static checks at start: a message when the run could not possibly start its workers (no working directory...). */
@@ -313,6 +324,22 @@ export class Engine {
 
   // ---- starting ----
 
+  /** Extension stage kinds of a blueprint that no extension provides, now or lately (checked at start, not mid-run). */
+  missingStageKinds(def: Blueprint, seen = new Set<string>()): { stage: string; kind: string }[] {
+    if (!this.ports.stageKindKnown || seen.has(def.name)) return [];
+    seen.add(def.name);
+    const out: { stage: string; kind: string }[] = [];
+    for (const st of def.stage) {
+      const kind = st.kind ?? "agent";
+      if (kind === "blueprint") {
+        // A child blueprint that cannot run would fail its parent mid-run: its kinds are checked too.
+        const child = this.ports.blueprint((st as BlueprintStage).blueprint)?.blueprint;
+        if (child) out.push(...this.missingStageKinds(child, seen).map((m) => ({ stage: `${st.id} > ${m.stage}`, kind: m.kind })));
+      } else if (!BUILTIN_KINDS.has(kind) && !this.ports.stageKind(kind) && !this.ports.stageKindKnown(kind)) out.push({ stage: st.id, kind });
+    }
+    return out;
+  }
+
   /** Validate the variables and create the run; the first stage is entered in the background. */
   start(input: StartInput): Run {
     if (input.idempotencyKey) {
@@ -332,6 +359,8 @@ export class Engine {
     if (!def.stage.some((s) => s.id === first)) throw new UsageError(`Blueprint ${def.name} has no stage "${first}".`);
     const problem = this.ports.preflight?.(def, first);
     if (problem) throw new UsageError(problem);
+    const missing = this.missingStageKinds(def);
+    if (missing.length) throw new UsageError(`Blueprint ${def.name} cannot run: ${missing.map((m) => `stage "${m.stage}" has kind "${m.kind}"`).join(", ")}, and no installed extension provides ${missing.length > 1 ? "these kinds" : "it"}. Install and enable the extension (plugin) that registers ${missing.length > 1 ? "them" : "it"}, or remove the stage${missing.length > 1 ? "s" : ""} from the blueprint.`);
     const now = this.ports.now();
     const run: Run = {
       id: this.store.newId(),
@@ -524,7 +553,7 @@ export class Engine {
       if (parent) void this.exclusive(parent.id, () => this.childFinished(parent, run)).catch((e) => this.crash(parent, e));
     }
     const text = `Factory: run ${run.id} of blueprint ${run.blueprint} ${status}${error ? `: ${clip(error, 300)}` : ""}.`;
-    const mailTo = this.ports.settings().runsMailTo?.trim();
+    const mailTo = this.runsMailTo();
     if (mailTo && this.ports.report) void this.ports.report(mailTo, { subject: `Run ${run.id} ${this.runLabel(run)} ${status}`, body: `${text}\n${this.runFacts(run)}`, kind: "run" }).catch(() => undefined);
     else for (const id of new Set([run.ownerAgentId, run.pmAgentId].filter((x): x is string => !!x && !this.isPmAgent(run, x)))) void (this.ports.report ? this.ports.report(id, { subject: `Run ${run.id} ${status}`, body: text, kind: "run" }) : this.ports.send(id, text)).catch(() => undefined);
     if (status !== "done" && !opts.quiet) this.notify(run, { kind: status, stage: run.stage, reason: error ?? status, key: `${run.id}:${status}` });
@@ -724,7 +753,7 @@ export class Engine {
 
   private async notifyPm(run: Run, text: string): Promise<void> {
     // With runs.notifyMailTo set, a judgement request is mailed there (queued) instead of interrupting the starter or spawning a PM.
-    const mailTo = this.ports.settings().runsMailTo?.trim();
+    const mailTo = this.runsMailTo();
     const stage = run.pm.pending?.stage ?? run.stage ?? "?";
     const detail = `Stage "${stage}" is exhausted: ${run.pm.pending?.reason ?? "out of attempts"}.\nLast summary: ${run.stages[stage]?.summary ?? "none"}\nThis is the run's ONE judgement on this stage: if it exhausts again after your extra attempts, the run fails and goes to the human.`;
     if (mailTo && this.ports.report) {
@@ -750,9 +779,19 @@ export class Engine {
     return { ...PM_DEFAULTS, ...(this.ports.settings().pm ?? {}) };
   }
 
-  /** With runs.notifyMailTo set, judgement requests are mailed there and no PM is spawned. */
+  /** `runs.notifyMailTo`, while Agents Mail can deliver to it; "" otherwise. */
+  private runsMailTo(): string {
+    const to = this.ports.settings().runsMailTo?.trim() ?? "";
+    return to && this.mailUp() ? to : "";
+  }
+
+  private mailUp(): boolean {
+    return this.ports.mailUp?.() ?? true;
+  }
+
+  /** With runs.notifyMailTo set (and Agents Mail there), judgement requests are mailed there and no PM is spawned. */
   private pmMode(): boolean {
-    return !this.ports.settings().runsMailTo?.trim();
+    return !this.runsMailTo();
   }
 
   private isPmAgent(run: Run, agentId: string): boolean {
@@ -926,7 +965,10 @@ export class Engine {
       if (call.escalation?.step === 2) throw new UsageError("Your question is already with the human: wait for the Inbox answer.");
       let step: 1 | 2 = call.escalation ? 2 : 1;
       let target = step === 1 ? (this.ports.escalationTarget?.() ?? "").trim() : "";
-      if (!target) {
+      // Any target but the Supervisor is asked by Agents Mail: without it, the human is next at once (no timeout to wait).
+      const unreachable = !!target && target !== "supervisor" && !this.mailUp();
+      if (unreachable) this.log(run, "pm_escalation_skipped", call.stage, `${target} needs Agents Mail, which is not available: the human is asked`);
+      if (!target || unreachable) {
         step = 2;
         target = "human";
       }

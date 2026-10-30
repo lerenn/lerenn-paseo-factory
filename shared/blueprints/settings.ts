@@ -17,6 +17,13 @@ export const DEFAULT_RETRO_PROMPT =
   "Use only the digest; do not read repositories or call any other tool. Send the mail, then stop.";
 
 /**
+ * Added to the retro prompt when Agents Mail is not available: the agent cannot mail, so its final message is the retro
+ * and the Factory files it (in the Inbox as information when no agent can receive it).
+ */
+export const RETRO_NO_MAIL_NOTE =
+  "Agents Mail is NOT available here: do not call mail_send or any other tool. Instead, write the retrospective (the subject on the first line, then the body as described) as your final message and stop; the Factory files it for {{mail_to}}.";
+
+/**
  * An infrastructure failure of a worker, recognised in a failed turn's message or a spawn error: retried with a fresh turn and
  * workspace without using an attempt. `pattern` is a case-insensitive regular expression; the first match names the reason
  * (`label`). `startFailure`: the worker's workspace never came up (two in a row pause the run instead of retrying).

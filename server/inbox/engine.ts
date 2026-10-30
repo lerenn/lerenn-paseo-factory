@@ -1,4 +1,4 @@
-import { APPROVAL_OPTIONS, type InboxOption, type ItemView } from "../../shared/inbox/item";
+import { APPROVAL_OPTIONS, INFO_OPTIONS, type InboxOption, type ItemView } from "../../shared/inbox/item";
 import type { InboxSettings } from "../../shared/inbox/settings";
 import { render } from "./template";
 import type { Item, Store } from "./store";
@@ -124,6 +124,47 @@ export class Engine {
       now,
     );
     this.store.log({ itemId: item.id, type: "asked", actor: input.agentId, detail: item.kind }, now);
+    this.store.save();
+    for (const l of this.askedListeners) {
+      try {
+        l(item);
+      } catch (error) {
+        console.error("inbox: listener failed", error);
+      }
+    }
+    return { item, deduped: false };
+  }
+
+  /**
+   * File information for the human (a report the Factory could not mail: no Agents Mail, an alias nobody resolves).
+   * Asked by `from` (default "factory"), never blocking, no expiry; "Got it" closes it and nobody is messaged.
+   * The same dedupe key while it is pending returns the live item.
+   */
+  inform(input: { title: string; body: string; dedupeKey?: string; from?: string }): { item: Item; deduped: boolean } {
+    const agentId = input.from ?? "factory";
+    if (agentId === "factory") this.store.upsertAgent("factory", { title: "Factory" });
+    const key = input.dedupeKey ?? fingerprint("info", input.title, INFO_OPTIONS);
+    const live = this.store.live(agentId, key);
+    if (live) return { item: live, deduped: true };
+    const now = this.now();
+    const item = this.store.add(
+      {
+        agentId,
+        kind: "info",
+        question: clip(input.title.trim() || "Factory information", 4000),
+        context: input.body ? clip(input.body, 20_000) : null,
+        options: INFO_OPTIONS,
+        allowFreeText: false,
+        blocking: false,
+        dedupeKey: key,
+        expiresAt: null,
+        defaultOptionId: null,
+        defaultText: null,
+        internal: true,
+      },
+      now,
+    );
+    this.store.log({ itemId: item.id, type: "asked", actor: agentId, detail: "info" }, now);
     this.store.save();
     for (const l of this.askedListeners) {
       try {

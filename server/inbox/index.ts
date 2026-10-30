@@ -9,6 +9,7 @@ import { INSTRUCTIONS } from "./instructions";
 import { notifyNewItem } from "./notify";
 import { Store } from "./store";
 import { TOOLS } from "./tools";
+import { isMailAddress } from "../report";
 
 type Paseo = PluginHookContext["paseo"];
 type HookAgent = { id: string; workspaceId: string | null; title: string | null };
@@ -67,7 +68,8 @@ export function startInbox(host: FactoryHost) {
       to,
       eventsMailTo: (host.engines.blueprints?.eventsMailTo?.() as string | undefined) ?? "",
       askedBy: `${askedBy} (${item.agentId})`,
-      send: (target, mail) => host.report(target, { ...mail, kind: "info" }),
+      // Without Agents Mail an alias cannot be told, and filing "a new item" in the Inbox the item is in says nothing.
+      send: async (target, mail) => (host.capabilities.mail() || !isMailAddress(target) ? host.report(target, { ...mail, kind: "info" }) : undefined),
       save: () => store.save(),
     });
   });
