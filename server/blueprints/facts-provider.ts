@@ -2,25 +2,22 @@ import type { DiffSummary } from "./github";
 import type { PrFacts } from "./engine";
 
 /**
- * Where the Factory reads pull request facts. Plugins share a process, so a forge plugin (paseo-factory-github) offers a
- * provider on `globalThis[Symbol.for("paseo.pr-facts")]`: a registry keyed by provider id, each entry a `PrFactsProvider`.
- * A URL goes to the first provider that `matches` it; with none, to the Factory's own `gh` reads (`github.ts`), so the Factory
- * behaves the same with or without the plugin. A provider that throws is not replaced by the fallback: its error is the
- * answer (the engine treats it like a failed `gh` read: "facts unavailable", a verdict to retry, a wait that polls again). An
- * error with `status` 429/5xx, a network `code` or `transient: true` (or a message saying so) is transient (`transient.ts`):
- * retried with back-off, never a failed run.
+ * Where the Factory reads pull request facts. Paseo runs each plugin in its own process, so a forge plugin (the lab's pr-facts)
+ * offers its reads as read-only rpcs of a Factory extension, usually a remote one (`remote.ts`): `pr_facts` `{url}` → PrFacts or
+ * null, and optionally `pr_diff` `{url}` → DiffSummary or null. The rpc is looked up on every read among the registered
+ * extensions. A null answer (the provider does not read that URL), an error, a timeout or malformed facts falls back to the
+ * Factory's own `gh` reads (`github.ts`), so the Factory behaves the same with or without the plugin, and a provider outage
+ * costs a `gh` read, never a failed one. A `gh` error with `status` 429/5xx, a network `code` or `transient: true` (or a
+ * message saying so) is transient (`transient.ts`): retried with back-off, never a failed run.
  * The engine keeps the per-URL cache and the merge-wait logic (left-queue, re-arm); a provider only reads.
  */
-export const PR_FACTS_PROVIDER_KEY = Symbol.for("paseo.pr-facts");
+export const PR_FACTS_RPC = "pr_facts";
+export const PR_DIFF_RPC = "pr_diff";
+/** How long the Factory waits for a provider's answer before it reads through `gh`. */
+export const FACTS_RPC_TIMEOUT_MS = 45_000;
 
-export interface PrFactsProvider {
-  /** The pull request URLs this provider reads (for example `https://github.com/<owner>/<repo>/pull/<n>`). */
-  matches(url: string): boolean;
-  /** Facts of one PR, read now (the Factory caches them). A PR that does not exist is `exists: false`, not an error. */
-  prFacts(url: string): Promise<PrFacts>;
-  /** Files changed and lines added or removed (the Run diff screen). Absent: the fallback's. */
-  prDiff?(url: string): Promise<DiffSummary>;
-}
+/** Calls the read-only rpc `name` of the extension that offers it, or answers null when none does (resolved per call). */
+export type FactsRpc = (name: string, input: { url: string }) => Promise<unknown> | null;
 
 /** What the Factory does without a provider (its own `gh` reads). */
 export interface FactsFallback {
@@ -29,40 +26,76 @@ export interface FactsFallback {
   matches(url: string): boolean;
 }
 
-/** The provider registered for `url`, or null. */
-export function factsProvider(url: string, target: Record<symbol, unknown> = globalThis as Record<symbol, unknown>): PrFactsProvider | null {
-  const registry = target[PR_FACTS_PROVIDER_KEY] as Record<string, PrFactsProvider | undefined> | undefined;
-  for (const p of Object.values(registry ?? {})) {
-    if (p && typeof p.matches === "function" && typeof p.prFacts === "function" && p.matches(url)) return p;
-  }
-  return null;
+export interface FactsSourceOptions {
+  timeoutMs?: number;
+  log?(message: string): void;
 }
 
 const STATES = new Set(["open", "closed", "merged"]);
 const CI = new Set(["green", "red", "pending", "none"]);
 
-/** A provider's answer must be facts the engine can act on: a malformed one is an error, never a guess. */
-function checked(url: string, f: PrFacts): PrFacts {
+/** A provider's answer must be facts the engine can act on: a malformed one is refused, never a guess. */
+function checkedFacts(url: string, f: PrFacts): PrFacts {
   if (!f || typeof f !== "object" || !STATES.has(f.state) || !CI.has(f.ci) || typeof f.head !== "string" || typeof f.exists !== "boolean") {
     throw new Error(`the facts provider gave malformed facts for ${url}`);
   }
   return { ...f, url };
 }
 
-/** The Factory's reads: the matching provider's when one is registered, else the fallback's. Resolved per call. */
-export function factsSource(fallback: FactsFallback, target: Record<symbol, unknown> = globalThis as Record<symbol, unknown>) {
+function checkedDiff(url: string, d: DiffSummary): DiffSummary {
+  if (!d || typeof d !== "object" || ![d.files, d.additions, d.deletions].every((n) => typeof n === "number")) {
+    throw new Error(`the facts provider gave a malformed diff for ${url}`);
+  }
+  return { files: d.files, additions: d.additions, deletions: d.deletions };
+}
+
+/** The Factory's reads: the provider rpc's answer when it gives one, else the fallback's. Resolved per call. */
+export function factsSource(fallback: FactsFallback, rpc?: FactsRpc, options: FactsSourceOptions = {}) {
+  const timeoutMs = options.timeoutMs ?? FACTS_RPC_TIMEOUT_MS;
+  const log = options.log ?? ((m: string) => console.warn(m));
+  /** Log the start and the end of a provider failure streak, not every failed read. */
+  let failing = false;
+
+  async function viaRpc<T>(name: string, url: string, check: (url: string, answer: T) => T): Promise<T | null> {
+    let pending: Promise<unknown> | null;
+    try {
+      pending = rpc?.(name, { url }) ?? null;
+    } catch (error) {
+      pending = Promise.reject(error);
+    }
+    if (!pending) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const answer = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`no answer in ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+        }),
+      ]);
+      if (answer === null || answer === undefined) return null;
+      const out = check(url, answer as T);
+      if (failing) log(`factory: the facts provider answers again (${name} ${url})`);
+      failing = false;
+      return out;
+    } catch (error) {
+      if (!failing) log(`factory: the facts provider's ${name} failed for ${url}, reading through gh until it answers again: ${(error as Error).message}`);
+      failing = true;
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   return {
     async prFacts(url: string): Promise<PrFacts> {
-      const p = factsProvider(url, target);
-      return p ? checked(url, await p.prFacts(url)) : fallback.prFacts(url);
+      return (await viaRpc<PrFacts>(PR_FACTS_RPC, url, checkedFacts)) ?? fallback.prFacts(url);
     },
     async prDiff(url: string): Promise<DiffSummary> {
-      const p = factsProvider(url, target);
-      return p?.prDiff ? p.prDiff(url) : fallback.prDiff(url);
+      return (await viaRpc<DiffSummary>(PR_DIFF_RPC, url, checkedDiff)) ?? fallback.prDiff(url);
     },
-    /** A URL the Factory can read facts of: a provider's, or the fallback's (a GitHub PR URL). */
+    /** A URL the Factory can read facts of: one the fallback reads (a GitHub PR URL), as every rpc read can fall back to it. */
     isPrUrl(url: string): boolean {
-      return factsProvider(url, target) !== null || fallback.matches(url);
+      return fallback.matches(url);
     },
   };
 }
