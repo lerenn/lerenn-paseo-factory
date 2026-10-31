@@ -1,8 +1,12 @@
 /**
- * Suspend and wake a workspace through the runtime it runs on. Plugins share a process, so a runtime plugin offers this
- * capability on `globalThis[Symbol.for("paseo.workspace-control")]`: a registry keyed by runtime id (the `runtime.id` of
+ * Suspend and wake a workspace through the runtime it runs on. A runtime plugin offers this capability on
+ * `globalThis[Symbol.for("paseo.workspace-control")]`: a registry keyed by runtime id (the `runtime.id` of
  * `workspaces.create`, the Factory's `runtime` setting), each entry a `WorkspaceControl`. Suspend keeps the workspace's
  * volume; wake brings it back. The Factory calls nothing else.
+ * Plugins do NOT share a process: Paseo runs each one in its own Node process, so `globalThis` is only the Factory's own and
+ * a runtime plugin's registration never reaches it. Until the runtime offers this over the Factory's extension endpoint (like
+ * the `pr_facts` rpc, `facts-provider.ts`), a run suspend reports the pod "not suspended (... offers no workspace control)" and
+ * a wake does nothing (the next prompt wakes the pod).
  */
 export const WORKSPACE_CONTROL_KEY = Symbol.for("paseo.workspace-control");
 

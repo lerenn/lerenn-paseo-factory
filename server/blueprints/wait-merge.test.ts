@@ -5,7 +5,7 @@ import { Engine, type GateState, type PrFacts, type Ports } from "./engine";
 import { RunStore } from "./store";
 import { parseBlueprint } from "./toml";
 import { settingsSchema } from "../../shared/blueprints/settings";
-import { factsSource, PR_FACTS_PROVIDER_KEY } from "./facts-provider";
+import { factsSource, PR_FACTS_RPC } from "./facts-provider";
 import { isGitHubPrUrl } from "./github";
 import { PrFactsCache } from "./pr-facts-cache";
 
@@ -15,8 +15,8 @@ const pr = (state: PrFacts["state"], head = "aaa111"): PrFacts => ({ url: PR, ex
 
 /**
  * How the engine reads the scripted facts: `port` hands them straight to the engine; `fallback` goes through the Factory's
- * cache and facts source with no provider registered (the `gh` path); `provider` through a registered facts provider, the
- * fallback refusing every read. The merge-queue behaviours must not depend on the path.
+ * cache and facts source with no provider registered (the `gh` path); `provider` through a provider's `pr_facts` rpc, the
+ * fallback refusing every read that the rpc answered (and failing like it during an outage). The merge-queue behaviours must not depend on the path.
  */
 type FactsPath = "port" | "fallback" | "provider";
 const PATHS: FactsPath[] = ["port", "fallback", "provider"];
@@ -68,18 +68,19 @@ function setup(opts: { criteriaReminderMinutes?: number; eventsMailTo?: string; 
       if (facts.fail) throw facts.fail;
       return { ...(facts.byUrl[url] ?? facts.pr) };
     };
-    const registry: Record<symbol, unknown> = {};
-    if (opts.path === "provider") registry[PR_FACTS_PROVIDER_KEY] = { github: { matches: isGitHubPrUrl, prFacts: (url: string) => (reads.provider++, scripted(url)) } };
+    const rpc = (name: string, { url }: { url: string }) => (opts.path === "provider" && name === PR_FACTS_RPC ? (reads.provider++, scripted(url)) : null);
     const source = factsSource(
       {
         matches: isGitHubPrUrl,
         prDiff: async () => ({ files: 0, additions: 0, deletions: 0 }),
         prFacts: (url) => {
+          // Through the provider path, an outage is GitHub's: the gh read behind a failed rpc read fails the same way.
+          if (opts.path === "provider" && facts.fail) return Promise.reject(facts.fail);
           reads.fallback++;
           return opts.path === "fallback" ? scripted(url) : Promise.reject(new Error("the fallback must not be read"));
         },
       },
-      registry,
+      rpc,
     );
     // ttlMs 0: every read reaches the source, like the scripted port (a merged PR stays cached, as in production).
     const cache = new PrFactsCache({ fetch: source.prFacts, now: () => time, ttlMs: 0 });

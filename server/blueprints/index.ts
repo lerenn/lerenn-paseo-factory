@@ -7,7 +7,7 @@ import { HttpError } from "../host";
 import { MODULE_NOTE } from "./note";
 import { Engine, NotFoundError, UsageError, type Ports } from "./engine";
 import { ghDiff, ghFacts, isGitHubPrUrl } from "./github";
-import { factsSource } from "./facts-provider";
+import { factsSource, type FactsRpc } from "./facts-provider";
 import { PrFactsCache } from "./pr-facts-cache";
 import { prUrlsOf, runSnapshot } from "./snapshot";
 import { loadCatalog, type Catalog } from "./loader";
@@ -138,8 +138,13 @@ export function startBlueprints(host: FactoryHost) {
   /** Spawns in progress: a workspace made whose agent does not exist yet must not be taken for an orphan. */
   let spawning = 0;
   // One cache for every PR lookup of the engine; GET /blueprints/runs only reads it (ADR "factory tickets view").
-  // Reads go to a registered facts provider (paseo-factory-github), else to the Factory's own `gh` reads.
-  const facts = factsSource({ prFacts: ghFacts, prDiff: ghDiff, matches: isGitHubPrUrl });
+  // Reads go to the read-only `pr_facts` / `pr_diff` rpc of the extension that offers it (the lab's pr-facts, a remote
+  // extension in its own process), else to the Factory's own `gh` reads.
+  const factsRpc: FactsRpc = (name, input) => {
+    const ext = host.listExtensions().find((e) => e.rpc.some((r) => r.name === name && r.readOnly === true));
+    return ext ? host.callExtension(ext.id, name, input, "factory") : null;
+  };
+  const facts = factsSource({ prFacts: ghFacts, prDiff: ghDiff, matches: isGitHubPrUrl }, factsRpc);
   const prFacts = new PrFactsCache({ fetch: facts.prFacts });
   let prunedAt = 0;
   /** Forget the facts of PRs no stored run refers to any more (at most every 10 min). */
